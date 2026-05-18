@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import numpy as np
 
@@ -15,6 +16,11 @@ from spot_check.constants import (
     PROTON_WATER_CSDA_RANGE_MM_POW,
 )
 from spot_check.models import CubeZAxisSpec
+
+# PyVista cube axes: closest triad shows Z numeric ticks; outer hides them on many VTK builds.
+PYVISTA_CUBE_AXES_LOCATION: str = "closest"
+PYVISTA_CUBE_AXES_TICKS: str = "outside"
+PYVISTA_CUBE_AXES_GRID: str = "back"
 
 
 def proton_cda_water_range_mm(energy_mev: np.ndarray | float) -> np.ndarray:
@@ -101,3 +107,48 @@ def cube_z_axis_spec(
     e_at_zmax = -zmax_p / s_view
     n_z = n_cube_axis_labels_for_mm_step(e_at_zmin, e_at_zmax, float(tick_mev))
     return CubeZAxisSpec(zmin_p, zmax_p, e_at_zmin, e_at_zmax, n_z, "Z (MeV)")
+
+
+def apply_pyvista_cube_z_axis(
+    actor: Any,
+    z_spec: CubeZAxisSpec,
+    *,
+    x_min: float,
+    x_max: float,
+    y_min: float,
+    y_max: float,
+) -> None:
+    """Apply scene bounds and Z tick labels for water-depth or MeV cube axes.
+
+    PyVista's ``actor.bounds`` setter copies scene Z into ``z_axis_range`` (negative mm).
+    Use VTK ``SetBounds`` plus explicit ``z_axis_range`` so labels stay positive depth mm.
+    """
+    actor.SetFlyModeToClosestTriad()
+    grid_loc = getattr(actor, "VTK_GRID_LINES_FURTHEST", None)
+    if grid_loc is not None and hasattr(actor, "SetGridLineLocation"):
+        actor.SetGridLineLocation(grid_loc)
+    actor.SetBounds(
+        float(x_min),
+        float(x_max),
+        float(y_min),
+        float(y_max),
+        float(z_spec.zmin_scene),
+        float(z_spec.zmax_scene),
+    )
+    actor.x_axis_range = (float(x_min), float(x_max))
+    actor.y_axis_range = (float(y_min), float(y_max))
+    # zmin scene bound → deepest label; zmax → shallowest (do not sort).
+    actor.z_axis_range = (float(z_spec.z_label_at_min), float(z_spec.z_label_at_max))
+    actor.n_zlabels = int(z_spec.n_zlabels)
+    actor.z_title = z_spec.ztitle
+    actor.z_label_visibility = True
+    actor.SetZAxisVisibility(True)
+    actor.SetZAxisTickVisibility(True)
+    actor.SetDrawXGridlines(True)
+    actor.SetDrawYGridlines(True)
+    actor.SetDrawZGridlines(True)
+    try:
+        actor.SetUseTextActor3D(True)
+    except Exception:
+        pass
+    actor._update_z_labels()

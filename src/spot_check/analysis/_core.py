@@ -145,11 +145,15 @@ from spot_check.exceptions import (
     PlanDataError,
 )
 from spot_check.geometry import (
-    cube_z_axis_spec as _cube_z_axis_spec,
-)
-from spot_check.geometry import (
+    PYVISTA_CUBE_AXES_GRID,
+    PYVISTA_CUBE_AXES_LOCATION,
+    PYVISTA_CUBE_AXES_TICKS,
+    apply_pyvista_cube_z_axis,
     n_cube_axis_labels_for_mm_step,
     nominal_mev_to_plot_z,
+)
+from spot_check.geometry import (
+    cube_z_axis_spec as _cube_z_axis_spec,
 )
 from spot_check.models import Comparison3DData, CubeZAxisSpec, DetectorRigidAlign2D
 
@@ -3414,36 +3418,14 @@ def show_comparison_3d_pyvista(
         return np.r_[plan_pts[:, 2], meas_pts[:, 2]]
 
     def _apply_cube_z_axis(actor: Any, z_spec: _CubeZAxisSpec) -> None:
-        """Refresh Z bounds/labels; camera-facing triad + back-face grid."""
-        # Outer fly mode hides Z numeric ticks; closest triad shows them.
-        actor.SetFlyModeToClosestTriad()
-        grid_loc = getattr(actor, "VTK_GRID_LINES_FURTHEST", None)
-        if grid_loc is not None and hasattr(actor, "SetGridLineLocation"):
-            actor.SetGridLineLocation(grid_loc)
-        # Use bounds property so PyVista refreshes labels; then restore mm/MeV Z range.
-        actor.bounds = (
-            float(x_min),
-            float(x_max),
-            float(y_min),
-            float(y_max),
-            z_spec.zmin_scene,
-            z_spec.zmax_scene,
+        apply_pyvista_cube_z_axis(
+            actor,
+            z_spec,
+            x_min=float(x_min),
+            x_max=float(x_max),
+            y_min=float(y_min),
+            y_max=float(y_max),
         )
-        # Preserve label order: zmin bound → z_label_at_min (deepest mm), zmax → shallowest.
-        actor.z_axis_range = (z_spec.z_label_at_min, z_spec.z_label_at_max)
-        actor.n_zlabels = int(z_spec.n_zlabels)
-        actor.z_title = z_spec.ztitle
-        actor.z_label_visibility = True
-        actor.SetZAxisVisibility(True)
-        actor.SetZAxisTickVisibility(True)
-        actor.SetDrawXGridlines(True)
-        actor.SetDrawYGridlines(True)
-        actor.SetDrawZGridlines(True)
-        try:
-            actor.SetUseTextActor3D(True)
-        except Exception:
-            pass
-        actor._update_z_labels()
 
     def _sync_cube_z_axis(
         pm: np.ndarray | None = None,
@@ -3469,8 +3451,8 @@ def show_comparison_3d_pyvista(
         _cube_axes["z_spec"] = z_spec
         try:
             _apply_cube_z_axis(actor, z_spec)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Cube Z-axis refresh failed: %s", exc)
 
     def _apply_nominal_energy_slice() -> None:
         nonlocal line_warn_actor, line_fail_actor
@@ -3776,9 +3758,9 @@ def show_comparison_3d_pyvista(
     _cube_axes["actor"] = pl.show_bounds(
         bounds=bounds_axes,
         axes_ranges=axes_ranges_scene,
-        grid="back",
-        ticks="outside",
-        location="closest",
+        grid=PYVISTA_CUBE_AXES_GRID,
+        ticks=PYVISTA_CUBE_AXES_TICKS,
+        location=PYVISTA_CUBE_AXES_LOCATION,
         all_edges=False,
         color="#8b949e",
         xtitle=prep.xlab,
