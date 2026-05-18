@@ -282,7 +282,7 @@ def run_gui() -> None:
     cb_pqa = QCheckBox("Color measured spots by plan QA (pass / warn / fail)")
     cb_pqa.setChecked(_bool_saved("plan_qa_coloring", True))
     rb_qa_pos = QRadioButton("Position (XY mm vs plan)")
-    rb_qa_dose = QRadioButton("Dose (layer MU % vs IX512 charge %)")
+    rb_qa_dose = QRadioButton("Dose (layer MU % vs measured weight %)")
     qa_mode_grp = QButtonGroup(win)
     qa_mode_grp.addButton(rb_qa_pos)
     qa_mode_grp.addButton(rb_qa_dose)
@@ -370,7 +370,8 @@ def run_gui() -> None:
             lbl_qa_pass.setText("Pass ≤ (pp)")
             lbl_qa_warn.setText("Warn ≤ (pp)")
             qa_hint_lbl.setText(
-                "Layer % vs plan MU: green pass; yellow/red over-dose; cyan/violet under-dose."
+                "Layer % vs plan MU using the Weight column (channel sum or fit amp A/B). "
+                "Green pass; yellow/red over-dose; cyan/violet under-dose."
             )
         else:
             lbl_qa_pass.setText("Pass ≤ (mm)")

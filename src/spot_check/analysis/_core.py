@@ -3062,6 +3062,7 @@ def show_comparison_3d_pyvista(
                 n_over_fail=nof,
                 n_under_warn=nuw,
                 n_under_fail=nuf,
+                spot_weight_mode=spot_weight_mode,
             )
         else:
             dist_qa, exp_xyz_qa = layer_nn_plan_xy_distances_and_expected_xyz(
