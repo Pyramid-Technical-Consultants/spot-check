@@ -59,7 +59,23 @@ def parse_aggregate_even_tail_n(raw: str) -> int | None:
     return None
 
 
+def plan_qa_thresholds_input_in_progress(pass_raw: str, warn_raw: str) -> bool:
+    """True while the user is mid-edit (e.g. ``0`` or ``0.`` before ``0.5``)."""
+
+    def partial(raw: str) -> bool:
+        s = str(raw).strip()
+        if not s:
+            return True
+        if s in ("-", "+", ".", "-.", "+."):
+            return True
+        return s.endswith(".")
+
+    return partial(pass_raw) or partial(warn_raw)
+
+
 def parse_plan_qa_thresholds(pass_raw: str, warn_raw: str) -> tuple[float, float] | None:
+    if plan_qa_thresholds_input_in_progress(pass_raw, warn_raw):
+        return None
     try:
         a = float(str(pass_raw).strip())
         b = float(str(warn_raw).strip())

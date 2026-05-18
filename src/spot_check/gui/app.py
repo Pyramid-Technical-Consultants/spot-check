@@ -83,6 +83,7 @@ from spot_check.gui.parsers import (
     parse_bounds_xy_tick_mm,
     parse_layer_gap_s,
     parse_plan_qa_thresholds,
+    plan_qa_thresholds_input_in_progress,
     parse_refill_xy_tol_mm,
     parse_viterbi_penalty_mm2,
     spot_weight_mode_from_saved,
@@ -401,12 +402,14 @@ def run_gui() -> None:
             e_bxy.setText(f"{xy_tick_save:g}")
         _stash_qa_thresholds()
         qa_thr = parse_plan_qa_thresholds(e_qa_pass.text(), e_qa_warn.text())
-        if qa_thr is None:
-            qa_thr = _qa_thr_by_mode[_current_plan_qa_mode()]
-            e_qa_pass.setText(f"{qa_thr[0]:g}")
-            e_qa_warn.setText(f"{qa_thr[1]:g}")
-        qa_pass_sv, qa_warn_sv = qa_thr
-        _qa_thr_by_mode[_current_plan_qa_mode()] = (float(qa_pass_sv), float(qa_warn_sv))
+        if qa_thr is not None:
+            qa_pass_sv, qa_warn_sv = qa_thr
+            _qa_thr_by_mode[_current_plan_qa_mode()] = (float(qa_pass_sv), float(qa_warn_sv))
+        else:
+            qa_pass_sv, qa_warn_sv = _qa_thr_by_mode[_current_plan_qa_mode()]
+            if not plan_qa_thresholds_input_in_progress(e_qa_pass.text(), e_qa_warn.text()):
+                e_qa_pass.setText(f"{qa_pass_sv:g}")
+                e_qa_warn.setText(f"{qa_warn_sv:g}")
         qa_mode_sv = _current_plan_qa_mode()
         pos_thr = _qa_thr_by_mode["position"]
         dose_thr = _qa_thr_by_mode["dose"]
@@ -1300,17 +1303,23 @@ def run_gui() -> None:
         if cb_pqa.isChecked():
             qa_pair = parse_plan_qa_thresholds(e_qa_pass.text(), e_qa_warn.text())
             if qa_pair is None:
-                _bump_load_generation_invalidate_async()
-                analysis.idle_slice_band_controls_qt(slice_qt_bindings)
-                unit = "pp" if qa_mode_run == "dose" else "mm"
-                _vtk_placeholder_message(
-                    f"QA: 0 < pass < warn ≤ 500 ({unit}).",
-                    error=True,
-                )
-                status_lbl.setText(f"Fix QA pass/warn ({unit}).")
-                return
-            qa_pass_f, qa_warn_f = qa_pair
-            _qa_thr_by_mode[qa_mode_run] = (float(qa_pass_f), float(qa_warn_f))
+                if plan_qa_thresholds_input_in_progress(
+                    e_qa_pass.text(), e_qa_warn.text()
+                ):
+                    qa_pass_f, qa_warn_f = _qa_thr_by_mode[qa_mode_run]
+                else:
+                    _bump_load_generation_invalidate_async()
+                    analysis.idle_slice_band_controls_qt(slice_qt_bindings)
+                    unit = "pp" if qa_mode_run == "dose" else "mm"
+                    _vtk_placeholder_message(
+                        f"QA: 0 < pass < warn ≤ 500 ({unit}).",
+                        error=True,
+                    )
+                    status_lbl.setText(f"Fix QA pass/warn ({unit}).")
+                    return
+            else:
+                qa_pass_f, qa_warn_f = qa_pair
+                _qa_thr_by_mode[qa_mode_run] = (float(qa_pass_f), float(qa_warn_f))
         layer_mode = "unified" if rb_unified.isChecked() else "gate_counter"
         trust_stay = float(sc_const.REFILL_TRUST_TIME_GAP_STAY_DIST_MM)
         if layer_mode == "unified":
@@ -1470,6 +1479,10 @@ def run_gui() -> None:
     load_signals.failed.connect(_on_pipeline_load_failed)
     _debounce.timeout.connect(_do_refresh)
 
+    def _commit_field_refresh() -> None:
+        _debounce.stop()
+        _do_refresh()
+
     for w in (
         e_dcm,
         e_csv,
@@ -1477,14 +1490,14 @@ def run_gui() -> None:
         e_refill,
         e_vit,
         e_bxy,
-        e_qa_pass,
-        e_qa_warn,
         e_agg_even,
     ):
         w.textChanged.connect(_schedule_refresh)
-        w.editingFinished.connect(
-            lambda: (_debounce.stop(), _do_refresh())  # immediate + cancel pending debounce
-        )
+        w.editingFinished.connect(_commit_field_refresh)
+    # QA thresholds: refresh on commit only so values like 0.5 can be typed without
+    # debounced validation firing on intermediate "0" or "0.".
+    for w in (e_qa_pass, e_qa_warn):
+        w.editingFinished.connect(_commit_field_refresh)
     combo_sw.currentIndexChanged.connect(_do_refresh)
     cb_weight_ch.toggled.connect(_do_refresh)
     cb_plan_fwhm.toggled.connect(_do_refresh)
