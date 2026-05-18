@@ -1,0 +1,68 @@
+name: Release Windows
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Override version (optional, e.g. 1.0.0). Leave empty to use src/spot_check/_version.py"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          elif [[ -n "${{ inputs.version }}" ]]; then
+            echo "value=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            VERSION=$(python -c "import pathlib, re; t=pathlib.Path('src/spot_check/_version.py').read_text(); print(re.search(r'__version__\\s*=\\s*[\"\\']([^\"\\']+)', t).group(1))")
+            echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify tag matches package version
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          FILE=$(python -c "import pathlib, re; t=pathlib.Path('src/spot_check/_version.py').read_text(); print(re.search(r'__version__\\s*=\\s*[\"\\']([^\"\\']+)', t).group(1))")
+          test "$TAG" = "$FILE"
+
+      - name: Build Windows bundle
+        shell: bash
+        env:
+          SPOT_CHECK_VERSION: ${{ steps.ver.outputs.value }}
+        run: bash ./scripts/build-windows.sh
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpotCheck-${{ steps.ver.outputs.value }}-windows-x64
+          path: |
+            dist/SpotCheck/
+            dist/SpotCheck-${{ steps.ver.outputs.value }}-windows-x64.zip
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/SpotCheck-${{ steps.ver.outputs.value }}-windows-x64.zip
+          generate_release_notes: true

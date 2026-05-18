@@ -216,3 +216,18 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# SpotCheck local GUI state (may contain file paths)
+.spot_check_gui_state.json
+.dicom_run_gui_state.json
+
+# Local sample / scratch data (never ship with builds)
+test_data/
+*.dcm
+*.csv
+
+# PyInstaller / local build artifacts
+.build-venv/
+build/
+dist/
+*.spec.bak
