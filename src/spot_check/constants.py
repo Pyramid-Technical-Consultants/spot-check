@@ -46,7 +46,8 @@ MEASURED_SIGMA_GLYPH_FALLBACK_MM: Final[float] = 0.35
 MEASURED_SIGMA_GLYPH_MIN_MM: Final[float] = 0.02
 MEASURED_SIGMA_GLYPH_MAX_MM: Final[float] = 50.0
 BOUNDS_XY_TICK_MM_DEFAULT: Final[float] = 5.0
-BOUNDS_XY_LABELS_MAX: Final[int] = 400
+# Max tick labels per cube axis (PyVista linspace count); keeps XY readable on large fields.
+BOUNDS_XY_LABELS_MAX: Final[int] = 11
 # Cube-axes Z tick step when Z is water-equivalent depth (mm).
 BOUNDS_Z_TICK_MM_DEFAULT: Final[float] = 5.0
 # Cube-axes Z when it shows nominal energy (MeV); linspace step target (~MeV, not mm).

@@ -3337,8 +3337,11 @@ def show_comparison_3d_pyvista(
         return np.r_[plan_pts[:, 2], meas_pts[:, 2]]
 
     def _apply_cube_z_axis(actor: Any, z_spec: _CubeZAxisSpec) -> None:
-        """Refresh Z bounds/labels; static edges + mm range (not scene −mm)."""
-        actor.SetFlyModeToStaticEdges()
+        """Refresh Z bounds/labels; outer-edge triad + back-face grid only."""
+        actor.SetFlyModeToOuterEdges()
+        grid_loc = getattr(actor, "VTK_GRID_LINES_FURTHEST", None)
+        if grid_loc is not None and hasattr(actor, "SetGridLineLocation"):
+            actor.SetGridLineLocation(grid_loc)
         actor.SetBounds(
             float(x_min),
             float(x_max),
@@ -3689,9 +3692,9 @@ def show_comparison_3d_pyvista(
     _cube_axes["actor"] = pl.show_bounds(
         bounds=bounds_axes,
         axes_ranges=axes_ranges_scene,
-        grid="all",
+        grid="back",
         ticks="inside",
-        location="all",
+        location="outer",
         all_edges=False,
         color="#8b949e",
         xtitle=prep.xlab,
