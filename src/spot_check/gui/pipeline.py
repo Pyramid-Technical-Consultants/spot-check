@@ -16,6 +16,7 @@ class GuiRefreshContext:
     dcm: Path
     csv_path: Path
     xy_tick_use: float
+    qa_mode: str
     qa_pass_f: float
     qa_warn_f: float
     layer_mode: str
@@ -35,6 +36,7 @@ class PipelineLoadOK:
     label: str
     planned: list[tuple[float, float, float]]
     plan_fwhm_xy: Any
+    plan_mu: Any
     n_plan_kept: int
     n_plan_raw: int
     measured_unaligned: list[tuple[float, ...]]
@@ -65,7 +67,7 @@ def pipeline_load_job(
     auto_align: bool = False,
 ) -> PipelineLoadOK:
     label = str(pydicom.dcmread(dcm, stop_before_pixels=True, force=True).get("RTPlanLabel", ""))
-    planned, plan_fwhm_xy, n_plan_kept, n_plan_raw = (
+    planned, plan_fwhm_xy, plan_mu, n_plan_kept, n_plan_raw = (
         analysis.planned_spot_xyz_and_counts_from_dicom(dcm)
     )
     measured_unaligned = analysis.measured_spot_abc_from_csv(
@@ -110,6 +112,7 @@ def pipeline_load_job(
         label=label,
         planned=planned,
         plan_fwhm_xy=plan_fwhm_xy,
+        plan_mu=plan_mu,
         n_plan_kept=n_plan_kept,
         n_plan_raw=n_plan_raw,
         measured_unaligned=list(measured_unaligned),

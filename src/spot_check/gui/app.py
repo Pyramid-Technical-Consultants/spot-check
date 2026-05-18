@@ -77,6 +77,7 @@ from spot_check import analysis
 from spot_check import constants as sc_const
 from spot_check._version import __version__
 from spot_check.constants import project_root
+from spot_check.export import build_combined_export_rows, write_combined_export_csv
 from spot_check.gui.parsers import (
     parse_aggregate_even_tail_n,
     parse_bounds_xy_tick_mm,
@@ -214,18 +215,39 @@ def run_gui() -> None:
     except (TypeError, ValueError):
         bxy0 = float(sc_const.BOUNDS_XY_TICK_MM_DEFAULT)
     e_bxy = QLineEdit(f"{bxy0:g}")
-    raw_qp = saved.get("plan_qa_pass_mm", sc_const.PLAN_QA_PASS_MM_DEFAULT)
-    raw_qw = saved.get("plan_qa_warn_mm", sc_const.PLAN_QA_WARN_MM_DEFAULT)
-    try:
-        qp0 = float(raw_qp)
-        qw0 = float(raw_qw)
-        if not (0.0 < qp0 < qw0 <= 500.0):
-            qp0, qw0 = (
-                float(sc_const.PLAN_QA_PASS_MM_DEFAULT),
-                float(sc_const.PLAN_QA_WARN_MM_DEFAULT),
-            )
-    except (TypeError, ValueError):
-        qp0, qw0 = float(sc_const.PLAN_QA_PASS_MM_DEFAULT), float(sc_const.PLAN_QA_WARN_MM_DEFAULT)
+    def _qa_thr_pair(
+        pass_key: str,
+        warn_key: str,
+        pass_def: float,
+        warn_def: float,
+    ) -> tuple[float, float]:
+        try:
+            qp = float(saved.get(pass_key, pass_def))
+            qw = float(saved.get(warn_key, warn_def))
+            if 0.0 < qp < qw <= 500.0:
+                return qp, qw
+        except (TypeError, ValueError):
+            pass
+        return float(pass_def), float(warn_def)
+
+    _qa_thr_by_mode: dict[str, tuple[float, float]] = {
+        "position": _qa_thr_pair(
+            "plan_qa_pass_mm",
+            "plan_qa_warn_mm",
+            sc_const.PLAN_QA_PASS_MM_DEFAULT,
+            sc_const.PLAN_QA_WARN_MM_DEFAULT,
+        ),
+        "dose": _qa_thr_pair(
+            "plan_qa_pass_pp",
+            "plan_qa_warn_pp",
+            sc_const.PLAN_QA_DOSE_PASS_PP_DEFAULT,
+            sc_const.PLAN_QA_DOSE_WARN_PP_DEFAULT,
+        ),
+    }
+    qa_mode0 = str(saved.get("plan_qa_mode", "position")).strip().lower()
+    if qa_mode0 not in ("position", "dose"):
+        qa_mode0 = "position"
+    qp0, qw0 = _qa_thr_by_mode[qa_mode0]
     e_qa_pass = QLineEdit(f"{qp0:g}")
     e_qa_warn = QLineEdit(f"{qw0:g}")
 
@@ -256,9 +278,18 @@ def run_gui() -> None:
     cb_align.setChecked(_bool_saved("auto_align_detector_xy", True))
     cb_agg = QCheckBox("One measured point per odd gate phase (weighted mean)")
     cb_agg.setChecked(_bool_saved("aggregate_spots_by_gate", True))
-    cb_pqa = QCheckBox("Color measured by plan XY distance (pass / warn / fail)")
+    cb_pqa = QCheckBox("Color measured spots by plan QA (pass / warn / fail)")
     cb_pqa.setChecked(_bool_saved("plan_qa_coloring", True))
-    cb_qa_lines = QCheckBox("QA lines: warn/fail → plan")
+    rb_qa_pos = QRadioButton("Position (XY mm vs plan)")
+    rb_qa_dose = QRadioButton("Dose (layer MU % vs IX512 charge %)")
+    qa_mode_grp = QButtonGroup(win)
+    qa_mode_grp.addButton(rb_qa_pos)
+    qa_mode_grp.addButton(rb_qa_dose)
+    if qa_mode0 == "dose":
+        rb_qa_dose.setChecked(True)
+    else:
+        rb_qa_pos.setChecked(True)
+    cb_qa_lines = QCheckBox("QA lines: warn/fail → plan (position only)")
     cb_qa_lines.setChecked(_bool_saved("plan_qa_draw_error_lines", False))
     cb_qa_hide = QCheckBox("Hide pass-tier in 3D (warn+fail only)")
     cb_qa_hide.setChecked(_bool_saved("plan_qa_hide_pass_spots", False))
@@ -324,6 +355,32 @@ def run_gui() -> None:
     status_lbl.setMinimumWidth(0)
     status_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
+    def _current_plan_qa_mode() -> str:
+        return "dose" if rb_qa_dose.isChecked() else "position"
+
+    def _stash_qa_thresholds() -> None:
+        thr = parse_plan_qa_thresholds(e_qa_pass.text(), e_qa_warn.text())
+        if thr is not None:
+            _qa_thr_by_mode[_current_plan_qa_mode()] = thr
+
+    def _apply_qa_mode_ui(*, refresh_fields: bool = True) -> None:
+        mode = _current_plan_qa_mode()
+        if mode == "dose":
+            lbl_qa_pass.setText("Pass ≤ (pp)")
+            lbl_qa_warn.setText("Warn ≤ (pp)")
+            qa_hint_lbl.setText(
+                "Layer % vs plan MU: green pass; yellow/red over-dose; cyan/violet under-dose."
+            )
+        else:
+            lbl_qa_pass.setText("Pass ≤ (mm)")
+            lbl_qa_warn.setText("Warn ≤ (mm)")
+            qa_hint_lbl.setText("Need 0 < pass < warn.")
+        if refresh_fields:
+            qp, qw = _qa_thr_by_mode[mode]
+            e_qa_pass.setText(f"{qp:g}")
+            e_qa_warn.setText(f"{qw:g}")
+        _sync_qa_lines()
+
     def persist() -> None:
         gap = parse_layer_gap_s(e_gap.text())
         if gap is None:
@@ -342,15 +399,17 @@ def run_gui() -> None:
         if xy_tick_save is None:
             xy_tick_save = float(sc_const.BOUNDS_XY_TICK_MM_DEFAULT)
             e_bxy.setText(f"{xy_tick_save:g}")
+        _stash_qa_thresholds()
         qa_thr = parse_plan_qa_thresholds(e_qa_pass.text(), e_qa_warn.text())
         if qa_thr is None:
-            qa_thr = (
-                float(sc_const.PLAN_QA_PASS_MM_DEFAULT),
-                float(sc_const.PLAN_QA_WARN_MM_DEFAULT),
-            )
+            qa_thr = _qa_thr_by_mode[_current_plan_qa_mode()]
             e_qa_pass.setText(f"{qa_thr[0]:g}")
             e_qa_warn.setText(f"{qa_thr[1]:g}")
         qa_pass_sv, qa_warn_sv = qa_thr
+        _qa_thr_by_mode[_current_plan_qa_mode()] = (float(qa_pass_sv), float(qa_warn_sv))
+        qa_mode_sv = _current_plan_qa_mode()
+        pos_thr = _qa_thr_by_mode["position"]
+        dose_thr = _qa_thr_by_mode["dose"]
         tail_n = parse_aggregate_even_tail_n(e_agg_even.text())
         if tail_n is None:
             tail_n = int(sc_const.AGGREGATE_EVEN_ROWS_AFTER_ODD_DEFAULT)
@@ -384,8 +443,11 @@ def run_gui() -> None:
             auto_align_detector_xy=cb_align.isChecked(),
             bounds_xy_tick_mm=float(xy_tick_save),
             plan_qa_coloring=cb_pqa.isChecked(),
-            plan_qa_pass_mm=float(qa_pass_sv),
-            plan_qa_warn_mm=float(qa_warn_sv),
+            plan_qa_mode=qa_mode_sv,
+            plan_qa_pass_mm=float(pos_thr[0]),
+            plan_qa_warn_mm=float(pos_thr[1]),
+            plan_qa_pass_pp=float(dose_thr[0]),
+            plan_qa_warn_pp=float(dose_thr[1]),
             plan_qa_draw_error_lines=cb_qa_lines.isChecked(),
             plan_qa_hide_pass_spots=cb_qa_hide.isChecked(),
             scale_plan_spots_by_dicom_fwhm=cb_plan_fwhm.isChecked(),
@@ -422,10 +484,13 @@ def run_gui() -> None:
 
     def _sync_qa_lines() -> None:
         en = cb_pqa.isChecked()
+        dose = _current_plan_qa_mode() == "dose"
         if not en:
             cb_qa_lines.setChecked(False)
             cb_qa_hide.setChecked(False)
-        cb_qa_lines.setEnabled(en)
+        if dose:
+            cb_qa_lines.setChecked(False)
+        cb_qa_lines.setEnabled(en and not dose)
         cb_qa_hide.setEnabled(en)
 
     def _sync_agg_even() -> None:
@@ -476,6 +541,12 @@ def run_gui() -> None:
     h_csv.addWidget(b_csv)
     fl.addRow("Plan (.dcm)", row_dcm)
     fl.addRow("CSV", row_csv)
+    btn_export_csv = QPushButton("Export combined CSV…")
+    btn_export_csv.setToolTip(
+        "Save one row per measured spot (aggregated or per-row per Aggregation), "
+        "with nearest plan XY, energy, and meterset weight (MU) on that layer."
+    )
+    fl.addRow("", btn_export_csv)
 
     gb_layer = QGroupBox("Layer assignment")
     vl_layer = QVBoxLayout(gb_layer)
@@ -526,20 +597,30 @@ def run_gui() -> None:
     wtick.setLayout(rt)
     vdisp.addWidget(wtick)
 
-    gb_qa = QGroupBox("Plan QA (XY vs plan)")
+    gb_qa = QGroupBox("Plan QA")
     vqa = QVBoxLayout(gb_qa)
     vqa.addWidget(cb_pqa)
+    qa_mode_row = QHBoxLayout()
+    qa_mode_row.addWidget(rb_qa_pos)
+    qa_mode_row.addWidget(rb_qa_dose)
+    wqa_mode = QWidget()
+    wqa_mode.setLayout(qa_mode_row)
+    vqa.addWidget(wqa_mode)
     vqa.addWidget(cb_qa_lines)
     vqa.addWidget(cb_qa_hide)
+    lbl_qa_pass = QLabel("Pass ≤ (mm)")
+    lbl_qa_warn = QLabel("Warn ≤ (mm)")
     qa_th = QHBoxLayout()
-    qa_th.addWidget(QLabel("Pass ≤ (mm)"))
+    qa_th.addWidget(lbl_qa_pass)
     qa_th.addWidget(e_qa_pass)
-    qa_th.addWidget(QLabel("Warn ≤ (mm)"))
+    qa_th.addWidget(lbl_qa_warn)
     qa_th.addWidget(e_qa_warn)
     wqa = QWidget()
     wqa.setLayout(qa_th)
     vqa.addWidget(wqa)
-    vqa.addWidget(_add_hint_lbl("Need 0 < pass < warn."))
+    qa_hint_lbl = _add_hint_lbl("Need 0 < pass < warn.")
+    vqa.addWidget(qa_hint_lbl)
+    _apply_qa_mode_ui(refresh_fields=False)
 
     gb_slice = QGroupBox("5-layer band")
     vsl = QVBoxLayout(gb_slice)
@@ -661,6 +742,7 @@ def run_gui() -> None:
         "pipeline_key": None,
         "planned": None,
         "plan_fwhm_xy": None,
+        "plan_mu": None,
         "n_plan_kept": 0,
         "n_plan_raw": 0,
         "measured_unaligned": None,
@@ -902,8 +984,20 @@ def run_gui() -> None:
             detector_align_caption=detector_align_caption,
             bounds_xy_tick_mm=ctx.xy_tick_use,
             plan_qa_coloring=cb_pqa.isChecked(),
-            plan_qa_pass_mm=ctx.qa_pass_f,
-            plan_qa_warn_mm=ctx.qa_warn_f,
+            plan_qa_mode=ctx.qa_mode,
+            plan_qa_pass_mm=ctx.qa_pass_f
+            if ctx.qa_mode == "position"
+            else float(sc_const.PLAN_QA_PASS_MM_DEFAULT),
+            plan_qa_warn_mm=ctx.qa_warn_f
+            if ctx.qa_mode == "position"
+            else float(sc_const.PLAN_QA_WARN_MM_DEFAULT),
+            plan_qa_pass_pp=ctx.qa_pass_f
+            if ctx.qa_mode == "dose"
+            else float(sc_const.PLAN_QA_DOSE_PASS_PP_DEFAULT),
+            plan_qa_warn_pp=ctx.qa_warn_f
+            if ctx.qa_mode == "dose"
+            else float(sc_const.PLAN_QA_DOSE_WARN_PP_DEFAULT),
+            plan_mu=_plot_cache.get("plan_mu"),
             plan_qa_draw_error_lines=cb_qa_lines.isChecked(),
             plan_qa_hide_pass_spots=cb_qa_hide.isChecked(),
             plan_fwhm_xy_mm=plan_fwhm_xy,
@@ -948,13 +1042,20 @@ def run_gui() -> None:
         if cb_align.isChecked() and detector_align_caption:
             meas_line += f". {detector_align_caption}"
         if cb_pqa.isChecked():
-            meas_line += (
-                f". Plan QA colors: d≤{ctx.qa_pass_f:g} pass, "
-                f"{ctx.qa_pass_f:g}<d≤{ctx.qa_warn_f:g} warn, d>{ctx.qa_warn_f:g} fail"
-            )
+            if ctx.qa_mode == "dose":
+                meas_line += (
+                    f". Dose QA: |Δ|≤{ctx.qa_pass_f:g} pp pass, "
+                    f"{ctx.qa_pass_f:g}<|Δ|≤{ctx.qa_warn_f:g} pp warn, "
+                    f"|Δ|>{ctx.qa_warn_f:g} pp fail"
+                )
+            else:
+                meas_line += (
+                    f". Position QA: d≤{ctx.qa_pass_f:g} mm pass, "
+                    f"{ctx.qa_pass_f:g}<d≤{ctx.qa_warn_f:g} mm warn, d>{ctx.qa_warn_f:g} mm fail"
+                )
             if cb_qa_hide.isChecked():
                 meas_line += "; pass-tier spots hidden in 3D"
-            if cb_qa_lines.isChecked():
+            if cb_qa_lines.isChecked() and ctx.qa_mode == "position":
                 meas_line += "; error lines for warn+fail"
         if cb_meas_sigma.isChecked():
             meas_line += ". Measured: σ-sized ellipsoids in world XY (mm; see 3D caption)"
@@ -977,6 +1078,7 @@ def run_gui() -> None:
         _plot_cache["pipeline_key"] = ld.pipeline_key
         _plot_cache["planned"] = ld.planned
         _plot_cache["plan_fwhm_xy"] = ld.plan_fwhm_xy
+        _plot_cache["plan_mu"] = ld.plan_mu
         _plot_cache["n_plan_kept"] = ld.n_plan_kept
         _plot_cache["n_plan_raw"] = ld.n_plan_raw
         _plot_cache["measured_unaligned"] = ld.measured_unaligned
@@ -1020,12 +1122,132 @@ def run_gui() -> None:
         _plot_cache["align_cache_key"] = None
         _plot_cache["planned"] = None
         _plot_cache["plan_fwhm_xy"] = None
+        _plot_cache["plan_mu"] = None
         _plot_cache["plotter"] = None
         analysis.idle_slice_band_controls_qt(slice_qt_bindings)
         short = msg if len(msg) < 160 else f"{msg[:157]}…"
         _vtk_placeholder_message(short, error=True)
         status_lbl.setText(short)
         _hide_loading(generation)
+
+    def export_combined_csv() -> None:
+        dcm_s = e_dcm.text().strip()
+        csv_s = e_csv.text().strip()
+        if not dcm_s or not csv_s:
+            status_lbl.setText("Export: set plan (.dcm) and CSV paths first.")
+            return
+        dcm = Path(dcm_s)
+        csv_path = Path(csv_s)
+        if not dcm.is_file():
+            status_lbl.setText(f"Export: plan not found: {dcm}")
+            return
+        if not csv_path.is_file():
+            status_lbl.setText(f"Export: CSV not found: {csv_path}")
+            return
+
+        layer_mode = "unified" if rb_unified.isChecked() else "gate_counter"
+        trust_stay = float(sc_const.REFILL_TRUST_TIME_GAP_STAY_DIST_MM)
+        if layer_mode == "unified":
+            gap = parse_layer_gap_s(e_gap.text())
+            if gap is None:
+                status_lbl.setText("Export: fix min Δt (s) before exporting.")
+                return
+            xy_tol = parse_refill_xy_tol_mm(e_refill.text())
+            if xy_tol is None:
+                status_lbl.setText("Export: fix refill XY (mm) before exporting.")
+                return
+            vp_f = parse_viterbi_penalty_mm2(e_vit.text())
+            if vp_f is None:
+                status_lbl.setText("Export: fix advance penalty (mm²) before exporting.")
+                return
+        else:
+            gap = float(sc_const.TIME_LAYER_GAP_S_DEFAULT)
+            xy_tol = float(sc_const.REFILL_SAME_SPOT_XY_TOLERANCE_MM)
+            vp_f = parse_viterbi_penalty_mm2(e_vit.text())
+            if vp_f is None:
+                vp_f = float(sc_const.VITERBI_LAYER_ADVANCE_PENALTY_MM2_DEFAULT)
+
+        agg_even_n = parse_aggregate_even_tail_n(e_agg_even.text())
+        if agg_even_n is None:
+            status_lbl.setText(
+                f"Export: even-row merge must be 0–{sc_const.AGGREGATE_EVEN_TAIL_MAX}."
+            )
+            return
+
+        sw_lbl_run = combo_sw.currentText().strip()
+        sw_internal_run = _SW_MODE_BY_LABEL.get(sw_lbl_run, sc_const.SPOT_WEIGHT_MODE_DEFAULT)
+        try:
+            spot_weight_mode_run = analysis.normalize_measured_spot_weight_mode(sw_internal_run)
+        except ValueError as ex:
+            status_lbl.setText(f"Export: {ex}")
+            return
+
+        aggregate_spots = bool(cb_agg.isChecked())
+        try:
+            planned = _plot_cache.get("planned")
+            plan_mu = _plot_cache.get("plan_mu")
+            if planned is None or plan_mu is None:
+                planned, _, plan_mu, _, _ = analysis.planned_spot_xyz_and_counts_from_dicom(dcm)
+            label = str(_plot_cache.get("label") or "")
+            measured = analysis.measured_spot_abc_from_csv(
+                csv_path,
+                max_points=None,
+                planned_xyz=planned,
+                a_is_x=False,
+                layer_mode=layer_mode,
+                layer_gap_s=float(gap),
+                refill_same_spot_xy_tol_mm=float(xy_tol),
+                refill_trust_time_gap_stay_dist_mm=trust_stay,
+                viterbi_advance_penalty_mm2=float(vp_f),
+                aggregate_spots=aggregate_spots,
+                aggregate_even_rows_after_odd=int(agg_even_n),
+                spot_weight_mode=spot_weight_mode_run,
+            )
+            if not measured:
+                status_lbl.setText("Export: no measured rows.")
+                return
+            aligned = bool(cb_align.isChecked())
+            if aligned:
+                measured, _align_info = analysis.align_measured_to_plan_detector_xy(
+                    planned,
+                    measured,
+                    a_is_x=False,
+                )
+            suffix = "-spots-agg.csv" if aggregate_spots else "-spots.csv"
+            default_out = csv_path.with_name(csv_path.stem + suffix)
+            out_path, _ = QFileDialog.getSaveFileName(
+                win,
+                "Export combined CSV",
+                str(default_out),
+                "CSV (*.csv)",
+            )
+            if not out_path:
+                return
+            rows = build_combined_export_rows(
+                planned,
+                plan_mu,
+                measured,
+                aggregated=aggregate_spots,
+                positions_aligned_to_plan=aligned,
+            )
+            write_combined_export_csv(
+                Path(out_path),
+                rows,
+                metadata={
+                    "rt_plan_label": label,
+                    "acquisition_csv": csv_path.name,
+                    "layer_mode": layer_mode,
+                    "aggregate_spots": "yes" if aggregate_spots else "no",
+                    "spot_weight_mode": spot_weight_mode_run,
+                    "aligned_measured_xy": "yes" if aligned else "no",
+                },
+            )
+            status_lbl.setText(f"Exported {len(rows)} spot row(s) to {out_path}")
+        except Exception as ex:
+            status_lbl.setText(f"Export failed: {ex}")
+            logger.exception("Combined CSV export failed")
+
+    btn_export_csv.clicked.connect(export_combined_csv)
 
     def _bump_load_generation_invalidate_async() -> None:
         nonlocal load_generation, pending_ctx
@@ -1064,20 +1286,31 @@ def run_gui() -> None:
             )
             status_lbl.setText("Fix XY ticks (mm).")
             return
-        qa_pass_f = float(sc_const.PLAN_QA_PASS_MM_DEFAULT)
-        qa_warn_f = float(sc_const.PLAN_QA_WARN_MM_DEFAULT)
+        qa_mode_run = _current_plan_qa_mode()
+        qa_pass_f = float(
+            sc_const.PLAN_QA_DOSE_PASS_PP_DEFAULT
+            if qa_mode_run == "dose"
+            else sc_const.PLAN_QA_PASS_MM_DEFAULT
+        )
+        qa_warn_f = float(
+            sc_const.PLAN_QA_DOSE_WARN_PP_DEFAULT
+            if qa_mode_run == "dose"
+            else sc_const.PLAN_QA_WARN_MM_DEFAULT
+        )
         if cb_pqa.isChecked():
             qa_pair = parse_plan_qa_thresholds(e_qa_pass.text(), e_qa_warn.text())
             if qa_pair is None:
                 _bump_load_generation_invalidate_async()
                 analysis.idle_slice_band_controls_qt(slice_qt_bindings)
+                unit = "pp" if qa_mode_run == "dose" else "mm"
                 _vtk_placeholder_message(
-                    "QA: 0 < pass < warn ≤ 500 (mm).",
+                    f"QA: 0 < pass < warn ≤ 500 ({unit}).",
                     error=True,
                 )
-                status_lbl.setText("Fix QA pass/warn (mm).")
+                status_lbl.setText(f"Fix QA pass/warn ({unit}).")
                 return
             qa_pass_f, qa_warn_f = qa_pair
+            _qa_thr_by_mode[qa_mode_run] = (float(qa_pass_f), float(qa_warn_f))
         layer_mode = "unified" if rb_unified.isChecked() else "gate_counter"
         trust_stay = float(sc_const.REFILL_TRUST_TIME_GAP_STAY_DIST_MM)
         if layer_mode == "unified":
@@ -1149,6 +1382,7 @@ def run_gui() -> None:
                 dcm=dcm,
                 csv_path=csv_path,
                 xy_tick_use=float(xy_tick_use),
+                qa_mode=qa_mode_run,
                 qa_pass_f=qa_pass_f,
                 qa_warn_f=qa_warn_f,
                 layer_mode=layer_mode,
@@ -1259,6 +1493,14 @@ def run_gui() -> None:
     cb_align.toggled.connect(_do_refresh)
     cb_agg.toggled.connect(lambda _c: (_sync_agg_even(), _do_refresh()))
     cb_pqa.toggled.connect(lambda _c: (_sync_qa_lines(), _do_refresh()))
+
+    def _on_qa_mode_changed() -> None:
+        _stash_qa_thresholds()
+        _apply_qa_mode_ui(refresh_fields=True)
+        _do_refresh()
+
+    rb_qa_pos.toggled.connect(lambda _c: _on_qa_mode_changed() if _c else None)
+    rb_qa_dose.toggled.connect(lambda _c: _on_qa_mode_changed() if _c else None)
     cb_qa_lines.toggled.connect(_do_refresh)
     cb_qa_hide.toggled.connect(_do_refresh)
     cb_view_proj.toggled.connect(_do_refresh)

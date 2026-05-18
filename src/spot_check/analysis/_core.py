@@ -102,6 +102,8 @@ from spot_check.constants import (
     _PARTIAL_AXIS_MEAS_COLOR_3D,
     _PLAN_COLOR_3D,
     _PLAN_FWHM_GLYPH_Z_SPAN_FRAC,
+    _PLAN_QA_DOSE_UNDER_FAIL_HEX,
+    _PLAN_QA_DOSE_UNDER_WARN_HEX,
     _PLAN_QA_FAIL_HEX,
     _PLAN_QA_PASS_HEX,
     _PLAN_QA_WARN_HEX,
@@ -120,6 +122,8 @@ from spot_check.constants import (
     MEASURED_SIGMA_GLYPH_MAX_MM,
     MEASURED_SIGMA_GLYPH_MIN_MM,
     MEASURED_SIGMA_GLYPH_SCALE_DEFAULT,
+    PLAN_QA_DOSE_PASS_PP_DEFAULT,
+    PLAN_QA_DOSE_WARN_PP_DEFAULT,
     PLAN_QA_PASS_MM_DEFAULT,
     PLAN_QA_WARN_MM_DEFAULT,
     REFILL_REJECT_EXTRA_MM,
@@ -338,8 +342,11 @@ def _measured_row_with_sigma(
     partial: int,
     sa: float | None,
     sb: float | None,
+    *,
+    channel_sum_na: float | None = None,
 ) -> tuple[float, ...]:
-    """One measured row as 7-tuple ``(A, B, layer, weight, partial, σ_A, σ_B)``."""
+    """One measured row as 8-tuple ``(A, B, layer, weight, partial, σ_A, σ_B, channel_sum_nA)``."""
+    ch = float(channel_sum_na) if channel_sum_na is not None else float(weight)
     return (
         float(a),
         float(b),
@@ -348,7 +355,17 @@ def _measured_row_with_sigma(
         int(partial),
         _sigma_cell_to_float(sa),
         _sigma_cell_to_float(sb),
+        ch,
     )
+
+
+def measured_charge_na_from_tuple(tup: tuple[float, ...]) -> float:
+    """IX512 channel sum (nA) for dose QA; falls back to tuple weight if needed."""
+    if len(tup) > 7:
+        v = float(tup[7])
+        if math.isfinite(v) and v > 0.0:
+            return v
+    return max(float(tup[3]), 1e-18)
 
 
 def measured_spot_weight_from_row(row: dict[str, str], mode: str) -> float:
@@ -446,7 +463,10 @@ def _finalize_spot_channel_weighted(
         ws,
         [r[6] is not None and math.isfinite(float(r[6])) for r in buf],
     )
-    return (a_mean, b_mean, lay_mean, sw, pcd_out, sig_a_mean, sig_b_mean)
+    ch_vals = [float(r[7]) if len(r) > 7 else float(r[3]) for r in buf]
+    ch_ok = [math.isfinite(float(v)) and float(v) > 0 for v in ch_vals]
+    ch_mean = _weighted_mean_masked(ch_vals, ws, ch_ok)
+    return (a_mean, b_mean, lay_mean, sw, pcd_out, sig_a_mean, sig_b_mean, ch_mean)
 
 
 def _apply_gate_spot_aggregation(
@@ -476,7 +496,8 @@ def _apply_gate_spot_aggregation(
         if prev_g is not None and prev_g % 2 == 1 and g != prev_g:
             flush()
         prev_g = g
-        buf.append((r[0], r[1], r[2], r[3], r[4], sa, sb))
+        ch_n = float(r[7]) if len(r) > 7 else float(r[3])
+        buf.append((r[0], r[1], r[2], r[3], r[4], sa, sb, ch_n))
     flush()
     return out
 
@@ -514,7 +535,8 @@ def _measured_tuple_for_spot_weighted_mean(
         raw = t[6]
         if raw is not None and math.isfinite(float(raw)):
             sb = float(raw)
-    return (a, b, lay, w, pcd, sa, sb)
+    ch = float(t[7]) if len(t) >= 8 else float(w)
+    return (a, b, lay, w, pcd, sa, sb, ch)
 
 
 def _hex_to_rgb_u8(hex_color: str) -> tuple[int, int, int]:
@@ -647,6 +669,74 @@ def layer_nn_plan_xy_distances_and_expected_xyz(
     return out_d, out_xyz
 
 
+def layer_nn_plan_match_for_measured(
+    planned_xyz: list[tuple[float, float, float]],
+    plan_mu: np.ndarray | None,
+    measured_rows: list[tuple[float, ...]],
+    *,
+    a_is_x: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Nearest plan spot on each row's layer: distance (mm), expected XYZ, meterset weight (MU)."""
+    dist, exp_xyz = layer_nn_plan_xy_distances_and_expected_xyz(
+        planned_xyz, measured_rows, a_is_x=a_is_x
+    )
+    n = int(dist.shape[0])
+    exp_mu = np.full(n, np.nan, dtype=np.float64)
+    if plan_mu is None or len(plan_mu) != len(planned_xyz):
+        return dist, exp_xyz, exp_mu
+
+    layer_e = nominal_layer_energies_mev(planned_xyz)
+    if not layer_e:
+        return dist, exp_xyz, exp_mu
+
+    mu_buckets: list[list[float]] = [[] for _ in layer_e]
+    for i, (px, py, pe) in enumerate(planned_xyz):
+        pf = float(pe)
+        mu_v = float(plan_mu[i])
+        for k, e in enumerate(layer_e):
+            if abs(pf - float(e)) <= 1e-4:
+                mu_buckets[k].append(mu_v)
+                break
+
+    li_raw = np.rint(np.asarray([float(t[2]) for t in measured_rows], dtype=np.float64)).astype(
+        np.intp, copy=False
+    )
+    hi = len(layer_e) - 1
+    np.clip(li_raw, 0, hi, out=li_raw)
+
+    if a_is_x:
+        mx = np.fromiter((float(t[0]) for t in measured_rows), dtype=np.float64, count=n)
+        my = np.fromiter((float(t[1]) for t in measured_rows), dtype=np.float64, count=n)
+    else:
+        mx = np.fromiter((float(t[1]) for t in measured_rows), dtype=np.float64, count=n)
+        my = np.fromiter((float(t[0]) for t in measured_rows), dtype=np.float64, count=n)
+    meas_xy = np.column_stack([mx, my])
+
+    layer_xyz = _plan_xyz_by_energy_layer(planned_xyz, layer_e)
+    trees = _layer_xy_kdtrees_for_qa(layer_xyz)
+
+    for ell in range(len(layer_e)):
+        mask = li_raw == ell
+        if not np.any(mask):
+            continue
+        arr = np.asarray(layer_xyz[ell], dtype=np.float64).reshape(-1, 3)
+        mu_arr = np.asarray(mu_buckets[ell], dtype=np.float64).reshape(-1)
+        if arr.shape[0] == 0 or mu_arr.shape[0] != arr.shape[0]:
+            continue
+        q = meas_xy[mask]
+        tree = trees[ell] if ell < len(trees) else None
+        if tree is not None:
+            _dist, idx = _kdtree_query_k1(tree, q)
+            idx = np.asarray(idx, dtype=np.intp).reshape(-1)
+            exp_mu[mask] = mu_arr[idx]
+        else:
+            xy_layer = arr[:, 0:2]
+            d2 = np.sum((xy_layer[None, :, :] - q[:, None, :]) ** 2, axis=2)
+            j = np.argmin(d2, axis=1)
+            exp_mu[mask] = mu_arr[j]
+    return dist, exp_xyz, exp_mu
+
+
 def distances_measured_xy_to_layer_nn_plan_mm(
     planned_xyz: list[tuple[float, float, float]],
     measured_rows: list[tuple[float, ...]],
@@ -697,6 +787,78 @@ def measured_rgba_by_plan_qa(
     else:
         rgba[:, 3] = au
     return rgba
+
+
+def measured_rgba_by_plan_dose_qa(
+    signed_delta_pp: np.ndarray,
+    *,
+    pass_pp: float,
+    warn_pp: float,
+    alpha_u8: np.ndarray | None = None,
+) -> np.ndarray:
+    """RGBA per point from signed layer dose error (pp): + = over-dose, − = under-dose.
+
+    Over: yellow warn / red fail (same as position QA). Under: sky warn / violet fail.
+    """
+    if warn_pp <= pass_pp or pass_pp < 0:
+        raise ValueError("dose QA: require 0 ≤ pass_pp < warn_pp")
+    s = np.asarray(signed_delta_pp, dtype=np.float64).reshape(-1)
+    n = int(s.shape[0])
+    if alpha_u8 is not None:
+        au = np.asarray(alpha_u8, dtype=np.uint8).reshape(-1)
+        if au.shape[0] != n:
+            raise ValueError("alpha_u8 length must match signed_delta_pp")
+    rp, gp, bp = _hex_to_rgb_u8(_PLAN_QA_PASS_HEX)
+    rw, gw, bw = _hex_to_rgb_u8(_PLAN_QA_WARN_HEX)
+    rf, gf, bf = _hex_to_rgb_u8(_PLAN_QA_FAIL_HEX)
+    ruw, guw, buw = _hex_to_rgb_u8(_PLAN_QA_DOSE_UNDER_WARN_HEX)
+    ruf, guf, buf = _hex_to_rgb_u8(_PLAN_QA_DOSE_UNDER_FAIL_HEX)
+    rgba = np.zeros((n, 4), dtype=np.uint8)
+    finite = np.isfinite(s)
+    a = np.abs(s)
+    pass_m = finite & (a <= pass_pp)
+    over_warn_m = finite & (s > pass_pp) & (s <= warn_pp)
+    over_fail_m = finite & (s > warn_pp)
+    under_warn_m = finite & (s < -pass_pp) & (s >= -warn_pp)
+    under_fail_m = finite & (s < -warn_pp)
+    rgba[pass_m, 0] = np.uint8(rp)
+    rgba[pass_m, 1] = np.uint8(gp)
+    rgba[pass_m, 2] = np.uint8(bp)
+    rgba[over_warn_m, 0] = np.uint8(rw)
+    rgba[over_warn_m, 1] = np.uint8(gw)
+    rgba[over_warn_m, 2] = np.uint8(bw)
+    rgba[over_fail_m, 0] = np.uint8(rf)
+    rgba[over_fail_m, 1] = np.uint8(gf)
+    rgba[over_fail_m, 2] = np.uint8(bf)
+    rgba[under_warn_m, 0] = np.uint8(ruw)
+    rgba[under_warn_m, 1] = np.uint8(guw)
+    rgba[under_warn_m, 2] = np.uint8(buw)
+    rgba[under_fail_m, 0] = np.uint8(ruf)
+    rgba[under_fail_m, 1] = np.uint8(guf)
+    rgba[under_fail_m, 2] = np.uint8(buf)
+    if alpha_u8 is None:
+        rgba[:, 3] = np.uint8(255)
+    else:
+        rgba[:, 3] = au
+    return rgba
+
+
+def plan_dose_qa_tier_counts(
+    signed_delta_pp: np.ndarray,
+    *,
+    pass_pp: float,
+    warn_pp: float,
+) -> tuple[int, int, int, int, int, int]:
+    """Counts: pass, over_warn, over_fail, under_warn, under_fail (non-finite excluded)."""
+    s = np.asarray(signed_delta_pp, dtype=np.float64).reshape(-1)
+    finite = np.isfinite(s)
+    a = np.abs(s)
+    n_pass = int(np.count_nonzero(finite & (a <= pass_pp)))
+    n_over_warn = int(np.count_nonzero(finite & (s > pass_pp) & (s <= warn_pp)))
+    n_over_fail = int(np.count_nonzero(finite & (s > warn_pp)))
+    n_under_warn = int(np.count_nonzero(finite & (s < -pass_pp) & (s >= -warn_pp)))
+    n_under_fail = int(np.count_nonzero(finite & (s < -warn_pp)))
+    return n_pass, n_over_warn, n_over_fail, n_under_warn, n_under_fail
 
 
 def _plan_qa_error_line_polylines(
@@ -779,6 +941,161 @@ def format_plan_qa_caption(
     return (
         f"Plan QA: pass d≤{pass_mm:g} mm; warn {pass_mm:g}<d≤{warn_mm:g} mm; fail d>{warn_mm:g} mm "
         f"({n_pass} pass / {n_warn} warn / {n_fail} fail)."
+    )
+
+
+def _layer_plan_mu_by_energy_layer(
+    planned_xyz: list[tuple[float, float, float]],
+    plan_mu: np.ndarray,
+    layer_energies: list[float],
+) -> list[np.ndarray]:
+    buckets: list[list[float]] = [[] for _ in layer_energies]
+    for i, (_px, _py, pe) in enumerate(planned_xyz):
+        pf = float(pe)
+        mu_v = float(plan_mu[i])
+        for k, e in enumerate(layer_energies):
+            if abs(pf - float(e)) <= 1e-4:
+                buckets[k].append(mu_v)
+                break
+    return [np.asarray(b, dtype=np.float64) for b in buckets]
+
+
+def layer_nn_local_spot_index_on_layer(
+    planned_xyz: list[tuple[float, float, float]],
+    measured_rows: list[tuple[float, ...]],
+    *,
+    a_is_x: bool = False,
+) -> np.ndarray:
+    """Nearest plan spot index within each row's nominal energy layer."""
+    n = len(measured_rows)
+    out = np.full(n, -1, dtype=np.intp)
+    if not planned_xyz or n == 0:
+        return out
+    layer_e = nominal_layer_energies_mev(planned_xyz)
+    if not layer_e:
+        return out
+    li_raw = np.rint(np.asarray([float(t[2]) for t in measured_rows], dtype=np.float64)).astype(
+        np.intp, copy=False
+    )
+    hi = len(layer_e) - 1
+    np.clip(li_raw, 0, hi, out=li_raw)
+    if a_is_x:
+        mx = np.fromiter((float(t[0]) for t in measured_rows), dtype=np.float64, count=n)
+        my = np.fromiter((float(t[1]) for t in measured_rows), dtype=np.float64, count=n)
+    else:
+        mx = np.fromiter((float(t[1]) for t in measured_rows), dtype=np.float64, count=n)
+        my = np.fromiter((float(t[0]) for t in measured_rows), dtype=np.float64, count=n)
+    meas_xy = np.column_stack([mx, my])
+    layer_xyz = _plan_xyz_by_energy_layer(planned_xyz, layer_e)
+    trees = _layer_xy_kdtrees_for_qa(layer_xyz)
+    for ell in range(len(layer_e)):
+        mask = li_raw == ell
+        if not np.any(mask):
+            continue
+        arr = np.asarray(layer_xyz[ell], dtype=np.float64).reshape(-1, 3)
+        if arr.shape[0] == 0:
+            continue
+        q = meas_xy[mask]
+        tree = trees[ell] if ell < len(trees) else None
+        if tree is not None:
+            _dist, idx = _kdtree_query_k1(tree, q)
+            out[mask] = np.asarray(idx, dtype=np.intp).reshape(-1)
+        else:
+            xy_layer = arr[:, 0:2]
+            d2 = np.sum((xy_layer[None, :, :] - q[:, None, :]) ** 2, axis=2)
+            out[mask] = np.argmin(d2, axis=1).astype(np.intp)
+    return out
+
+
+def plan_dose_fraction_deviation_pp(
+    planned_xyz: list[tuple[float, float, float]],
+    plan_mu: np.ndarray | None,
+    measured_rows: list[tuple[float, ...]],
+    *,
+    a_is_x: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Layer-relative dose QA: |meas_frac − plan_frac| in percentage points per row."""
+    n = len(measured_rows)
+    dev_pp = np.full(n, np.nan, dtype=np.float64)
+    plan_frac_out = np.full(n, np.nan, dtype=np.float64)
+    meas_frac_out = np.full(n, np.nan, dtype=np.float64)
+    dist_mm, _exp_xyz = layer_nn_plan_xy_distances_and_expected_xyz(
+        planned_xyz, measured_rows, a_is_x=a_is_x
+    )
+    if plan_mu is None or len(plan_mu) != len(planned_xyz) or n == 0 or not planned_xyz:
+        return dev_pp, plan_frac_out, meas_frac_out, dist_mm
+
+    layer_e = nominal_layer_energies_mev(planned_xyz)
+    if not layer_e:
+        return dev_pp, plan_frac_out, meas_frac_out, dist_mm
+
+    plan_mu_arr = np.asarray(plan_mu, dtype=np.float64)
+    layer_mu = _layer_plan_mu_by_energy_layer(planned_xyz, plan_mu_arr, layer_e)
+    plan_frac_by_layer: list[np.ndarray] = []
+    for mu_arr in layer_mu:
+        if mu_arr.size == 0:
+            plan_frac_by_layer.append(np.zeros(0, dtype=np.float64))
+            continue
+        total = float(np.nansum(mu_arr))
+        if not math.isfinite(total) or total <= 0.0:
+            plan_frac_by_layer.append(np.full(mu_arr.shape[0], np.nan, dtype=np.float64))
+        else:
+            plan_frac_by_layer.append(mu_arr / total)
+
+    li_raw = np.rint(np.asarray([float(t[2]) for t in measured_rows], dtype=np.float64)).astype(
+        np.intp, copy=False
+    )
+    hi = len(layer_e) - 1
+    np.clip(li_raw, 0, hi, out=li_raw)
+    local_idx = layer_nn_local_spot_index_on_layer(
+        planned_xyz, measured_rows, a_is_x=a_is_x
+    )
+    charges_by_layer = [
+        np.zeros(layer_mu[ell].shape[0], dtype=np.float64) for ell in range(len(layer_e))
+    ]
+    for i, tup in enumerate(measured_rows):
+        ell = int(li_raw[i])
+        j = int(local_idx[i])
+        if j < 0 or ell >= len(charges_by_layer) or j >= charges_by_layer[ell].shape[0]:
+            continue
+        ch = measured_charge_na_from_tuple(tup)
+        if math.isfinite(ch) and ch > 0.0:
+            charges_by_layer[ell][j] += ch
+
+    for i, _tup in enumerate(measured_rows):
+        ell = int(li_raw[i])
+        j = int(local_idx[i])
+        if ell >= len(plan_frac_by_layer) or j < 0 or j >= plan_frac_by_layer[ell].shape[0]:
+            continue
+        pf = float(plan_frac_by_layer[ell][j])
+        layer_total = float(np.sum(charges_by_layer[ell]))
+        if not math.isfinite(pf) or not math.isfinite(layer_total) or layer_total <= 0.0:
+            continue
+        mf = float(charges_by_layer[ell][j]) / layer_total
+        plan_frac_out[i] = pf
+        meas_frac_out[i] = mf
+        dev_pp[i] = abs(mf - pf) * 100.0
+
+    return dev_pp, plan_frac_out, meas_frac_out, dist_mm
+
+
+def format_plan_dose_qa_caption(
+    *,
+    pass_pp: float,
+    warn_pp: float,
+    n_pass: int,
+    n_over_warn: int,
+    n_over_fail: int,
+    n_under_warn: int,
+    n_under_fail: int,
+) -> str:
+    return (
+        f"Dose QA (layer %): pass |Δ|≤{pass_pp:g} pp ({n_pass}). "
+        f"Over: yellow {pass_pp:g}<Δ≤{warn_pp:g} pp ({n_over_warn}), "
+        f"red Δ>{warn_pp:g} pp ({n_over_fail}). "
+        f"Under: cyan −{warn_pp:g}≤Δ<−{pass_pp:g} pp ({n_under_warn}), "
+        f"violet Δ<−{warn_pp:g} pp ({n_under_fail}). "
+        "Plan MU vs IX512 channel sum."
     )
 
 
@@ -1530,7 +1847,7 @@ def measured_spot_abc_from_csv(
     Index **3** is a positive **weight** from ``spot_weight_mode`` (IX512 sum and/or Fit Amplitude
     A/B; see :func:`measured_spot_weight_from_row`) for aggregation and optional 3D opacity.
 
-    Returns 7-tuples ``(A, B, layer, weight, partial, σ_A, σ_B)`` (σ may be NaN when missing).
+    Returns 8-tuples ``(A, B, layer, weight, partial, σ_A, σ_B, channel_sum_nA)`` (σ may be NaN).
 
     If ``aggregate_spots`` is True, requires ``Gate Counter`` on the CSV; each contiguous run of
     rows with the same **odd** gate value is one spot (even gate closes a spot), optionally extended
@@ -1607,6 +1924,7 @@ def measured_spot_abc_from_csv(
         xy_buf: list[list[float]] = []
         t_buf: list[float] = []
         w_buf: list[float] = []
+        ch_buf: list[float] = []
         partial_plan_xy: list[tuple[float | None, float | None]] = []
         partial_codes: list[int] = []
         gates_acc: list[int] = []
@@ -1637,6 +1955,7 @@ def measured_spot_abc_from_csv(
                 xy_buf.append([mx_i, my_i])
                 t_buf.append(t)
                 w_buf.append(measured_spot_weight_from_row(row, swm))
+                ch_buf.append(_channel_sum_na_from_row(row))
                 partial_plan_xy.append((mx_p, my_p))
                 partial_codes.append(pcd)
                 sig_acc.append(
@@ -1683,8 +2002,8 @@ def measured_spot_abc_from_csv(
             ab_buf[i] = (a_fin, b_fin)
 
         out: list[tuple[float, ...]] = []
-        for i, ((a, b), ell, wch, pcd) in enumerate(
-            zip(ab_buf, layers_idx.tolist(), w_buf, partial_codes)
+        for i, ((a, b), ell, wch, ch_n, pcd) in enumerate(
+            zip(ab_buf, layers_idx.tolist(), w_buf, ch_buf, partial_codes)
         ):
             efi = int(ell)
             if efi < 0:
@@ -1692,7 +2011,11 @@ def measured_spot_abc_from_csv(
             elif efi > hi:
                 efi = hi
             sa, sb = sig_acc[i]
-            out.append(_measured_row_with_sigma(a, b, float(efi), wch, pcd, sa, sb))
+            out.append(
+                _measured_row_with_sigma(
+                    a, b, float(efi), wch, pcd, sa, sb, channel_sum_na=ch_n
+                )
+            )
         if aggregate_spots:
             return _apply_gate_spot_aggregation(out, gates_acc, sig_acc)
         return out
@@ -1798,10 +2121,11 @@ def measured_spot_abc_from_csv(
                 mx, my = _impute_plan_axis_fast(lk_use, mx_p, my_p)
                 a_fin, b_fin = _ab_from_plan_xy(mx, my, a_is_x=a_is_x)
                 w_ch = measured_spot_weight_from_row(row, swm)
+                ch_n = _channel_sum_na_from_row(row)
                 sa = _opt_float_cell(row, SIGMA_A_KEY)
                 sb = _opt_float_cell(row, SIGMA_B_KEY)
                 if aggregate_spots:
-                    spot_buf_gc.append((a_fin, b_fin, float(eff_li), w_ch, int(pcd), sa, sb))
+                    spot_buf_gc.append((a_fin, b_fin, float(eff_li), w_ch, int(pcd), sa, sb, ch_n))
                     n_gc_raw += 1
                     if allow_even_slurp:
                         pending_even_tail -= 1
@@ -1816,7 +2140,14 @@ def measured_spot_abc_from_csv(
                 else:
                     out_gc.append(
                         _measured_row_with_sigma(
-                            a_fin, b_fin, float(eff_li), w_ch, int(pcd), sa, sb
+                            a_fin,
+                            b_fin,
+                            float(eff_li),
+                            w_ch,
+                            int(pcd),
+                            sa,
+                            sb,
+                            channel_sum_na=ch_n,
                         )
                     )
                     if max_points is not None and len(out_gc) >= max_points:
@@ -1916,6 +2247,7 @@ def measured_spot_abc_from_csv(
                     int(pcd),
                     sa,
                     sb,
+                    channel_sum_na=_channel_sum_na_from_row(row),
                 )
             )
             if aggregate_spots:
@@ -2603,8 +2935,12 @@ def show_comparison_3d_pyvista(
     detector_align_caption: str | None = None,
     bounds_xy_tick_mm: float | None = None,
     plan_qa_coloring: bool = False,
+    plan_qa_mode: str = "position",
     plan_qa_pass_mm: float = PLAN_QA_PASS_MM_DEFAULT,
     plan_qa_warn_mm: float = PLAN_QA_WARN_MM_DEFAULT,
+    plan_qa_pass_pp: float = PLAN_QA_DOSE_PASS_PP_DEFAULT,
+    plan_qa_warn_pp: float = PLAN_QA_DOSE_WARN_PP_DEFAULT,
+    plan_mu: np.ndarray | None = None,
     plan_qa_draw_error_lines: bool = False,
     plan_qa_hide_pass_spots: bool = False,
     plan_fwhm_xy_mm: np.ndarray | None = None,
@@ -2625,11 +2961,21 @@ def show_comparison_3d_pyvista(
     if pv is None:
         raise RuntimeError("Install PyVista for GPU 3D: pip install pyvista")
 
-    if plan_qa_coloring and plan_qa_warn_mm <= plan_qa_pass_mm:
-        raise GeometryConfigError("plan_qa_warn_mm must be greater than plan_qa_pass_mm")
+    qa_mode = str(plan_qa_mode).strip().lower().replace("-", "_")
+    if qa_mode not in ("position", "dose"):
+        raise GeometryConfigError("plan_qa_mode must be 'position' or 'dose'")
+    if plan_qa_coloring:
+        if qa_mode == "dose":
+            if float(plan_qa_warn_pp) <= float(plan_qa_pass_pp):
+                raise GeometryConfigError("plan_qa_warn_pp must be greater than plan_qa_pass_pp")
+        elif float(plan_qa_warn_mm) <= float(plan_qa_pass_mm):
+            raise GeometryConfigError("plan_qa_warn_mm must be greater than plan_qa_pass_mm")
     if plan_qa_draw_error_lines and not plan_qa_coloring:
         raise GeometryConfigError("plan_qa_draw_error_lines requires plan_qa_coloring")
+    if plan_qa_draw_error_lines and qa_mode == "dose":
+        raise GeometryConfigError("plan_qa_draw_error_lines applies to position QA only")
     qa_hide_pass_spots = bool(plan_qa_hide_pass_spots) and bool(plan_qa_coloring)
+    qa_draw_lines = bool(plan_qa_draw_error_lines) and qa_mode == "position"
 
     prep = prepare_comparison_3d_data(
         planned_xyz,
@@ -2663,28 +3009,62 @@ def show_comparison_3d_pyvista(
         and int(prep.meas_weight.shape[0]) == n_m
     ):
         weight_alpha_u8 = _measured_alpha_u8_from_channel_weights(prep.meas_weight)
+    qa_metric: np.ndarray | None = None
     if plan_qa_coloring:
-        dist_qa, exp_xyz_qa = layer_nn_plan_xy_distances_and_expected_xyz(
-            planned_xyz, rows_for_qa, a_is_x=a_is_x
-        )
-        meas_cloud["rgba"] = measured_rgba_by_plan_qa(
-            dist_qa,
-            pass_mm=plan_qa_pass_mm,
-            warn_mm=plan_qa_warn_mm,
-            alpha_u8=weight_alpha_u8,
-        )
-        npass, nwarn, nfail = plan_qa_pass_warn_fail_counts(
-            dist_qa, pass_mm=plan_qa_pass_mm, warn_mm=plan_qa_warn_mm
-        )
-        plan_qa_caption_extra = format_plan_qa_caption(
-            pass_mm=plan_qa_pass_mm,
-            warn_mm=plan_qa_warn_mm,
-            n_pass=npass,
-            n_warn=nwarn,
-            n_fail=nfail,
-        )
-        if plan_qa_draw_error_lines:
-            plan_qa_caption_extra += " Lines: warn+fail → NN plan spot."
+        if qa_mode == "dose":
+            dev_pp, plan_frac_qa, meas_frac_qa, dist_qa = plan_dose_fraction_deviation_pp(
+                planned_xyz, plan_mu, rows_for_qa, a_is_x=a_is_x
+            )
+            qa_metric = dev_pp
+            signed_pp = np.where(
+                np.isfinite(plan_frac_qa) & np.isfinite(meas_frac_qa),
+                (meas_frac_qa - plan_frac_qa) * 100.0,
+                np.nan,
+            )
+            _dist_nn, exp_xyz_qa = layer_nn_plan_xy_distances_and_expected_xyz(
+                planned_xyz, rows_for_qa, a_is_x=a_is_x
+            )
+            meas_cloud["rgba"] = measured_rgba_by_plan_dose_qa(
+                signed_pp,
+                pass_pp=float(plan_qa_pass_pp),
+                warn_pp=float(plan_qa_warn_pp),
+                alpha_u8=weight_alpha_u8,
+            )
+            npass, now, nof, nuw, nuf = plan_dose_qa_tier_counts(
+                signed_pp, pass_pp=float(plan_qa_pass_pp), warn_pp=float(plan_qa_warn_pp)
+            )
+            plan_qa_caption_extra = format_plan_dose_qa_caption(
+                pass_pp=float(plan_qa_pass_pp),
+                warn_pp=float(plan_qa_warn_pp),
+                n_pass=npass,
+                n_over_warn=now,
+                n_over_fail=nof,
+                n_under_warn=nuw,
+                n_under_fail=nuf,
+            )
+        else:
+            dist_qa, exp_xyz_qa = layer_nn_plan_xy_distances_and_expected_xyz(
+                planned_xyz, rows_for_qa, a_is_x=a_is_x
+            )
+            qa_metric = dist_qa
+            meas_cloud["rgba"] = measured_rgba_by_plan_qa(
+                dist_qa,
+                pass_mm=plan_qa_pass_mm,
+                warn_mm=plan_qa_warn_mm,
+                alpha_u8=weight_alpha_u8,
+            )
+            npass, nwarn, nfail = plan_qa_pass_warn_fail_counts(
+                dist_qa, pass_mm=plan_qa_pass_mm, warn_mm=plan_qa_warn_mm
+            )
+            plan_qa_caption_extra = format_plan_qa_caption(
+                pass_mm=plan_qa_pass_mm,
+                warn_mm=plan_qa_warn_mm,
+                n_pass=npass,
+                n_warn=nwarn,
+                n_fail=nfail,
+            )
+            if qa_draw_lines:
+                plan_qa_caption_extra += " Lines: warn+fail → NN plan spot."
     elif (
         weight_measured_by_channel
         and prep.meas_weight is not None
@@ -2708,14 +3088,15 @@ def show_comparison_3d_pyvista(
         meas_cloud["rgba"] = rgba
 
     meas_idx = np.arange(int(n_m), dtype=np.int64)
-    if qa_hide_pass_spots and dist_qa is not None:
-        d_q = np.asarray(dist_qa, dtype=np.float64).reshape(-1)
+    if qa_hide_pass_spots and qa_metric is not None:
+        d_q = np.asarray(qa_metric, dtype=np.float64).reshape(-1)
         if int(d_q.shape[0]) != int(n_m):
             raise ValueError(
-                "plan_qa_hide_pass_spots: distance array length does not match measured count"
+                "plan_qa_hide_pass_spots: QA metric length does not match measured count"
             )
-        keep = ~(np.isfinite(d_q) & (d_q <= float(plan_qa_pass_mm)))
-        n_pass_pts = int(np.count_nonzero(np.isfinite(d_q) & (d_q <= float(plan_qa_pass_mm))))
+        pass_thr = float(plan_qa_pass_pp) if qa_mode == "dose" else float(plan_qa_pass_mm)
+        keep = ~(np.isfinite(d_q) & (d_q <= pass_thr))
+        n_pass_pts = int(np.count_nonzero(np.isfinite(d_q) & (d_q <= pass_thr)))
         idx = np.flatnonzero(keep)
         meas_idx = idx.astype(np.int64)
         if idx.size == 0:
@@ -2912,7 +3293,7 @@ def show_comparison_3d_pyvista(
     line_fail_actor: Any | None = None
     if (
         plan_qa_coloring
-        and plan_qa_draw_error_lines
+        and qa_draw_lines
         and dist_qa_draw is not None
         and exp_xyz_qa_draw is not None
     ):
@@ -3033,12 +3414,14 @@ def show_comparison_3d_pyvista(
         return np.r_[plan_pts[:, 2], meas_pts[:, 2]]
 
     def _apply_cube_z_axis(actor: Any, z_spec: _CubeZAxisSpec) -> None:
-        """Refresh Z bounds/labels; outer-edge triad + back-face grid only."""
-        actor.SetFlyModeToOuterEdges()
+        """Refresh Z bounds/labels; camera-facing triad + back-face grid."""
+        # Outer fly mode hides Z numeric ticks; closest triad shows them.
+        actor.SetFlyModeToClosestTriad()
         grid_loc = getattr(actor, "VTK_GRID_LINES_FURTHEST", None)
         if grid_loc is not None and hasattr(actor, "SetGridLineLocation"):
             actor.SetGridLineLocation(grid_loc)
-        actor.SetBounds(
+        # Use bounds property so PyVista refreshes labels; then restore mm/MeV Z range.
+        actor.bounds = (
             float(x_min),
             float(x_max),
             float(y_min),
@@ -3046,14 +3429,20 @@ def show_comparison_3d_pyvista(
             z_spec.zmin_scene,
             z_spec.zmax_scene,
         )
+        # Preserve label order: zmin bound → z_label_at_min (deepest mm), zmax → shallowest.
         actor.z_axis_range = (z_spec.z_label_at_min, z_spec.z_label_at_max)
         actor.n_zlabels = int(z_spec.n_zlabels)
         actor.z_title = z_spec.ztitle
         actor.z_label_visibility = True
         actor.SetZAxisVisibility(True)
+        actor.SetZAxisTickVisibility(True)
         actor.SetDrawXGridlines(True)
         actor.SetDrawYGridlines(True)
         actor.SetDrawZGridlines(True)
+        try:
+            actor.SetUseTextActor3D(True)
+        except Exception:
+            pass
         actor._update_z_labels()
 
     def _sync_cube_z_axis(
@@ -3123,7 +3512,7 @@ def show_comparison_3d_pyvista(
             line_fail_actor = None
         if (
             plan_qa_coloring
-            and plan_qa_draw_error_lines
+            and qa_draw_lines
             and dist_qa_draw is not None
             and exp_xyz_qa_draw is not None
             and np.any(mm)
@@ -3352,9 +3741,8 @@ def show_comparison_3d_pyvista(
     pl.add_text(title, position="upper_left", font_size=11, color="#f0f6fc", shadow=True)
     pl.add_text(caption, position="lower_left", font_size=9, color="#8b949e")
 
-    # Scene Z: either −E×view_scale (MeV-based) or −R_water_mm (proton CSDA approx.).
-    # ``axes_ranges`` maps bounding-box corners to tick labels (mm or MeV);
-    # see nominal_mev_to_plot_z.
+    # Scene Z: negative depth/mm or −E×view_scale (shallow toward top); see nominal_mev_to_plot_z.
+    # ``axes_ranges`` maps bounding-box corners to tick labels (mm or MeV).
     lo_m0, hi_m0 = _slice_lo_hi_mev()
     pm0 = _energy_slice_mask(plan_e_mev, lo_m0, hi_m0)
     mm0 = (
@@ -3389,8 +3777,8 @@ def show_comparison_3d_pyvista(
         bounds=bounds_axes,
         axes_ranges=axes_ranges_scene,
         grid="back",
-        ticks="inside",
-        location="outer",
+        ticks="outside",
+        location="closest",
         all_edges=False,
         color="#8b949e",
         xtitle=prep.xlab,

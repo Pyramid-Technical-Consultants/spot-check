@@ -64,9 +64,15 @@ DETECTOR_ALIGN_MAX_FIT_SAMPLES: Final[int] = 3_000
 # --- Plan QA colouring (XY distance to nearest plan spot on assigned layer) -----
 PLAN_QA_PASS_MM_DEFAULT: Final[float] = 1.0
 PLAN_QA_WARN_MM_DEFAULT: Final[float] = 3.0
+# Dose QA: |measured_layer_% − plan_layer_%| thresholds in percentage points (pp).
+PLAN_QA_DOSE_PASS_PP_DEFAULT: Final[float] = 1.0
+PLAN_QA_DOSE_WARN_PP_DEFAULT: Final[float] = 3.0
 _PLAN_QA_PASS_HEX: Final[str] = "#22c55e"
 _PLAN_QA_WARN_HEX: Final[str] = "#eab308"
 _PLAN_QA_FAIL_HEX: Final[str] = "#ef4444"
+# Dose QA (signed layer %): over-dose reuses warn/fail; under-dose uses cool hues.
+_PLAN_QA_DOSE_UNDER_WARN_HEX: Final[str] = "#38bdf8"
+_PLAN_QA_DOSE_UNDER_FAIL_HEX: Final[str] = "#a855f7"
 _PLAN_COLOR_3D: Final[str] = "#1f77b4"
 _MEASURED_COLOR_3D: Final[str] = "#d62728"
 _PARTIAL_AXIS_MEAS_COLOR_3D: Final[str] = "#daa520"

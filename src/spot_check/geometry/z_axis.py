@@ -27,6 +27,11 @@ def nominal_mev_to_plot_z(
     *,
     use_proton_water_depth_mm: bool,
 ) -> np.ndarray:
+    """Map nominal energy (MeV) to scene Z for 3D display (mm depth or scaled MeV).
+
+    Scene Z is **negative** depth (shallow / low energy toward +Z, i.e. top of the view).
+    Cube tick labels use positive mm via :func:`cube_z_axis_spec`.
+    """
     e = np.asarray(energy_mev, dtype=np.float64)
     if use_proton_water_depth_mm:
         return -proton_cda_water_range_mm(e)
@@ -73,6 +78,7 @@ def cube_z_axis_spec(
         z_pad = max(z_span * 0.06, min_pad)
         zmin_p = zmin_b - z_pad * 0.5
         zmax_p = zmax_b + z_pad * 0.5
+        # Scene zmin is deepest (most negative); labels are positive mm depth.
         z_lbl_min = -zmin_p
         z_lbl_max = -zmax_p
         z_step = (
