@@ -74,6 +74,45 @@ def test_plan_dose_fraction_deviation_pp_uses_row_weight_not_channel_sum() -> No
     np.testing.assert_allclose(meas_frac, [0.3, 0.7], rtol=0, atol=1e-12)
 
 
+def test_plan_qa_measured_spot_pass_warn_fail_dose() -> None:
+    planned = [(0.0, 0.0, 100.0), (10.0, 0.0, 100.0), (20.0, 0.0, 100.0)]
+    plan_mu = np.array([10.0, 20.0, 70.0])
+    measured = [
+        (0.0, 0.0, 0.0, 11.0, 0, 0.0, 0.0, 11.0),
+        (10.0, 0.0, 0.0, 19.0, 0, 0.0, 0.0, 19.0),
+        (20.0, 0.0, 0.0, 70.0, 0, 0.0, 0.0, 70.0),
+    ]
+    n_pass, n_warn, n_fail = analysis.plan_qa_measured_spot_pass_warn_fail(
+        planned,
+        measured,
+        qa_mode="dose",
+        pass_thr=0.5,
+        warn_thr=1.5,
+        plan_mu=plan_mu,
+        a_is_x=True,
+    )
+    assert (n_pass, n_warn, n_fail) == (1, 2, 0)
+
+
+def test_plan_qa_measured_spot_pass_warn_fail_position() -> None:
+    planned = [(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)]
+    # a_is_x=False: detector x=B, y=A (same as GUI).
+    measured = [
+        (0.0, 0.0, 0.0, 1.0, 0, 0.0, 0.0, 1.0),
+        (0.0, 10.0, 0.0, 1.0, 0, 0.0, 0.0, 1.0),
+        (4.0, 0.0, 0.0, 1.0, 0, 0.0, 0.0, 1.0),
+    ]
+    n_pass, n_warn, n_fail = analysis.plan_qa_measured_spot_pass_warn_fail(
+        planned,
+        measured,
+        qa_mode="position",
+        pass_thr=2.0,
+        warn_thr=5.0,
+        a_is_x=False,
+    )
+    assert (n_pass, n_warn, n_fail) == (2, 1, 0)
+
+
 def test_plan_dose_fraction_deviation_pp_without_plan_mu_is_nan() -> None:
     planned = [(0.0, 0.0, 100.0)]
     measured = [(0.0, 0.0, 0.0, 1.0, 0, 0.0, 0.0, 1.0)]

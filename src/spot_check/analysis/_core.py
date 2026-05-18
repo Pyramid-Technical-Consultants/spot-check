@@ -949,6 +949,45 @@ def plan_qa_pass_warn_fail_counts(
     return n_pass, n_warn, n_fail
 
 
+def plan_qa_measured_spot_pass_warn_fail(
+    planned_xyz: list[tuple[float, float, float]],
+    measured_rows: list[tuple[float, ...]],
+    *,
+    qa_mode: str,
+    pass_thr: float,
+    warn_thr: float,
+    plan_mu: np.ndarray | None = None,
+    a_is_x: bool = False,
+) -> tuple[int, int, int]:
+    """Pass / warn / fail counts for measured spots (same tiers as 3D plan QA coloring).
+
+    Position: XY distance (mm) to nearest plan spot on the row's nominal layer.
+    Dose: signed layer MU-fraction error (pp); warn and fail combine over- and under-dose.
+    """
+    mode = str(qa_mode).strip().lower().replace("-", "_")
+    if mode == "dose":
+        _dev_pp, plan_frac, meas_frac, _dist = plan_dose_fraction_deviation_pp(
+            planned_xyz, plan_mu, measured_rows, a_is_x=a_is_x
+        )
+        signed_pp = np.where(
+            np.isfinite(plan_frac) & np.isfinite(meas_frac),
+            (meas_frac - plan_frac) * 100.0,
+            np.nan,
+        )
+        npass, now, nof, nuw, nuf = plan_dose_qa_tier_counts(
+            signed_pp, pass_pp=float(pass_thr), warn_pp=float(warn_thr)
+        )
+        return npass, int(now + nuw), int(nof + nuf)
+    if mode != "position":
+        raise ValueError("qa_mode must be 'position' or 'dose'")
+    dist_mm = distances_measured_xy_to_layer_nn_plan_mm(
+        planned_xyz, measured_rows, a_is_x=a_is_x
+    )
+    return plan_qa_pass_warn_fail_counts(
+        dist_mm, pass_mm=float(pass_thr), warn_mm=float(warn_thr)
+    )
+
+
 def format_plan_qa_caption(
     *,
     pass_mm: float,

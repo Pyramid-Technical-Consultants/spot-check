@@ -23,6 +23,10 @@ fi
 python -m pip install --upgrade pip wheel
 python -m pip install -e ".[fast,dev]"
 
+if python -m pre_commit install >/dev/null 2>&1; then
+  echo "Pre-commit hooks installed (ruff, same as CI)."
+fi
+
 echo ""
 echo "SpotCheck is ready."
 echo "  Activate:  source .venv/bin/activate  (or .venv/Scripts/activate on Windows)"

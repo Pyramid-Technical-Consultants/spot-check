@@ -15,6 +15,9 @@ if errorlevel 1 exit /b 1
 ".venv\Scripts\python.exe" -m pip install -e ".[fast,dev]"
 if errorlevel 1 exit /b 1
 
+".venv\Scripts\python.exe" -m pre_commit install >nul 2>&1
+if not errorlevel 1 echo Pre-commit hooks installed ^(ruff, same as CI^).
+
 echo.
 echo SpotCheck is ready.
 echo   Run GUI:  .venv\Scripts\spot-check.exe

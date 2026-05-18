@@ -21,6 +21,11 @@ if (-not (Test-Path $VenvPython)) {
 & $VenvPython -m pip install --upgrade pip wheel
 & $VenvPython -m pip install -e ".[fast,dev]"
 
+& $VenvPython -m pre_commit install 2>$null
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "Pre-commit hooks installed (ruff, same as CI)."
+}
+
 Write-Host ""
 Write-Host "SpotCheck is ready."
 Write-Host "  Activate:  .\.venv\Scripts\Activate.ps1"

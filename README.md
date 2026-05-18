@@ -114,6 +114,18 @@ SPOT_CHECK_VERSION=1.0.1 ./scripts/build-windows.sh
 
 Test data under `test_data/` is not included in the bundle (and is gitignored).
 
+## Lint (before push)
+
+CI runs `ruff check src tests packaging`. After `scripts/setup.*`, **pre-commit** hooks run the same check (with `--fix`) on staged files under `src/`, `tests/`, and `packaging/`.
+
+Manual check:
+
+```bash
+ruff check src tests packaging
+# or auto-fix import order / other fixable issues:
+ruff check --fix src tests packaging
+```
+
 ## CI / releases
 
 | Workflow | Trigger | Purpose |

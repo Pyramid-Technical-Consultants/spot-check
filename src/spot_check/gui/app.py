@@ -83,9 +83,9 @@ from spot_check.gui.parsers import (
     parse_bounds_xy_tick_mm,
     parse_layer_gap_s,
     parse_plan_qa_thresholds,
-    plan_qa_thresholds_input_in_progress,
     parse_refill_xy_tol_mm,
     parse_viterbi_penalty_mm2,
+    plan_qa_thresholds_input_in_progress,
     spot_weight_mode_from_saved,
 )
 from spot_check.gui.pipeline import (
@@ -624,7 +624,49 @@ def run_gui() -> None:
     vqa.addWidget(wqa)
     qa_hint_lbl = _add_hint_lbl("Need 0 < pass < warn.")
     vqa.addWidget(qa_hint_lbl)
+    lbl_qa_counts = QLabel("Counts: —")
+    lbl_qa_counts.setWordWrap(True)
+    lbl_qa_counts.setStyleSheet(f"color: {MUTED_BODY}; font-size: 9pt;")
+    lbl_qa_counts.setMinimumWidth(0)
+    lbl_qa_counts.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+    vqa.addWidget(lbl_qa_counts)
     _apply_qa_mode_ui(refresh_fields=False)
+
+    def _update_plan_qa_counts_label(
+        planned: list[tuple[float, float, float]] | None,
+        measured: list[tuple[float, ...]] | None,
+        *,
+        qa_mode: str,
+        qa_pass_f: float,
+        qa_warn_f: float,
+        plan_mu: object,
+    ) -> None:
+        if not cb_pqa.isChecked():
+            lbl_qa_counts.setText(
+                "Counts: enable “Color measured spots by plan QA” above."
+            )
+            return
+        if not planned or not measured:
+            lbl_qa_counts.setText("Counts: — (load plan and CSV)")
+            return
+        try:
+            n_pass, n_warn, n_fail = analysis.plan_qa_measured_spot_pass_warn_fail(
+                planned,
+                measured,
+                qa_mode=qa_mode,
+                pass_thr=float(qa_pass_f),
+                warn_thr=float(qa_warn_f),
+                plan_mu=plan_mu,  # type: ignore[arg-type]
+                a_is_x=False,
+            )
+        except ValueError:
+            lbl_qa_counts.setText("Counts: — (check pass / warn thresholds)")
+            return
+        unit = "pp" if qa_mode == "dose" else "mm"
+        lbl_qa_counts.setText(
+            f"Measured spots: {n_pass} pass · {n_warn} warn · {n_fail} fail "
+            f"({unit} thresholds)"
+        )
 
     gb_slice = QGroupBox("5-layer band")
     vsl = QVBoxLayout(gb_slice)
@@ -1064,6 +1106,14 @@ def run_gui() -> None:
         if cb_meas_sigma.isChecked():
             meas_line += ". Measured: σ-sized ellipsoids in world XY (mm; see 3D caption)"
         status_lbl.setText(f"Updated. {plan_line}. {meas_line}.{align_note}{cache_note}")
+        _update_plan_qa_counts_label(
+            planned,
+            measured,
+            qa_mode=ctx.qa_mode,
+            qa_pass_f=ctx.qa_pass_f,
+            qa_warn_f=ctx.qa_warn_f,
+            plan_mu=_plot_cache.get("plan_mu"),
+        )
         persist()
         pending_ctx = None
 
