@@ -51,7 +51,8 @@ jobs:
         run: |
           BASE=$(python -c "import pathlib, re; t=pathlib.Path('src/spot_check/_version.py').read_text(); print(re.search(r'__version__\\s*=\\s*[\"\\']([^\"\\']+)', t).group(1))")
           SHORT="${GITHUB_SHA::7}"
-          BETA="${BASE}-beta.${GITHUB_RUN_NUMBER}.${SHORT}"
+          # PEP 440 (setuptools/pip): 1.0.0b<run>+g<sha> — not 1.0.0-beta.<run>.<sha>
+          BETA="${BASE}b${GITHUB_RUN_NUMBER}+g${SHORT}"
           echo "value=$BETA" >> "$GITHUB_OUTPUT"
           echo "Beta version: $BETA"
 

@@ -109,6 +109,18 @@ def cube_z_axis_spec(
     return CubeZAxisSpec(zmin_p, zmax_p, e_at_zmin, e_at_zmax, n_z, "Z (MeV)")
 
 
+def _vtk_z_tick_labels(z_spec: CubeZAxisSpec, *, fmt: str = "%.4g") -> Any:
+    """Build vtkStringArray for Z ticks (deep→shallow along scene zmin→zmax)."""
+    from pyvista.plotting.cube_axes_actor import make_axis_labels
+
+    return make_axis_labels(
+        vmin=float(z_spec.z_label_at_min),
+        vmax=float(z_spec.z_label_at_max),
+        n=int(z_spec.n_zlabels),
+        fmt=fmt,
+    )
+
+
 def apply_pyvista_cube_z_axis(
     actor: Any,
     z_spec: CubeZAxisSpec,
@@ -122,6 +134,10 @@ def apply_pyvista_cube_z_axis(
 
     PyVista's ``actor.bounds`` setter copies scene Z into ``z_axis_range`` (negative mm).
     Use VTK ``SetBounds`` plus explicit ``z_axis_range`` so labels stay positive depth mm.
+
+    VTK only draws Z tick numbers when ``SetZAxisRange`` is ascending (min < max). Depth
+    values are still deep→shallow along scene zmin→zmax via ``SetAxisLabels``. Do not call
+    ``SetRebuildAxes`` afterward (it regenerates labels and hides Z ticks).
     """
     actor.SetFlyModeToClosestTriad()
     grid_loc = getattr(actor, "VTK_GRID_LINES_FURTHEST", None)
@@ -137,18 +153,26 @@ def apply_pyvista_cube_z_axis(
     )
     actor.x_axis_range = (float(x_min), float(x_max))
     actor.y_axis_range = (float(y_min), float(y_max))
-    # zmin scene bound → deepest label; zmax → shallowest (do not sort).
-    actor.z_axis_range = (float(z_spec.z_label_at_min), float(z_spec.z_label_at_max))
-    actor.n_zlabels = int(z_spec.n_zlabels)
-    actor.z_title = z_spec.ztitle
-    actor.z_label_visibility = True
+    actor._n_zlabels = int(z_spec.n_zlabels)
+    actor.SetZTitle(str(z_spec.ztitle))
+    # Ascending range required for VTK to render Z numerics on the cube edge.
+    actor.SetZAxisRange(
+        float(min(z_spec.z_label_at_min, z_spec.z_label_at_max)),
+        float(max(z_spec.z_label_at_min, z_spec.z_label_at_max)),
+    )
+    actor.SetAxisLabels(2, _vtk_z_tick_labels(z_spec))
+    actor._z_label_visibility = True
     actor.SetZAxisVisibility(True)
     actor.SetZAxisTickVisibility(True)
     actor.SetDrawXGridlines(True)
     actor.SetDrawYGridlines(True)
     actor.SetDrawZGridlines(True)
     try:
-        actor.SetUseTextActor3D(True)
+        actor.SetUseTextActor3D(False)
     except Exception:
         pass
-    actor._update_z_labels()
+    try:
+        actor.SetEnableViewAngleLOD(False)
+        actor.SetEnableDistanceLOD(False)
+    except Exception:
+        pass

@@ -402,14 +402,21 @@ def _probe_csv_columns_for_measured_weights(
             return
         if aggregate_spots and GATE_COUNTER_KEY not in fn:
             raise ValueError(f"aggregate_spots needs a “{GATE_COUNTER_KEY}” column (found {fn!r})")
-        if swm == "fit_amplitude_a" and FIT_AMPLITUDE_A_KEY not in fn:
+        has_ch = CHANNEL_SUM_KEY in fn
+        if swm == "channel_sum" and not has_ch:
             raise ValueError(
-                f"spot_weight_mode={swm!r} requires CSV column {FIT_AMPLITUDE_A_KEY!r} "
+                f"spot_weight_mode={swm!r} requires CSV column {CHANNEL_SUM_KEY!r} "
                 f"(found columns: {list(fn)!r})"
             )
-        if swm == "fit_amplitude_b" and FIT_AMPLITUDE_B_KEY not in fn:
+        # Fit amp A/B optional when IX512 sum exists; empty/missing cells use channel sum.
+        if swm == "fit_amplitude_a" and FIT_AMPLITUDE_A_KEY not in fn and not has_ch:
             raise ValueError(
-                f"spot_weight_mode={swm!r} requires CSV column {FIT_AMPLITUDE_B_KEY!r} "
+                f"spot_weight_mode={swm!r} needs {FIT_AMPLITUDE_A_KEY!r} or {CHANNEL_SUM_KEY!r} "
+                f"(found columns: {list(fn)!r})"
+            )
+        if swm == "fit_amplitude_b" and FIT_AMPLITUDE_B_KEY not in fn and not has_ch:
+            raise ValueError(
+                f"spot_weight_mode={swm!r} needs {FIT_AMPLITUDE_B_KEY!r} or {CHANNEL_SUM_KEY!r} "
                 f"(found columns: {list(fn)!r})"
             )
 
@@ -3263,7 +3270,17 @@ def show_comparison_3d_pyvista(
                 saved_camera_position = pl.camera_position
             except Exception:
                 saved_camera_position = None
+        # pl.clear() does not remove vtkCubeAxesActor; stale axes keep wrong Z ticks.
+        try:
+            pl.remove_bounds_axes()
+        except Exception:
+            pass
         pl.clear()
+        try:
+            if pl.renderer.cube_axes_actor is not None:
+                pl.remove_bounds_axes()
+        except Exception:
+            pass
     if pl is None:
         pl = pv.Plotter(window_size=(1440, 960), title="Plan vs measured (PyVista)")
     pl.set_background("#0d1117")
@@ -3597,8 +3614,6 @@ def show_comparison_3d_pyvista(
             color="#c9d1d9",
         )
 
-    _apply_nominal_energy_slice()
-
     pl.add_axes(
         line_width=4,
         x_color="#79c0ff",
@@ -3780,8 +3795,8 @@ def show_comparison_3d_pyvista(
     )
     try:
         _apply_cube_z_axis(_cube_axes["actor"], z_spec_init)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Initial cube Z-axis apply failed: %s", exc)
 
     if reuse_plotter is None or not reuse_camera:
         pl.reset_camera()
@@ -3802,6 +3817,7 @@ def show_comparison_3d_pyvista(
         pass
 
     _sync_cube_z_axis()
+    _apply_nominal_energy_slice()
 
     if embed_qt is not None:
         try:
@@ -3821,6 +3837,7 @@ def show_comparison_3d_pyvista(
                     except Exception:
                         pass
             _sync_cube_z_axis()
+            pl.render()
         except Exception:
             idle_slice_band_controls_qt(slice_qt)
             raise

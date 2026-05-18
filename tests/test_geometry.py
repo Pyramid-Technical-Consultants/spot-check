@@ -50,6 +50,8 @@ def test_pyvista_bounds_property_resets_z_labels() -> None:
     apply_pyvista_cube_z_axis(
         actor, spec, x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max
     )
+    assert actor.z_label_visibility is True
+    assert spec.z_label_at_min > spec.z_label_at_max
     assert float(actor.z_labels[0]) > float(actor.z_labels[-1])
 
 
