@@ -34,20 +34,16 @@ and Viterbi layer costs use **cKDTree** acceleration (see :mod:`spot_check.analy
 
 from __future__ import annotations
 
-import json
+import importlib.util
 import logging
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+
+if importlib.util.find_spec("pydicom") is None:  # pragma: no cover
+    raise ImportError("RT Ion GUI requires pydicom. Install with: pip install pydicom")
 
 try:
-    import pydicom
-except ImportError as e:  # pragma: no cover
-    raise ImportError("RT Ion GUI requires pydicom. Install with: pip install pydicom") from e
-
-try:
-    from PySide6.QtCore import QEvent, QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
+    from PySide6.QtCore import QEvent, QObject, Qt, QThreadPool, QTimer
     from PySide6.QtWidgets import (
         QApplication,
         QButtonGroup,
@@ -81,11 +77,32 @@ from spot_check import analysis
 from spot_check import constants as sc_const
 from spot_check._version import __version__
 from spot_check.constants import project_root
+from spot_check.gui.parsers import (
+    parse_aggregate_even_tail_n,
+    parse_bounds_xy_tick_mm,
+    parse_layer_gap_s,
+    parse_plan_qa_thresholds,
+    parse_refill_xy_tol_mm,
+    parse_viterbi_penalty_mm2,
+    spot_weight_mode_from_saved,
+)
+from spot_check.gui.pipeline import (
+    GuiRefreshContext,
+    PipelineLoadOK,
+    file_mtime,
+    pipeline_load_job,
+)
+from spot_check.gui.state import (
+    apply_saved_geometry,
+    geom_from_win,
+    load_gui_state,
+    save_gui_state,
+)
+from spot_check.gui.theme import MUTED_BODY, MUTED_HELP, MUTED_HINT
+from spot_check.gui.workers import PipelineLoaderSignals, PipelineLoadRunnable
 from spot_check.logging_utils import configure_logging
 
 FOLDER = project_root()
-_GUI_STATE_FILE = project_root() / ".spot_check_gui_state.json"
-_LEGACY_GUI_STATE_FILE = project_root() / ".dicom_run_gui_state.json"
 # Short pause after typing in numeric fields before recomputing the 3D view (ms).
 _REFRESH_DEBOUNCE_MS = 380
 _LOAD_SPINNER_FRAMES: tuple[str, ...] = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
@@ -101,389 +118,15 @@ _SW_MODE_BY_LABEL: dict[str, str] = {lbl: m for m, lbl in _SPOT_WEIGHT_COMBO_LAB
 logger = logging.getLogger(__name__)
 
 
-class _PipelineLoaderSignals(QObject):
-    """Cross-thread load notifications; receiver lives on the GUI thread."""
-
-    finished = Signal(object, int)
-    failed = Signal(str, int)
-
-
-class _PipelineLoadRunnable(QRunnable):
-    """Runs DICOM + CSV ingestion off the GUI thread."""
-
-    def __init__(
-        self,
-        fn: Any,
-        signals: _PipelineLoaderSignals,
-        generation: int,
-    ) -> None:
-        super().__init__()
-        self._fn = fn
-        self._signals = signals
-        self._generation = generation
-
-    def run(self) -> None:  # noqa: PLR6301 — QRunnable API
-        try:
-            out = self._fn()
-            self._signals.finished.emit(out, self._generation)
-        except Exception as exc:
-            logger.exception("Background plan/CSV load failed")
-            self._signals.failed.emit(str(exc), self._generation)
-
-
-_MUTED_HINT = "#5c5c5c"
-_MUTED_BODY = "#4a4a4a"
-_MUTED_HELP = "#555555"
-
-_DEFAULT_GUI_STATE: dict[str, object] = {
-    "dcm_path": "",
-    "csv_path": "",
-    "window_geometry": "1400x900",
-    "layer_assign_mode": "gate_counter",
-    "layer_gap_s": sc_const.TIME_LAYER_GAP_S_DEFAULT,
-    "refill_same_spot_xy_tol_mm": sc_const.REFILL_SAME_SPOT_XY_TOLERANCE_MM,
-    "viterbi_advance_penalty_mm2": sc_const.VITERBI_LAYER_ADVANCE_PENALTY_MM2_DEFAULT,
-    "weight_measured_by_channel_sum": True,
-    "spot_weight_mode": sc_const.SPOT_WEIGHT_MODE_DEFAULT,
-    "aggregate_spots_by_gate": True,
-    "aggregate_even_rows_after_odd": sc_const.AGGREGATE_EVEN_ROWS_AFTER_ODD_DEFAULT,
-    "auto_align_detector_xy": True,
-    "bounds_xy_tick_mm": sc_const.BOUNDS_XY_TICK_MM_DEFAULT,
-    "plan_qa_coloring": True,
-    "plan_qa_pass_mm": sc_const.PLAN_QA_PASS_MM_DEFAULT,
-    "plan_qa_warn_mm": sc_const.PLAN_QA_WARN_MM_DEFAULT,
-    "plan_qa_draw_error_lines": False,
-    "plan_qa_hide_pass_spots": False,
-    "scale_plan_spots_by_dicom_fwhm": False,
-    "measured_spots_sigma_world_mm": False,
-    "z_axis_proton_water_depth_mm": True,
-    "view_projection_perspective": True,
-    "slice_band_on": False,
-    "slice_band_center_i": 0,
-    # Increment when the JSON schema changes so migrations can be written if needed.
-    "gui_state_schema_version": 1,
-}
-
-
-def _parse_layer_gap_s(raw: str) -> float | None:
-    try:
-        v = float(str(raw).strip())
-        if v > 0.0 and v < 3600.0:
-            return v
-    except (ValueError, TypeError):
-        pass
-    return None
-
-
-def _parse_refill_xy_tol_mm(raw: str) -> float | None:
-    try:
-        v = float(str(raw).strip())
-        if v > 0.0 and v < 1_000.0:
-            return v
-    except (ValueError, TypeError):
-        pass
-    return None
-
-
-def _parse_viterbi_penalty_mm2(raw: str) -> float | None:
-    try:
-        v = float(str(raw).strip())
-        if v >= 0.0 and v <= 1.0e8:
-            return v
-    except (ValueError, TypeError):
-        pass
-    return None
-
-
-def _parse_bounds_xy_tick_mm(raw: str) -> float | None:
-    """Positive mm → granular ticks; 0 → coarse PyVista default (5 labels)."""
-    try:
-        v = float(str(raw).strip())
-        if v == 0.0:
-            return 0.0
-        if 0.05 <= v <= 500.0:
-            return v
-    except (ValueError, TypeError):
-        pass
-    return None
-
-
-def _parse_aggregate_even_tail_n(raw: str) -> int | None:
-    """Gate-counter aggregate: 0 = close spot on odd→even only; max capped in
-    :data:`spot_check.constants.AGGREGATE_EVEN_TAIL_MAX`."""
-    try:
-        v = int(float(str(raw).strip()))
-        mx = int(sc_const.AGGREGATE_EVEN_TAIL_MAX)
-        if 0 <= v <= mx:
-            return v
-    except (ValueError, TypeError):
-        pass
-    return None
-
-
-def _parse_plan_qa_thresholds(pass_raw: str, warn_raw: str) -> tuple[float, float] | None:
-    """Strict pass / warn limits in mm (XY distance to NN plan on layer): 0 < pass < warn ≤ 500."""
-    try:
-        a = float(str(pass_raw).strip())
-        b = float(str(warn_raw).strip())
-        if 0.0 < a < b <= 500.0:
-            return a, b
-    except (ValueError, TypeError):
-        pass
-    return None
-
-
-@dataclass(frozen=True)
-class _GuiRefreshContext:
-    """Validated GUI inputs for one refresh (file paths + layering + QA)."""
-
-    dcm: Path
-    csv_path: Path
-    xy_tick_use: float
-    qa_pass_f: float
-    qa_warn_f: float
-    layer_mode: str
-    gap: float
-    xy_tol: float
-    trust_stay: float
-    vp_f: float
-    aggregate_spots: bool
-    agg_even_n: int
-    spot_weight_mode_run: str
-    pipeline_key: tuple[Any, ...]
-
-
-def _gui_file_mtime(path: Path) -> float:
-    try:
-        return float(path.stat().st_mtime)
-    except OSError:
-        return -1.0
-
-
-@dataclass(frozen=True)
-class _PipelineLoadOK:
-    """Result of background DICOM + CSV load (passed to the GUI thread)."""
-
-    pipeline_key: tuple[Any, ...]
-    label: str
-    planned: list[tuple[float, float, float]]
-    plan_fwhm_xy: Any
-    n_plan_kept: int
-    n_plan_raw: int
-    measured_unaligned: list[tuple[float, ...]]
-    csv_display_name: str
-    measured_aligned: list[tuple[float, ...]] | None = None
-    align_info: Any | None = None
-
-
-def _pipeline_load_job(
-    dcm: Path,
-    csv_path: Path,
-    *,
-    layer_mode: str,
-    gap: float,
-    xy_tol: float,
-    trust_stay: float,
-    vp_f: float,
-    aggregate_spots: bool,
-    aggregate_even_rows_after_odd: int,
-    spot_weight_mode: str,
-    auto_align: bool = False,
-) -> _PipelineLoadOK:
-    """Parse plan + acquisition off the Qt GUI thread (optional detector XY align)."""
-    p = analysis
-    label = str(pydicom.dcmread(dcm, stop_before_pixels=True, force=True).get("RTPlanLabel", ""))
-    planned, plan_fwhm_xy, n_plan_kept, n_plan_raw = p.planned_spot_xyz_and_counts_from_dicom(dcm)
-    measured_unaligned = p.measured_spot_abc_from_csv(
-        csv_path,
-        max_points=None,
-        planned_xyz=planned,
-        a_is_x=False,
-        layer_mode=layer_mode,
-        layer_gap_s=gap,
-        refill_same_spot_xy_tol_mm=xy_tol,
-        refill_trust_time_gap_stay_dist_mm=trust_stay,
-        viterbi_advance_penalty_mm2=vp_f,
-        aggregate_spots=aggregate_spots,
-        aggregate_even_rows_after_odd=int(aggregate_even_rows_after_odd),
-        spot_weight_mode=spot_weight_mode,
-    )
-    if not measured_unaligned:
-        raise ValueError("No measured rows to plot.")
-    measured_aligned: list[tuple[float, ...]] | None = None
-    align_info: Any | None = None
-    if auto_align:
-        measured_aligned, align_info = p.align_measured_to_plan_detector_xy(
-            planned,
-            measured_unaligned,
-            a_is_x=False,
-        )
-    pipeline_key = (
-        str(dcm.resolve()),
-        _gui_file_mtime(dcm),
-        str(csv_path.resolve()),
-        _gui_file_mtime(csv_path),
-        layer_mode,
-        float(gap),
-        float(xy_tol),
-        float(vp_f),
-        bool(aggregate_spots),
-        int(aggregate_even_rows_after_odd),
-        spot_weight_mode,
-    )
-    return _PipelineLoadOK(
-        pipeline_key=pipeline_key,
-        label=label,
-        planned=planned,
-        plan_fwhm_xy=plan_fwhm_xy,
-        n_plan_kept=n_plan_kept,
-        n_plan_raw=n_plan_raw,
-        measured_unaligned=list(measured_unaligned),
-        csv_display_name=csv_path.name,
-        measured_aligned=list(measured_aligned) if measured_aligned is not None else None,
-        align_info=align_info,
-    )
-
-
-def _spot_weight_mode_from_saved(raw: object) -> str:
-    try:
-        return analysis.normalize_measured_spot_weight_mode(str(raw))
-    except (ValueError, TypeError):
-        return sc_const.SPOT_WEIGHT_MODE_DEFAULT
-
-
-def _load_gui_state() -> dict[str, object]:
-    data: dict[str, object] = dict(_DEFAULT_GUI_STATE)
-    state_file = _GUI_STATE_FILE
-    if not state_file.is_file() and _LEGACY_GUI_STATE_FILE.is_file():
-        state_file = _LEGACY_GUI_STATE_FILE
-    try:
-        if state_file.is_file():
-            loaded = json.loads(state_file.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data.update(loaded)
-    except json.JSONDecodeError as exc:
-        logger.warning(
-            "GUI state file %s is not valid JSON (%s); using defaults.",
-            state_file,
-            exc,
-        )
-    except (OSError, TypeError) as exc:
-        logger.warning("Could not load GUI state from %s: %s", state_file, exc)
-    return data
-
-
-def _save_gui_state(
-    *,
-    dcm_path: str,
-    csv_path: str,
-    window_geometry: str,
-    layer_assign_mode: str,
-    layer_gap_s: float,
-    refill_same_spot_xy_tol_mm: float,
-    viterbi_advance_penalty_mm2: float,
-    weight_measured_by_channel_sum: bool,
-    spot_weight_mode: str,
-    aggregate_spots_by_gate: bool,
-    aggregate_even_rows_after_odd: int,
-    auto_align_detector_xy: bool,
-    bounds_xy_tick_mm: float,
-    plan_qa_coloring: bool,
-    plan_qa_pass_mm: float,
-    plan_qa_warn_mm: float,
-    plan_qa_draw_error_lines: bool,
-    plan_qa_hide_pass_spots: bool,
-    scale_plan_spots_by_dicom_fwhm: bool,
-    measured_spots_sigma_world_mm: bool,
-    z_axis_proton_water_depth_mm: bool,
-    view_projection_perspective: bool,
-    slice_band_on: bool,
-    slice_band_center_i: int,
-) -> None:
-    try:
-        _GUI_STATE_FILE.write_text(
-            json.dumps(
-                {
-                    "dcm_path": dcm_path,
-                    "csv_path": csv_path,
-                    "window_geometry": window_geometry,
-                    "layer_assign_mode": layer_assign_mode,
-                    "layer_gap_s": layer_gap_s,
-                    "refill_same_spot_xy_tol_mm": refill_same_spot_xy_tol_mm,
-                    "viterbi_advance_penalty_mm2": viterbi_advance_penalty_mm2,
-                    "weight_measured_by_channel_sum": weight_measured_by_channel_sum,
-                    "spot_weight_mode": spot_weight_mode,
-                    "aggregate_spots_by_gate": aggregate_spots_by_gate,
-                    "aggregate_even_rows_after_odd": aggregate_even_rows_after_odd,
-                    "auto_align_detector_xy": auto_align_detector_xy,
-                    "bounds_xy_tick_mm": bounds_xy_tick_mm,
-                    "plan_qa_coloring": plan_qa_coloring,
-                    "plan_qa_pass_mm": plan_qa_pass_mm,
-                    "plan_qa_warn_mm": plan_qa_warn_mm,
-                    "plan_qa_draw_error_lines": plan_qa_draw_error_lines,
-                    "plan_qa_hide_pass_spots": plan_qa_hide_pass_spots,
-                    "scale_plan_spots_by_dicom_fwhm": scale_plan_spots_by_dicom_fwhm,
-                    "measured_spots_sigma_world_mm": measured_spots_sigma_world_mm,
-                    "z_axis_proton_water_depth_mm": z_axis_proton_water_depth_mm,
-                    "view_projection_perspective": view_projection_perspective,
-                    "slice_band_on": slice_band_on,
-                    "slice_band_center_i": slice_band_center_i,
-                    "gui_state_schema_version": int(_DEFAULT_GUI_STATE["gui_state_schema_version"]),
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        logger.warning("Could not write GUI state file %s: %s", _GUI_STATE_FILE, exc)
-
-
-def _sanitize_tk_geometry(raw: object, *, default: str = "1400x900") -> str:
-    """Accept saved Tk geometry strings; fall back if obviously invalid."""
-    s = str(raw or "").strip()
-    if not s:
-        return default
-    # "WxH" or "WxH+X+Y"
-    try:
-        wh = s.split("+", 1)[0]
-        parts = wh.lower().replace("x", " ").split()
-        if len(parts) != 2:
-            return default
-        w, h = int(float(parts[0])), int(float(parts[1]))
-        if w < 200 or h < 200 or w > 16_000 or h > 16_000:
-            return default
-    except (ValueError, TypeError):
-        return default
-    return s
-
-
-def _apply_saved_geometry(win: QMainWindow, raw: object) -> None:
-    s = _sanitize_tk_geometry(raw, default="1400x900")
-    try:
-        tokens = s.replace("+", " ").split()
-        wh = tokens[0].lower().split("x")
-        w, h = int(float(wh[0])), int(float(wh[1]))
-        win.resize(max(w, 400), max(h, 400))
-        if len(tokens) >= 3:
-            win.move(int(float(tokens[1])), int(float(tokens[2])))
-    except (ValueError, IndexError, TypeError):
-        win.resize(1400, 900)
-
-
-def _geom_from_win(win: QMainWindow) -> str:
-    g = win.geometry()
-    return f"{g.width()}x{g.height()}+{g.x()}+{g.y()}"
-
-
 def run_gui() -> None:
     configure_logging()
-    saved = _load_gui_state()
+    saved = load_gui_state()
     app = QApplication.instance() or QApplication(sys.argv)
 
     win = QMainWindow()
     win.setWindowTitle(f"SpotCheck v{__version__} — Plan vs acquisition")
     win.setMinimumSize(1040, 640)
-    _apply_saved_geometry(win, saved.get("window_geometry"))
+    apply_saved_geometry(win, saved.get("window_geometry"))
 
     central = QWidget()
     win.setCentralWidget(central)
@@ -514,7 +157,7 @@ def run_gui() -> None:
     def _add_hint_lbl(text: str) -> QLabel:
         hint = QLabel(text)
         hint.setWordWrap(True)
-        hint.setStyleSheet(f"color: {_MUTED_HINT};")
+        hint.setStyleSheet(f"color: {MUTED_HINT};")
         hint.setMinimumWidth(0)
         hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         hint.setMaximumWidth(800)
@@ -598,7 +241,7 @@ def run_gui() -> None:
         "Low weight → fainter measured markers. Source is the Weight dropdown "
         "(channel sum, Fit Amplitude A, or Fit Amplitude B)."
     )
-    swm0 = _spot_weight_mode_from_saved(saved.get("spot_weight_mode"))
+    swm0 = spot_weight_mode_from_saved(saved.get("spot_weight_mode"))
     combo_sw = QComboBox()
     for _m, lbl in _SPOT_WEIGHT_COMBO_LABELS:
         combo_sw.addItem(lbl, _m)
@@ -637,13 +280,13 @@ def run_gui() -> None:
 
     help_lbl = QLabel()
     help_lbl.setWordWrap(True)
-    help_lbl.setStyleSheet(f"color: {_MUTED_HELP}; font-size: 9pt;")
+    help_lbl.setStyleSheet(f"color: {MUTED_HELP}; font-size: 9pt;")
     help_lbl.setMinimumWidth(0)
     help_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
     agg_intro_lbl = QLabel()
     agg_intro_lbl.setWordWrap(True)
-    agg_intro_lbl.setStyleSheet(f"color: {_MUTED_HELP}; font-size: 9pt;")
+    agg_intro_lbl.setStyleSheet(f"color: {MUTED_HELP}; font-size: 9pt;")
     agg_intro_lbl.setMinimumWidth(0)
     agg_intro_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
@@ -664,7 +307,7 @@ def run_gui() -> None:
     slice_sli.setValue(min(_slice_ci0, slice_sli.maximum()))
     slice_status = QLabel("Band slider enables after first good plot.")
     slice_status.setWordWrap(True)
-    slice_status.setStyleSheet(f"color: {_MUTED_HINT}; font-size: 9pt;")
+    slice_status.setStyleSheet(f"color: {MUTED_HINT}; font-size: 9pt;")
     slice_status.setMinimumWidth(0)
     slice_status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
@@ -677,29 +320,29 @@ def run_gui() -> None:
 
     status_lbl = QLabel("Browse or paste paths. Summary here after each update.")
     status_lbl.setWordWrap(True)
-    status_lbl.setStyleSheet(f"color: {_MUTED_BODY};")
+    status_lbl.setStyleSheet(f"color: {MUTED_BODY};")
     status_lbl.setMinimumWidth(0)
     status_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
     def persist() -> None:
-        gap = _parse_layer_gap_s(e_gap.text())
+        gap = parse_layer_gap_s(e_gap.text())
         if gap is None:
             gap = sc_const.TIME_LAYER_GAP_S_DEFAULT
             e_gap.setText(f"{gap:g}")
-        xy_tol = _parse_refill_xy_tol_mm(e_refill.text())
+        xy_tol = parse_refill_xy_tol_mm(e_refill.text())
         if xy_tol is None:
             xy_tol = sc_const.REFILL_SAME_SPOT_XY_TOLERANCE_MM
             e_refill.setText(f"{xy_tol:g}")
         mode = "unified" if rb_unified.isChecked() else "gate_counter"
-        vp = _parse_viterbi_penalty_mm2(e_vit.text())
+        vp = parse_viterbi_penalty_mm2(e_vit.text())
         if vp is None:
             vp = sc_const.VITERBI_LAYER_ADVANCE_PENALTY_MM2_DEFAULT
             e_vit.setText(f"{vp:g}")
-        xy_tick_save = _parse_bounds_xy_tick_mm(e_bxy.text())
+        xy_tick_save = parse_bounds_xy_tick_mm(e_bxy.text())
         if xy_tick_save is None:
             xy_tick_save = float(sc_const.BOUNDS_XY_TICK_MM_DEFAULT)
             e_bxy.setText(f"{xy_tick_save:g}")
-        qa_thr = _parse_plan_qa_thresholds(e_qa_pass.text(), e_qa_warn.text())
+        qa_thr = parse_plan_qa_thresholds(e_qa_pass.text(), e_qa_warn.text())
         if qa_thr is None:
             qa_thr = (
                 float(sc_const.PLAN_QA_PASS_MM_DEFAULT),
@@ -708,7 +351,7 @@ def run_gui() -> None:
             e_qa_pass.setText(f"{qa_thr[0]:g}")
             e_qa_warn.setText(f"{qa_thr[1]:g}")
         qa_pass_sv, qa_warn_sv = qa_thr
-        tail_n = _parse_aggregate_even_tail_n(e_agg_even.text())
+        tail_n = parse_aggregate_even_tail_n(e_agg_even.text())
         if tail_n is None:
             tail_n = int(sc_const.AGGREGATE_EVEN_ROWS_AFTER_ODD_DEFAULT)
             e_agg_even.setText(str(tail_n))
@@ -726,10 +369,10 @@ def run_gui() -> None:
             _sb_ci_persist = int(slice_sli.value())
         except (AttributeError, TypeError, ValueError):
             _sb_ci_persist = 0
-        _save_gui_state(
+        save_gui_state(
             dcm_path=e_dcm.text().strip(),
             csv_path=e_csv.text().strip(),
-            window_geometry=_geom_from_win(win),
+            window_geometry=geom_from_win(win),
             layer_assign_mode=mode,
             layer_gap_s=gap,
             refill_same_spot_xy_tol_mm=xy_tol,
@@ -952,7 +595,7 @@ def run_gui() -> None:
 
     auto_hint = QLabel("3D refreshes when inputs validate. Numbers debounce briefly after typing.")
     auto_hint.setWordWrap(True)
-    auto_hint.setStyleSheet(f"color: {_MUTED_HINT}; font-size: 9pt;")
+    auto_hint.setStyleSheet(f"color: {MUTED_HINT}; font-size: 9pt;")
     auto_hint.setMinimumWidth(0)
     auto_hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
     drawer_layout.addWidget(auto_hint)
@@ -990,7 +633,7 @@ def run_gui() -> None:
 
     drawer_layout.addWidget(status_lbl)
     foot = QLabel("pydicom · PyVista · PySide6. Engineering use only.")
-    foot.setStyleSheet(f"color: {_MUTED_HINT}; font-size: 8pt;")
+    foot.setStyleSheet(f"color: {MUTED_HINT}; font-size: 8pt;")
     foot.setWordWrap(True)
     foot.setMinimumWidth(0)
     foot.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
@@ -1051,8 +694,8 @@ def run_gui() -> None:
     load_generation = 0
     load_pool = QThreadPool(win)
     load_pool.setMaxThreadCount(1)
-    load_signals = _PipelineLoaderSignals(win)
-    pending_ctx: _GuiRefreshContext | None = None
+    load_signals = PipelineLoaderSignals(win)
+    pending_ctx: GuiRefreshContext | None = None
     _loading_gen: int | None = None
     _spinner_frame = 0
 
@@ -1171,7 +814,7 @@ def run_gui() -> None:
     def _schedule_refresh() -> None:
         _debounce.start()
 
-    def _finalize_refresh(ctx: _GuiRefreshContext, *, need_data: bool) -> None:
+    def _finalize_refresh(ctx: GuiRefreshContext, *, need_data: bool) -> None:
         nonlocal pending_ctx
         p = analysis
         pipeline_key = ctx.pipeline_key
@@ -1323,7 +966,7 @@ def run_gui() -> None:
         nonlocal pending_ctx, load_generation
         if generation != load_generation:
             return
-        if not isinstance(res, _PipelineLoadOK):
+        if not isinstance(res, PipelineLoadOK):
             _hide_loading(generation)
             return
         ctx0 = pending_ctx
@@ -1411,7 +1054,7 @@ def run_gui() -> None:
             _vtk_placeholder_message("Select a valid CSV.", error=True)
             status_lbl.setText("Need valid CSV.")
             return
-        xy_tick_use = _parse_bounds_xy_tick_mm(e_bxy.text())
+        xy_tick_use = parse_bounds_xy_tick_mm(e_bxy.text())
         if xy_tick_use is None:
             _bump_load_generation_invalidate_async()
             analysis.idle_slice_band_controls_qt(slice_qt_bindings)
@@ -1424,7 +1067,7 @@ def run_gui() -> None:
         qa_pass_f = float(sc_const.PLAN_QA_PASS_MM_DEFAULT)
         qa_warn_f = float(sc_const.PLAN_QA_WARN_MM_DEFAULT)
         if cb_pqa.isChecked():
-            qa_pair = _parse_plan_qa_thresholds(e_qa_pass.text(), e_qa_warn.text())
+            qa_pair = parse_plan_qa_thresholds(e_qa_pass.text(), e_qa_warn.text())
             if qa_pair is None:
                 _bump_load_generation_invalidate_async()
                 analysis.idle_slice_band_controls_qt(slice_qt_bindings)
@@ -1438,7 +1081,7 @@ def run_gui() -> None:
         layer_mode = "unified" if rb_unified.isChecked() else "gate_counter"
         trust_stay = float(sc_const.REFILL_TRUST_TIME_GAP_STAY_DIST_MM)
         if layer_mode == "unified":
-            gap = _parse_layer_gap_s(e_gap.text())
+            gap = parse_layer_gap_s(e_gap.text())
             if gap is None:
                 _bump_load_generation_invalidate_async()
                 analysis.idle_slice_band_controls_qt(slice_qt_bindings)
@@ -1448,7 +1091,7 @@ def run_gui() -> None:
                 )
                 status_lbl.setText("Fix min Δt (s).")
                 return
-            xy_tol = _parse_refill_xy_tol_mm(e_refill.text())
+            xy_tol = parse_refill_xy_tol_mm(e_refill.text())
             if xy_tol is None:
                 _bump_load_generation_invalidate_async()
                 analysis.idle_slice_band_controls_qt(slice_qt_bindings)
@@ -1458,7 +1101,7 @@ def run_gui() -> None:
                 )
                 status_lbl.setText("Fix refill XY (mm).")
                 return
-            vp_en = _parse_viterbi_penalty_mm2(e_vit.text())
+            vp_en = parse_viterbi_penalty_mm2(e_vit.text())
             if vp_en is None:
                 _bump_load_generation_invalidate_async()
                 analysis.idle_slice_band_controls_qt(slice_qt_bindings)
@@ -1471,10 +1114,10 @@ def run_gui() -> None:
         else:
             gap = float(sc_const.TIME_LAYER_GAP_S_DEFAULT)
             xy_tol = float(sc_const.REFILL_SAME_SPOT_XY_TOLERANCE_MM)
-        vp_f = _parse_viterbi_penalty_mm2(e_vit.text())
+        vp_f = parse_viterbi_penalty_mm2(e_vit.text())
         if vp_f is None:
             vp_f = float(sc_const.VITERBI_LAYER_ADVANCE_PENALTY_MM2_DEFAULT)
-        agg_even_n = _parse_aggregate_even_tail_n(e_agg_even.text())
+        agg_even_n = parse_aggregate_even_tail_n(e_agg_even.text())
         if agg_even_n is None:
             _bump_load_generation_invalidate_async()
             analysis.idle_slice_band_controls_qt(slice_qt_bindings)
@@ -1491,9 +1134,9 @@ def run_gui() -> None:
 
             pipeline_key = (
                 str(dcm.resolve()),
-                _gui_file_mtime(dcm),
+                file_mtime(dcm),
                 str(csv_path.resolve()),
-                _gui_file_mtime(csv_path),
+                file_mtime(csv_path),
                 layer_mode,
                 float(gap),
                 float(xy_tol),
@@ -1502,7 +1145,7 @@ def run_gui() -> None:
                 int(agg_even_n),
                 spot_weight_mode_run,
             )
-            ctx = _GuiRefreshContext(
+            ctx = GuiRefreshContext(
                 dcm=dcm,
                 csv_path=csv_path,
                 xy_tick_use=float(xy_tick_use),
@@ -1534,8 +1177,8 @@ def run_gui() -> None:
                 status_lbl.setText(load_note)
                 _show_loading(gen, load_note)
 
-                def _job() -> _PipelineLoadOK:
-                    return _pipeline_load_job(
+                def _job() -> PipelineLoadOK:
+                    return pipeline_load_job(
                         ctx.dcm,
                         ctx.csv_path,
                         layer_mode=ctx.layer_mode,
@@ -1549,7 +1192,7 @@ def run_gui() -> None:
                         auto_align=bool(cb_align.isChecked()),
                     )
 
-                load_pool.start(_PipelineLoadRunnable(_job, load_signals, gen))
+                load_pool.start(PipelineLoadRunnable(_job, load_signals, gen))
                 return
 
             planned = _plot_cache["planned"]

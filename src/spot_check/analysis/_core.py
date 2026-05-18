@@ -71,18 +71,16 @@ from __future__ import annotations
 
 import bisect
 import csv
+import importlib.util
 import math
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
 
-try:
-    import pydicom
-except ImportError as e:  # pragma: no cover
-    raise ImportError("RT Ion analysis requires pydicom. Install with: pip install pydicom") from e
+if importlib.util.find_spec("pydicom") is None:  # pragma: no cover
+    raise ImportError("RT Ion analysis requires pydicom. Install with: pip install pydicom")
 
 try:
     import pyvista as pv
@@ -100,7 +98,6 @@ except ImportError:  # pragma: no cover
 
 from spot_check.constants import (
     _DEFAULT_PLAN_FWHM_MM_WHEN_MISSING,
-    _ENERGY_AXIS_VIEW_SCALE,
     _MEASURED_COLOR_3D,
     _PARTIAL_AXIS_MEAS_COLOR_3D,
     _PLAN_COLOR_3D,
@@ -111,12 +108,8 @@ from spot_check.constants import (
     _SPOT_WEIGHT_MODES,
     AGGREGATE_EVEN_ROWS_AFTER_ODD_DEFAULT,
     AGGREGATE_EVEN_TAIL_MAX,
-    BOUNDS_XY_LABELS_MAX,
     BOUNDS_XY_TICK_MM_DEFAULT,
-    BOUNDS_Z_TICK_MEV_DEFAULT,
-    BOUNDS_Z_TICK_MM_DEFAULT,
     CHANNEL_SUM_KEY,
-    CSV_LABEL_RE,
     DETECTOR_ALIGN_MAX_FIT_SAMPLES,
     DISPLAY_GLYPH_INSTANCE_CAP,
     DISPLAY_POINT_MESH_TARGET,
@@ -129,8 +122,6 @@ from spot_check.constants import (
     MEASURED_SIGMA_GLYPH_SCALE_DEFAULT,
     PLAN_QA_PASS_MM_DEFAULT,
     PLAN_QA_WARN_MM_DEFAULT,
-    PROTON_WATER_CSDA_RANGE_MM_COEFF,
-    PROTON_WATER_CSDA_RANGE_MM_POW,
     REFILL_REJECT_EXTRA_MM,
     REFILL_REJECT_RATIO,
     REFILL_SAME_SPOT_XY_TOLERANCE_MM,
@@ -149,117 +140,19 @@ from spot_check.exceptions import (
     GeometryConfigError,
     PlanDataError,
 )
+from spot_check.geometry import (
+    cube_z_axis_spec as _cube_z_axis_spec,
+)
+from spot_check.geometry import (
+    n_cube_axis_labels_for_mm_step,
+    nominal_mev_to_plot_z,
+)
+from spot_check.models import Comparison3DData, CubeZAxisSpec, DetectorRigidAlign2D
 
 FOLDER = project_root()
 logger = logging.getLogger(__name__)
 
-
-def proton_cda_water_range_mm(energy_mev: np.ndarray | float) -> np.ndarray:
-    """Approximate mono-energetic proton CSDA range in water (mm).
-
-    Power law fitted for ~30–230 MeV (display-only; ±~10 % vs PSTAR). Not valid for ions
-    other than protons; not for clinical range QA.
-    """
-    e = np.maximum(np.asarray(energy_mev, dtype=np.float64), 0.05)
-    return PROTON_WATER_CSDA_RANGE_MM_COEFF * np.power(e, PROTON_WATER_CSDA_RANGE_MM_POW)
-
-
-def nominal_mev_to_plot_z(
-    energy_mev: np.ndarray,
-    *,
-    use_proton_water_depth_mm: bool,
-) -> np.ndarray:
-    """Third plot coordinate from nominal beam energy (MeV).
-
-    Default: ``−E × _ENERGY_AXIS_VIEW_SCALE`` (arbitrary scene stretch).
-    Depth mode: ``−R_w(E)`` mm (CSDA proton range in water), so X/Y/Z are all mm; sign matches
-    the legacy \"higher E → more negative Z\" layout via ``−range``.
-    """
-    e = np.asarray(energy_mev, dtype=np.float64)
-    if use_proton_water_depth_mm:
-        return -proton_cda_water_range_mm(e)
-    return -e * float(_ENERGY_AXIS_VIEW_SCALE)
-
-
-def n_cube_axis_labels_for_mm_step(
-    vmin: float,
-    vmax: float,
-    step_mm: float,
-    *,
-    max_n: int = BOUNDS_XY_LABELS_MAX,
-) -> int:
-    """``n`` for ``CubeAxesActor`` so tick spacing is about ``step_mm`` (linspace uses ``n``
-    samples).
-
-    PyVista uses ``np.linspace(vmin, vmax, n)``, so interval size is ``span / (n - 1)``.
-    """
-    if step_mm <= 0 or not math.isfinite(step_mm):
-        return 5
-    lo, hi = float(min(vmin, vmax)), float(max(vmin, vmax))
-    span = hi - lo
-    if not math.isfinite(span) or span <= 0:
-        return 5
-    n = int(math.ceil(span / step_mm)) + 1
-    return max(5, min(n, max_n))
-
-
-@dataclass(frozen=True)
-class _CubeZAxisSpec:
-    zmin_scene: float
-    zmax_scene: float
-    z_label_at_min: float
-    z_label_at_max: float
-    n_zlabels: int
-    ztitle: str
-
-
-def _cube_z_axis_spec(
-    z_scene: np.ndarray,
-    *,
-    use_proton_water_depth_mm: bool,
-    tick_mm: float,
-    tick_mev: float = BOUNDS_Z_TICK_MEV_DEFAULT,
-) -> _CubeZAxisSpec:
-    """Padded scene-Z bounds plus cube-axis label range and tick count for PyVista
-    ``show_bounds``."""
-    z = np.asarray(z_scene, dtype=np.float64).reshape(-1)
-    if z.size == 0:
-        zmin_b, zmax_b = 0.0, 1.0
-    else:
-        zmin_b = float(np.min(z))
-        zmax_b = float(np.max(z))
-    z_span = zmax_b - zmin_b
-    if use_proton_water_depth_mm:
-        min_pad = 0.5
-        if not math.isfinite(z_span) or z_span <= 0.0:
-            z_span = min_pad * 2.0
-            zmin_b -= min_pad
-            zmax_b += min_pad
-        z_pad = max(z_span * 0.06, min_pad)
-        zmin_p = zmin_b - z_pad * 0.5
-        zmax_p = zmax_b + z_pad * 0.5
-        z_lbl_min = -zmin_p
-        z_lbl_max = -zmax_p
-        z_step = (
-            float(tick_mm)
-            if tick_mm > 0.0 and math.isfinite(tick_mm)
-            else float(BOUNDS_Z_TICK_MM_DEFAULT)
-        )
-        n_z = n_cube_axis_labels_for_mm_step(z_lbl_min, z_lbl_max, z_step)
-        return _CubeZAxisSpec(zmin_p, zmax_p, z_lbl_min, z_lbl_max, n_z, "Water depth (mm)")
-    s_view = float(_ENERGY_AXIS_VIEW_SCALE)
-    min_pad = 0.5 * s_view
-    if not math.isfinite(z_span) or z_span <= 0.0:
-        z_span = min_pad * 2.0
-        zmin_b -= min_pad
-        zmax_b += min_pad
-    z_pad = max(z_span * 0.06, min_pad)
-    zmin_p = zmin_b - z_pad * 0.5
-    zmax_p = zmax_b + z_pad * 0.5
-    e_at_zmin = -zmin_p / s_view
-    e_at_zmax = -zmax_p / s_view
-    n_z = n_cube_axis_labels_for_mm_step(e_at_zmin, e_at_zmax, float(tick_mev))
-    return _CubeZAxisSpec(zmin_p, zmax_p, e_at_zmin, e_at_zmax, n_z, "Z (MeV)")
+_CubeZAxisSpec = CubeZAxisSpec
 
 
 def _opt_float_cell(row: dict[str, str], key: str) -> float | None:
@@ -889,23 +782,6 @@ def format_plan_qa_caption(
     )
 
 
-@dataclass
-class Comparison3DData:
-    plan_xyz: np.ndarray
-    meas_xyz: np.ndarray
-    xlab: str
-    ylab: str
-    e_hi: float
-    e_lo: float
-    meas_weight: np.ndarray | None = None
-    # 0 = both axes from CSV; 1 = raw A missing; 2 = raw B missing (plan-imputed axis).
-    meas_partial_raw: np.ndarray | None = None
-    # Aligned with plan_xyz rows: Scanning Spot Size FWHM (mm) in gantry X/Y, or NaN if unknown.
-    plan_fwhm_xy_mm: np.ndarray | None = None
-    # One row per meas_xyz: fit σ in mm mapped to the same plot X/Y axes as mx, my (NaN if missing).
-    meas_sigma_xy_mm: np.ndarray | None = None
-
-
 def nominal_layer_energies_mev(planned_xyz: list[tuple[float, float, float]]) -> list[float]:
     out: list[float] = []
     last: float | None = None
@@ -990,21 +866,6 @@ def _layer_advance_plausible_vs_refill(
         d_next > REFILL_REJECT_RATIO * ratio_base
     )
     return not worse
-
-
-@dataclass(frozen=True)
-class DetectorRigidAlign2D:
-    """2D rigid map measured → plan: ``p ≈ R(θ) @ m + t`` with θ CCW in the plan X–Y plane."""
-
-    theta_deg: float
-    tx_mm: float
-    ty_mm: float
-    rms_nn_mm: float
-    rms_residual_mm: float
-    n_pairs: int
-    ab_axes_swapped: bool = False
-    icp_iterations: int = 0
-    n_pairs_fit: int = 0
 
 
 _DETECTOR_ALIGN_ICP_MAX_ITER = 25
@@ -1647,171 +1508,6 @@ def build_unified_advance_penalty_mm2(
     pen[1:] += np.where(~long_gap, float(short_dt_extra_mm2), 0.0)
     pen[1:] += np.where(long_gap & same_small, float(same_spot_refill_block_mm2), 0.0)
     return pen
-
-
-def _flatten_ds_list(seq: Any) -> list:
-    if seq is None:
-        return []
-    try:
-        return list(item for item in seq if item is not None)
-    except TypeError:
-        return []
-
-
-def infer_csv_plan_tag(stem: str) -> str | None:
-    m = CSV_LABEL_RE.match(stem)
-    return m.group(1) if m else None
-
-
-def rt_plan_label_from_csv_stem(stem: str) -> str | None:
-    tag = infer_csv_plan_tag(stem)
-    if not tag:
-        return None
-    m = re.match(r"(T0G\d+)", tag, re.IGNORECASE)
-    return m.group(1).upper() if m else None
-
-
-def find_dicom_for_csv(csv_path: Path, folder: Path = FOLDER) -> Path:
-    label = rt_plan_label_from_csv_stem(csv_path.stem)
-    if not label:
-        raise ValueError(f"Cannot infer RT plan label from CSV name: {csv_path.name}")
-    for p in sorted(folder.glob("*.dcm")):
-        ds = pydicom.dcmread(p, stop_before_pixels=True, force=True)
-        plan = str(ds.get("RTPlanLabel", "") or "").strip().upper()
-        if plan == label.upper():
-            return p
-    raise FileNotFoundError(f"No DICOM in {folder} with RTPlanLabel matching {label!r}")
-
-
-def _scanning_spot_size_xy_mm_from_cp(cp: Any) -> tuple[float, float] | None:
-    """DICOM (300A,0398) Scanning Spot Size: FWHM mm in gantry X then Y at isocenter; optional per
-    CP."""
-    raw = cp.get("ScanningSpotSize", None)
-    if raw is None:
-        return None
-    try:
-        seq = list(raw)
-        if len(seq) >= 2:
-            fx, fy = float(seq[0]), float(seq[1])
-            if (
-                math.isfinite(fx)
-                and math.isfinite(fy)
-                and fx > 0.0
-                and fy > 0.0
-                and fx < 500.0
-                and fy < 500.0
-            ):
-                return fx, fy
-    except (TypeError, ValueError):
-        pass
-    return None
-
-
-def _iter_planned_spot_slots_from_dataset(ds: Any):
-    """Yield (dropped_zero_weight, (x, y, energy), fwhm_xy_mm | None) for each spot slot.
-
-    ``fwhm_xy_mm`` repeats for all spots from the same ion control point (DICOM has one pair per
-    CP).
-    """
-    for beam in _flatten_ds_list(ds.get("IonBeamSequence")):
-        for cp in _flatten_ds_list(beam.get("IonControlPointSequence")):
-            n = int(cp.get("NumberOfScanSpotPositions", 0) or 0)
-            sm = cp.get("ScanSpotPositionMap", None)
-            if not n or sm is None:
-                continue
-            energy = float(cp.get("NominalBeamEnergy", 0.0) or 0.0)
-            coords = list(sm)
-            limit = min(len(coords), 2 * n)
-            weights: list[float] | None
-            raw_w = cp.get("ScanSpotMetersetWeights", None)
-            if raw_w is None:
-                weights = None
-            else:
-                try:
-                    weights = [float(x) for x in raw_w]
-                except (TypeError, ValueError):
-                    weights = None
-            fwhm_cp = _scanning_spot_size_xy_mm_from_cp(cp)
-            for i in range(0, limit, 2):
-                si = i // 2
-                drop = False
-                if weights is not None and si < len(weights):
-                    w = weights[si]
-                    if not math.isfinite(w) or w <= 0.0:
-                        drop = True
-                tpl = (float(coords[i]), float(coords[i + 1]), energy)
-                yield drop, tpl, fwhm_cp
-
-
-def planned_spot_xyz_and_counts_from_dicom(
-    dcm_path: Path,
-) -> tuple[list[tuple[float, float, float]], np.ndarray | None, int, int]:
-    """Extract planned spots plus optional per-spot FWHM from DICOM in one read.
-
-    Returns
-    -------
-    (spots, plan_fwhm_xy_mm, n_kept, n_raw)
-        ``plan_fwhm_xy_mm`` — shape ``(len(spots), 2)`` when any control point carries
-        ``ScanningSpotSize`` (300A,0398); else ``None``. Values are FWHM in mm (gantry X, Y).
-        Missing control-point values are stored as NaN and filled with the median when drawing.
-        ``n_raw`` — all XY slots in spot maps; ``n_kept`` — after meterset>0 filter
-        (``len(spots)``).
-    """
-    ds = pydicom.dcmread(dcm_path, stop_before_pixels=True, force=True)
-    out: list[tuple[float, float, float]] = []
-    fwhm_kept: list[tuple[float, float] | None] = []
-    n_raw = 0
-    any_fwhm = False
-    for drop, t, fwhm in _iter_planned_spot_slots_from_dataset(ds):
-        n_raw += 1
-        if not drop:
-            out.append(t)
-            fwhm_kept.append(fwhm)
-            if fwhm is not None:
-                any_fwhm = True
-    fwhm_arr: np.ndarray | None = None
-    if any_fwhm and fwhm_kept:
-        fx = np.empty(len(fwhm_kept), dtype=np.float64)
-        fy = np.empty(len(fwhm_kept), dtype=np.float64)
-        for i, pair in enumerate(fwhm_kept):
-            if pair is not None:
-                fx[i] = float(pair[0])
-                fy[i] = float(pair[1])
-            else:
-                fx[i] = np.nan
-                fy[i] = np.nan
-        fwhm_arr = np.column_stack([fx, fy])
-    n_kept = len(out)
-    logger.info(
-        "DICOM plan loaded: %s — %s spots kept, %s raw map slots",
-        dcm_path,
-        n_kept,
-        n_raw,
-    )
-    return out, fwhm_arr, n_kept, n_raw
-
-
-def planned_spot_xyz_from_dicom(dcm_path: Path) -> list[tuple[float, float, float]]:
-    """Extract planned spot (x, y, nominal MeV) from RT Ion beams.
-
-    If ``ScanSpotMetersetWeights`` (300A,0396) is present on a control point, spots with
-    weight <= 0 are omitted so transition / bookkeeping control points do not add phantom
-    targets. If the attribute is absent, all positions are kept (legacy plans).
-    """
-    spots, _, _, _ = planned_spot_xyz_and_counts_from_dicom(dcm_path)
-    return spots
-
-
-def planned_spot_position_counts_from_dicom(dcm_path: Path) -> tuple[int, int]:
-    """Counts aligned with :func:`planned_spot_xyz_from_dicom` (extra DICOM read, no spot list)."""
-    ds = pydicom.dcmread(dcm_path, stop_before_pixels=True, force=True)
-    n_raw = 0
-    n_kept = 0
-    for dropped, _t, _fw in _iter_planned_spot_slots_from_dataset(ds):
-        n_raw += 1
-        if not dropped:
-            n_kept += 1
-    return n_kept, n_raw
 
 
 def measured_spot_abc_from_csv(

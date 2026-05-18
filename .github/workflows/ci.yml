@@ -2,7 +2,6 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
   pull_request:
     branches: [main, master]
 
@@ -33,6 +32,44 @@ jobs:
 
       - name: Pytest
         run: pytest -q
+
+  build-windows-beta:
+    name: Windows exe (beta)
+    needs: test
+    if: github.event_name == 'push' && github.ref_type != 'tag'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Resolve beta version
+        id: ver
+        shell: bash
+        run: |
+          BASE=$(python -c "import pathlib, re; t=pathlib.Path('src/spot_check/_version.py').read_text(); print(re.search(r'__version__\\s*=\\s*[\"\\']([^\"\\']+)', t).group(1))")
+          SHORT="${GITHUB_SHA::7}"
+          BETA="${BASE}-beta.${GITHUB_RUN_NUMBER}.${SHORT}"
+          echo "value=$BETA" >> "$GITHUB_OUTPUT"
+          echo "Beta version: $BETA"
+
+      - name: Build Windows bundle
+        shell: bash
+        env:
+          SPOT_CHECK_VERSION: ${{ steps.ver.outputs.value }}
+        run: bash ./scripts/build-windows.sh
+
+      - name: Upload beta artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: SpotCheck-${{ steps.ver.outputs.value }}-windows-x64-beta
+          path: |
+            dist/SpotCheck/
+            dist/SpotCheck-${{ steps.ver.outputs.value }}-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30
 
   version-check:
     runs-on: ubuntu-latest

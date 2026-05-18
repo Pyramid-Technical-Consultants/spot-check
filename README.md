@@ -118,10 +118,15 @@ Test data under `test_data/` is not included in the bundle (and is gitignored).
 
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
-| **CI** | Push / PR to `main` | Ruff, compile, pytest |
-| **Release Windows** | Tag `v*` or manual | Build `.zip`, GitHub Release on tags |
+| **CI** | Push / PR to `main` / `master` | Ruff, compile, pytest |
+| **CI → Windows exe (beta)** | Every **push** (not tags) | Beta `.zip` artifact after tests pass |
+| **Release Windows** | Tag `v*` or manual | Stable `.zip` + GitHub Release on tags |
 
-Manual release build (Actions → *Release Windows* → *Run workflow*) without a tag.
+**Beta builds:** On each push, CI uploads `SpotCheck-<version>-beta.<run>.<sha>-windows-x64-beta` under **Actions → workflow run → Artifacts** (kept 30 days). The in-app version string matches (e.g. `1.0.0-beta.42.a1b2c3d`) so you can tell builds apart.
+
+**Stable releases:** Tag `v1.0.0` (must match `src/spot_check/_version.py`) → Release Windows workflow → GitHub Release + artifact.
+
+Manual stable build without a tag: Actions → *Release Windows* → *Run workflow*.
 
 ## Layout
 
@@ -131,9 +136,11 @@ spot-check/
 ├── packaging/spot-check.spec
 ├── scripts/build-windows.sh
 ├── src/spot_check/
-│   ├── _version.py
-│   ├── analysis.py
-│   ├── gui.py
+│   ├── analysis/     # plan vs acquisition (public API)
+│   ├── plan/         # DICOM plan loading
+│   ├── geometry/     # Z axis / cube-axes helpers
+│   ├── gui/          # PySide6 app (state, pipeline, app)
+│   ├── models.py
 │   └── ...
 └── tests/
 ```

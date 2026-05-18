@@ -31,13 +31,24 @@ dependencies = [
 [project.optional-dependencies]
 fast = ["scipy"]
 build = ["pyinstaller>=6.6,<7"]
-dev = ["pytest>=8", "ruff>=0.4"]
+dev = ["pytest>=8", "ruff>=0.4", "mypy>=1.10"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["spot_check"]
+ignore_missing_imports = true
+warn_return_any = false
+warn_unused_ignores = true
 
 [tool.setuptools.dynamic]
 version = { attr = "spot_check._version.__version__" }
 
 [project.scripts]
-spot-check = "spot_check.gui:main"
+spot-check = "spot_check.gui.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
