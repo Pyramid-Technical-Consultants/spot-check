@@ -364,12 +364,20 @@ def _measured_row_with_sigma(
 
 
 def measured_charge_na_from_tuple(tup: tuple[float, ...]) -> float:
-    """IX512 channel sum (nA) for dose QA; falls back to tuple weight if needed."""
+    """Measured charge (nA) for dose QA from row weight (``spot_weight_mode`` at load).
+
+    Tuple index 3 is the same weight used for aggregation and opacity tint. Index 7 is the
+    IX512 channel sum when present; it is used only if weight is missing or non-positive.
+    """
+    if len(tup) > 3:
+        w = float(tup[3])
+        if math.isfinite(w) and w > 0.0:
+            return w
     if len(tup) > 7:
-        v = float(tup[7])
-        if math.isfinite(v) and v > 0.0:
-            return v
-    return max(float(tup[3]), 1e-18)
+        ch = float(tup[7])
+        if math.isfinite(ch) and ch > 0.0:
+            return ch
+    return 1e-18
 
 
 def measured_spot_weight_from_row(row: dict[str, str], mode: str) -> float:
@@ -1099,14 +1107,16 @@ def format_plan_dose_qa_caption(
     n_over_fail: int,
     n_under_warn: int,
     n_under_fail: int,
+    spot_weight_mode: str = SPOT_WEIGHT_MODE_DEFAULT,
 ) -> str:
+    w_lbl = measured_spot_weight_caption(spot_weight_mode)
     return (
         f"Dose QA (layer %): pass |Δ|≤{pass_pp:g} pp ({n_pass}). "
         f"Over: yellow {pass_pp:g}<Δ≤{warn_pp:g} pp ({n_over_warn}), "
         f"red Δ>{warn_pp:g} pp ({n_over_fail}). "
         f"Under: cyan −{warn_pp:g}≤Δ<−{pass_pp:g} pp ({n_under_warn}), "
         f"violet Δ<−{warn_pp:g} pp ({n_under_fail}). "
-        "Plan MU vs IX512 channel sum."
+        f"Plan MU vs measured {w_lbl}."
     )
 
 
