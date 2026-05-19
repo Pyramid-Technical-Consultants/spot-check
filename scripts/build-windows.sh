@@ -42,7 +42,8 @@ else
 fi
 
 python -m pip install --upgrade pip wheel
-python -m pip install -e ".[fast,build]"
+# Omit [fast]/SciPy from the frozen bundle (~100MB+); runtime falls back without cKDTree.
+python -m pip install -e ".[build]"
 
 VERSION="$(python -c "from spot_check._version import __version__; print(__version__)")"
 echo "Building SpotCheck ${VERSION}"
@@ -51,6 +52,7 @@ rm -rf build dist
 pyinstaller packaging/spot-check.spec --noconfirm --clean
 
 OUT_DIR="$ROOT/dist/SpotCheck"
+python "$ROOT/packaging/trim_windows_bundle.py" "$OUT_DIR"
 EXE="$OUT_DIR/SpotCheck.exe"
 if [[ ! -f "$EXE" ]]; then
   echo "Expected executable not found: $EXE" >&2
@@ -68,5 +70,14 @@ rm -f "$ARCHIVE"
   fi
 )
 
+du_mb() {
+  local path="$1"
+  if command -v du >/dev/null 2>&1; then
+    du -sm "$path" 2>/dev/null | awk '{print $1}'
+  else
+    powershell -NoProfile -Command "(Get-ChildItem -LiteralPath '$path' -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1MB" 2>/dev/null | awk '{printf "%.0f", $1}'
+  fi
+}
 echo "Built: $EXE"
-echo "Archive: $ARCHIVE"
+echo "Folder size: ~$(du_mb "$OUT_DIR") MB"
+echo "Archive: $ARCHIVE ($(du_mb "$ARCHIVE" 2>/dev/null || echo "?") MB zip)"

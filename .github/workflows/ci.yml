@@ -66,9 +66,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: SpotCheck-${{ steps.ver.outputs.value }}-windows-x64-beta
-          path: |
-            dist/SpotCheck/
-            dist/SpotCheck-${{ steps.ver.outputs.value }}-windows-x64.zip
+          path: dist/SpotCheck-${{ steps.ver.outputs.value }}-windows-x64.zip
           if-no-files-found: error
           retention-days: 30
 
