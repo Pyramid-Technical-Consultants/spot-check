@@ -56,6 +56,24 @@ def parse_viterbi_penalty_mm2(raw: str) -> float | None:
     return None
 
 
+def normalize_z_depth_metric(raw: object) -> str:
+    """Return ``csda``, ``r90``, or ``r80`` for Z-axis water depth."""
+    from spot_check.geometry.proton_csda_water import normalize_z_depth_metric as _norm
+
+    return _norm(str(raw or ""))
+
+
+def parse_upstream_wet_shifter_mm(raw: str) -> float | None:
+    """Water-equivalent thickness (mm) of upstream range shifter; 0 = none."""
+    try:
+        v = float(str(raw).strip())
+        if 0.0 <= v <= float(sc_const.UPSTREAM_WET_SHIFTER_MM_MAX):
+            return v
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
 def parse_bounds_xy_tick_mm(raw: str) -> float | None:
     try:
         v = float(str(raw).strip())

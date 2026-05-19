@@ -27,6 +27,8 @@ DEFAULT_GUI_STATE: dict[str, object] = {
     "scale_plan_spots_by_dicom_fwhm": False,
     "measured_spots_sigma_world_mm": False,
     "z_axis_proton_water_depth_mm": True,
+    "upstream_wet_shifter_mm": sc_const.UPSTREAM_WET_SHIFTER_MM_DEFAULT,
+    "z_depth_metric": sc_const.Z_DEPTH_METRIC_DEFAULT,
     "view_projection_perspective": True,
     "slice_band_on": False,
     "slice_band_center_i": 0,

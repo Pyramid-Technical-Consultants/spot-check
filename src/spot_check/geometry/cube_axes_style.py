@@ -8,6 +8,10 @@ PYVISTA_CUBE_AXES_LOCATION: str = "outer"
 PYVISTA_CUBE_AXES_GRID: str = "back"
 PYVISTA_CUBE_AXES_TICKS: str = "inside"
 PYVISTA_CUBE_AXES_PADDING: float = 0.06
+# Degrees for vtkTextProperty on Z tick labels (vertical along the Z edge).
+PYVISTA_CUBE_Z_TICK_LABEL_ORIENTATION: float = 90.0
+# vtkCubeAxesActor default label offset is 20 px; 90° Z ticks need more standoff.
+PYVISTA_CUBE_AXES_LABEL_OFFSET: float = 36.0
 
 
 def pyvista_show_bounds_kwargs() -> dict[str, Any]:

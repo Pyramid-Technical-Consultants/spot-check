@@ -49,6 +49,16 @@ from spot_check.analysis.viz.glyphs import (
 )
 
 
+def _set_actor_polydata(actor: Any | None, mesh: Any) -> None:
+    """Update a PyVista actor mesh; no-op when the actor or mapper is missing."""
+    if actor is None:
+        return
+    mapper = getattr(actor, "mapper", None)
+    if mapper is None:
+        return
+    mapper.dataset = mesh
+
+
 def show_comparison_3d_pyvista(
     planned_xyz: list[tuple[float, float, float]],
     measured_abc: list[tuple[float, ...]],
@@ -89,6 +99,8 @@ def show_comparison_3d_pyvista(
     slice_qt: dict[str, Any] | None = None,
     slice_band_init: dict[str, bool | int] | None = None,
     z_axis_use_proton_water_depth_mm: bool = True,
+    upstream_wet_shifter_mm: float = 0.0,
+    z_depth_metric: str = "csda",
     view_projection_perspective: bool = True,
 ) -> Any:
     require_pyvista()
@@ -120,8 +132,20 @@ def show_comparison_3d_pyvista(
     plan_pts = prep.plan_xyz.copy()
     meas_pts = prep.meas_xyz.copy()
     use_depth_z = bool(z_axis_use_proton_water_depth_mm)
-    plan_pts[:, 2] = nominal_mev_to_plot_z(plan_pts[:, 2], use_proton_water_depth_mm=use_depth_z)
-    meas_pts[:, 2] = nominal_mev_to_plot_z(meas_pts[:, 2], use_proton_water_depth_mm=use_depth_z)
+    wet_mm = max(0.0, float(upstream_wet_shifter_mm)) if use_depth_z else 0.0
+    depth_metric = str(z_depth_metric).strip().lower() if use_depth_z else "csda"
+    plan_pts[:, 2] = nominal_mev_to_plot_z(
+        plan_pts[:, 2],
+        use_proton_water_depth_mm=use_depth_z,
+        upstream_wet_mm=wet_mm,
+        z_depth_metric=depth_metric,
+    )
+    meas_pts[:, 2] = nominal_mev_to_plot_z(
+        meas_pts[:, 2],
+        use_proton_water_depth_mm=use_depth_z,
+        upstream_wet_mm=wet_mm,
+        z_depth_metric=depth_metric,
+    )
 
     n_m = meas_pts.shape[0]
     _POINT_SIZE_3D = 9
@@ -425,6 +449,7 @@ def show_comparison_3d_pyvista(
             pass
 
     plan_actor: Any | None = None
+    plan_actor_uses_fwhm_glyphs = False
     if plan_pts.shape[0] > 0:
         if plan_rendered_fwhm_glyphs and plan_glyphs is not None:
             plan_actor = pl.add_mesh(
@@ -435,6 +460,7 @@ def show_comparison_3d_pyvista(
                 smooth_shading=False,
                 lighting=False,
             )
+            plan_actor_uses_fwhm_glyphs = True
         else:
             plan_actor = pl.add_mesh(
                 plan_cloud,
@@ -459,6 +485,8 @@ def show_comparison_3d_pyvista(
             pass_mm=plan_qa_pass_mm,
             warn_mm=plan_qa_warn_mm,
             use_proton_water_depth_mm=use_depth_z,
+            upstream_wet_mm=wet_mm,
+            z_depth_metric=depth_metric,
         )
         if lines_warn is not None:
             line_warn_actor = pl.add_mesh(
@@ -615,27 +643,32 @@ def show_comparison_3d_pyvista(
             else np.zeros(0, dtype=bool)
         )
 
-        if plan_rendered_fwhm_glyphs and prep.plan_fwhm_xy_mm is not None:
-            if not np.any(pm):
-                plan_actor.mapper.dataset = _empty_poly()
+        if plan_actor is not None:
+            if plan_actor_uses_fwhm_glyphs and prep.plan_fwhm_xy_mm is not None:
+                if not np.any(pm):
+                    _set_actor_polydata(plan_actor, _empty_poly())
+                else:
+                    _set_actor_polydata(
+                        plan_actor,
+                        _plan_spot_fwhm_glyph_mesh(plan_pts[pm], prep.plan_fwhm_xy_mm[pm]),
+                    )
             else:
-                plan_actor.mapper.dataset = _plan_spot_fwhm_glyph_mesh(
-                    plan_pts[pm], prep.plan_fwhm_xy_mm[pm]
-                )
-        else:
-            if not np.any(pm):
-                plan_actor.mapper.dataset = _empty_poly()
-            else:
-                plan_actor.mapper.dataset = pv.PolyData(plan_pts[pm])
+                if not np.any(pm):
+                    _set_actor_polydata(plan_actor, _empty_poly())
+                else:
+                    _set_actor_polydata(plan_actor, pv.PolyData(plan_pts[pm]))
 
         if meas_actor is not None:
             if not np.any(mm):
-                meas_actor.mapper.dataset = _empty_poly()
+                _set_actor_polydata(meas_actor, _empty_poly())
             else:
                 sub_pts = meas_pts_final[mm]
                 sub_sig = meas_sigma_final[mm]
                 sub_rgba = meas_rgba_final[mm] if meas_rgba_final is not None else None
-                meas_actor.mapper.dataset = _make_measured_view_mesh(sub_pts, sub_sig, sub_rgba)
+                _set_actor_polydata(
+                    meas_actor,
+                    _make_measured_view_mesh(sub_pts, sub_sig, sub_rgba),
+                )
 
         if line_warn_actor is not None:
             pl.remove_actor(line_warn_actor)
@@ -657,6 +690,8 @@ def show_comparison_3d_pyvista(
                 pass_mm=plan_qa_pass_mm,
                 warn_mm=plan_qa_warn_mm,
                 use_proton_water_depth_mm=use_depth_z,
+                upstream_wet_mm=wet_mm,
+                z_depth_metric=depth_metric,
             )
             if lw is not None:
                 line_warn_actor = pl.add_mesh(
@@ -866,9 +901,13 @@ def show_comparison_3d_pyvista(
     if display_perf_note:
         caption += display_perf_note
     if use_depth_z:
+        metric_lbl = depth_metric.upper()
         caption += (
-            " Z axis: proton CSDA water-equivalent depth (mm); tick step follows XY bounds (mm)."
+            f" Z axis: {metric_lbl} depth in water (mm, PSTAR CSDA base for R90/R80); "
+            "tick step follows XY bounds (mm)."
         )
+        if wet_mm > 0.0:
+            caption += f" Upstream WET shifter −{wet_mm:g} mm from depth."
     pl.add_text(title, position="upper_left", font_size=11, color="#f0f6fc", shadow=True)
     pl.add_text(caption, position="lower_left", font_size=9, color="#8b949e")
 
@@ -896,13 +935,15 @@ def show_comparison_3d_pyvista(
         z_spec_init.zmin_scene,
         z_spec_init.zmax_scene,
     )
+    z_deep_lbl = float(max(z_spec_init.z_label_at_min, z_spec_init.z_label_at_max))
+    z_shallow_lbl = float(min(z_spec_init.z_label_at_min, z_spec_init.z_label_at_max))
     axes_ranges_scene = (
         float(x_min),
         float(x_max),
         float(y_min),
         float(y_max),
-        z_spec_init.z_label_at_min,
-        z_spec_init.z_label_at_max,
+        z_deep_lbl,
+        z_shallow_lbl,
     )
     _cube_axes["actor"] = pl.show_bounds(
         bounds=bounds_axes,

@@ -375,6 +375,72 @@ def _xy_sqdist(ax: float, ay: float, bx: float, by: float) -> float:
     return dx * dx + dy * dy
 
 
+def _banded_monotone_plan_path(
+    cents: np.ndarray,
+    plan: np.ndarray,
+    *,
+    window: int = 3,
+    dup_penalty_mm2: float = 0.0,
+) -> np.ndarray:
+    """Monotone plan-index path for episode centroids within a diagonal band.
+
+    Episode *i* maps to plan index ``path[i]`` (non-decreasing) minimizing squared
+    XY distance to ``plan[path[i]]``, with ``|path[i] - i| <= window`` and an optional
+    penalty when ``path[i] == path[i - 1]``.
+    """
+    n = int(cents.shape[0])
+    m = int(plan.shape[0])
+    if n == 0:
+        return np.zeros(0, dtype=np.int32)
+    if m == 0:
+        raise ValueError("plan must have at least one spot")
+    w = max(0, int(window))
+    inf = np.inf
+    emit = np.empty((n, m), dtype=np.float64)
+    for i in range(n):
+        cx, cy = float(cents[i, 0]), float(cents[i, 1])
+        for j in range(m):
+            emit[i, j] = _xy_sqdist(cx, cy, float(plan[j, 0]), float(plan[j, 1]))
+    C = np.full((n, m), inf, dtype=np.float64)
+    back = np.zeros((n, m), dtype=np.int32)
+    j0_lo = max(0, -w)
+    j0_hi = min(m - 1, w)
+    for j in range(j0_lo, j0_hi + 1):
+        C[0, j] = emit[0, j]
+        back[0, j] = j
+    for i in range(1, n):
+        j_lo = max(0, i - w)
+        j_hi = min(m - 1, i + w)
+        for j in range(j_lo, j_hi + 1):
+            k_lo = max(0, j - w, j_lo)
+            best = inf
+            best_k = j_lo
+            for k in range(k_lo, j + 1):
+                if k > j_hi:
+                    break
+                if C[i - 1, k] >= inf:
+                    continue
+                trans = float(C[i - 1, k])
+                if j == k and dup_penalty_mm2 > 0.0:
+                    trans += float(dup_penalty_mm2)
+                if trans < best:
+                    best = trans
+                    best_k = k
+            if best < inf:
+                C[i, j] = emit[i, j] + best
+                back[i, j] = best_k
+    j_end_lo = max(0, n - 1 - w)
+    j_end_hi = min(m - 1, n - 1 + w)
+    j_end = int(j_end_lo + np.argmin(C[n - 1, j_end_lo : j_end_hi + 1]))
+    path = np.zeros(n, dtype=np.int32)
+    j = j_end
+    for i in range(n - 1, -1, -1):
+        path[i] = j
+        if i > 0:
+            j = int(back[i, j])
+    return path
+
+
 def _span_xy_centroid(
     cols: AutoFitColumns,
     span: EpisodeSpan,

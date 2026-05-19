@@ -135,6 +135,8 @@ def _plan_qa_error_line_polylines(
     pass_mm: float,
     warn_mm: float,
     use_proton_water_depth_mm: bool = False,
+    upstream_wet_mm: float = 0.0,
+    z_depth_metric: str = "csda",
 ) -> tuple[Any, Any]:
     """Separate line sets for warn-tier and fail-tier points (measured → NN plan spot), view Z."""
     if pv is None:
@@ -159,6 +161,8 @@ def _plan_qa_error_line_polylines(
             zm = nominal_mev_to_plot_z(
                 np.array([float(exp[2])], dtype=np.float64),
                 use_proton_water_depth_mm=use_proton_water_depth_mm,
+                upstream_wet_mm=upstream_wet_mm,
+                z_depth_metric=z_depth_metric,
             )
             p1 = np.array(
                 [

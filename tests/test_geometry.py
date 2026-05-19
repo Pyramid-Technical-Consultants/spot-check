@@ -8,6 +8,7 @@ from spot_check.geometry import (
     nominal_mev_to_plot_z,
     proton_cda_water_range_mm,
 )
+from spot_check.geometry.cube_axes_style import PYVISTA_CUBE_AXES_LABEL_OFFSET
 
 
 def test_proton_cda_monotonic() -> None:
@@ -15,6 +16,12 @@ def test_proton_cda_monotonic() -> None:
     r = proton_cda_water_range_mm(e)
     assert r.shape == (3,)
     assert r[0] < r[1] < r[2]
+
+
+def test_proton_cda_70mev_pstar_table_mm() -> None:
+    """PSTAR CSDA range in water at 70 MeV is 40.80 mm (4.08 cm)."""
+    r70 = float(proton_cda_water_range_mm(70.0))
+    assert r70 == pytest.approx(40.80, abs=0.01)
 
 
 def test_n_cube_axis_labels_capped() -> None:
@@ -54,6 +61,33 @@ def test_pyvista_bounds_property_resets_z_labels() -> None:
     assert actor.z_label_visibility is True
     assert spec.z_label_at_min > spec.z_label_at_max
     assert float(actor.z_labels[0]) > float(actor.z_labels[-1])
+    assert actor.GetZAxesLabelProperty().GetOrientation() == pytest.approx(90.0)
+    assert actor.GetLabelOffset() == pytest.approx(PYVISTA_CUBE_AXES_LABEL_OFFSET)
+    deep = float(max(spec.z_label_at_min, spec.z_label_at_max))
+    shallow = float(min(spec.z_label_at_min, spec.z_label_at_max))
+    assert actor.GetZAxisRange()[0] == pytest.approx(deep)
+    assert actor.GetZAxisRange()[1] == pytest.approx(shallow)
+
+
+def test_plot_z_upstream_wet_shifter_subtracts_mm() -> None:
+    e = np.array([70.0])
+    z0 = nominal_mev_to_plot_z(e, use_proton_water_depth_mm=True, upstream_wet_mm=0.0)
+    z10 = nominal_mev_to_plot_z(e, use_proton_water_depth_mm=True, upstream_wet_mm=10.0)
+    assert float(z10[0]) > float(z0[0])  # shallower scene Z (less negative)
+    assert float(z10[0] - z0[0]) == pytest.approx(10.0, abs=0.01)
+
+
+def test_plot_z_upstream_wet_shifter_clamps_at_zero_depth() -> None:
+    e = np.array([10.0])
+    z = nominal_mev_to_plot_z(e, use_proton_water_depth_mm=True, upstream_wet_mm=500.0)
+    assert float(np.asarray(z).reshape(-1)[0]) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_plot_z_upstream_wet_ignored_when_mev_axis() -> None:
+    e = np.array([70.0])
+    z0 = nominal_mev_to_plot_z(e, use_proton_water_depth_mm=False, upstream_wet_mm=50.0)
+    z1 = nominal_mev_to_plot_z(e, use_proton_water_depth_mm=False, upstream_wet_mm=0.0)
+    assert float(z0[0]) == float(z1[0])
 
 
 def test_plot_z_shallow_toward_top_and_depth_labels() -> None:

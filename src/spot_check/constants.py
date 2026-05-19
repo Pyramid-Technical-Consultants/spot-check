@@ -46,10 +46,18 @@ AUTO_PLAN_MERGE_BLEND: Final[float] = 0.65
 AUTO_EPISODE_MERGE_DT_MM2_PER_S: Final[float] = 50.0
 
 # --- Nominal energy → water-equivalent depth (display / approximate QA only) -----
-# Mono-energetic proton CSDA range in water: empirical power law, ~10 % of PSTAR in 30–230 MeV.
+# See :mod:`spot_check.geometry.proton_csda_water` (NIST PSTAR table + interpolation).
 # **Not for clinical range verification.** Carbon / helium ions require different physics.
-PROTON_WATER_CSDA_RANGE_MM_COEFF: Final[float] = 0.0568
-PROTON_WATER_CSDA_RANGE_MM_POW: Final[float] = 1.77
+UPSTREAM_WET_SHIFTER_MM_DEFAULT: Final[float] = 0.0
+UPSTREAM_WET_SHIFTER_MM_MAX: Final[float] = 500.0
+# Distal falloff depths from PSTAR CSDA (mm): R90/R80 ≈ scale × R_CSDA − offset (50–230 MeV fits).
+# Display only — see :func:`spot_check.geometry.proton_csda_water.proton_water_depth_mm`.
+Z_DEPTH_METRIC_DEFAULT: Final[str] = "csda"
+Z_DEPTH_METRICS: Final[frozenset[str]] = frozenset({"csda", "r90", "r80"})
+PROTON_R90_FROM_CSDA_SCALE: Final[float] = 0.975
+PROTON_R90_FROM_CSDA_OFFSET_MM: Final[float] = 0.56
+PROTON_R80_FROM_CSDA_SCALE: Final[float] = 0.910
+PROTON_R80_FROM_CSDA_OFFSET_MM: Final[float] = 1.14
 
 # --- 3D view (display only; nominal-MeV Z uses stretch — not a physical calibration) ----------
 _ENERGY_AXIS_VIEW_SCALE: Final[float] = 2.0

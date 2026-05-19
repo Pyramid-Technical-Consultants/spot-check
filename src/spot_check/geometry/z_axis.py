@@ -12,31 +12,40 @@ from spot_check.constants import (
     BOUNDS_XY_LABELS_MAX,
     BOUNDS_Z_TICK_MEV_DEFAULT,
     BOUNDS_Z_TICK_MM_DEFAULT,
-    PROTON_WATER_CSDA_RANGE_MM_COEFF,
-    PROTON_WATER_CSDA_RANGE_MM_POW,
 )
-from spot_check.geometry.cube_axes_style import apply_pyvista_cube_axes_style
+from spot_check.geometry.cube_axes_style import (
+    PYVISTA_CUBE_AXES_LABEL_OFFSET,
+    PYVISTA_CUBE_Z_TICK_LABEL_ORIENTATION,
+    apply_pyvista_cube_axes_style,
+)
+from spot_check.geometry.proton_csda_water import (
+    normalize_z_depth_metric,
+    proton_water_depth_mm,
+)
 from spot_check.models import CubeZAxisSpec
-
-
-def proton_cda_water_range_mm(energy_mev: np.ndarray | float) -> np.ndarray:
-    e = np.maximum(np.asarray(energy_mev, dtype=np.float64), 0.05)
-    return PROTON_WATER_CSDA_RANGE_MM_COEFF * np.power(e, PROTON_WATER_CSDA_RANGE_MM_POW)
 
 
 def nominal_mev_to_plot_z(
     energy_mev: np.ndarray,
     *,
     use_proton_water_depth_mm: bool,
+    upstream_wet_mm: float = 0.0,
+    z_depth_metric: str = "csda",
 ) -> np.ndarray:
     """Map nominal energy (MeV) to scene Z for 3D display (mm depth or scaled MeV).
 
     Scene Z is **negative** depth (shallow / low energy toward +Z, i.e. top of the view).
     Cube tick labels use positive mm via :func:`cube_z_axis_spec`.
+
+    When ``use_proton_water_depth_mm`` is true, depth uses ``z_depth_metric`` (CSDA / R90 / R80)
+    minus ``upstream_wet_mm`` water-equivalent shifter thickness (beam stops shallower).
     """
     e = np.asarray(energy_mev, dtype=np.float64)
     if use_proton_water_depth_mm:
-        return -proton_cda_water_range_mm(e)
+        wet = max(0.0, float(upstream_wet_mm))
+        metric = normalize_z_depth_metric(z_depth_metric)
+        depth_mm = proton_water_depth_mm(e, metric=metric) - wet
+        return -np.maximum(depth_mm, 0.0)
     return -e * float(_ENERGY_AXIS_VIEW_SCALE)
 
 
@@ -105,13 +114,25 @@ def cube_z_axis_spec(
     return CubeZAxisSpec(zmin_p, zmax_p, e_at_zmin, e_at_zmax, n_z, "Z (MeV)")
 
 
+def _cube_z_depth_label_endpoints(z_spec: CubeZAxisSpec) -> tuple[float, float]:
+    """Positive depth (mm) at scene zmin (deep) and zmax (shallow).
+
+    ``z_label_at_min`` is depth at the most-negative scene Z (deepest); it is the larger mm value.
+    """
+    deep = float(max(z_spec.z_label_at_min, z_spec.z_label_at_max))
+    shallow = float(min(z_spec.z_label_at_min, z_spec.z_label_at_max))
+    return deep, shallow
+
+
 def _vtk_z_tick_labels(z_spec: CubeZAxisSpec, *, fmt: str = "%.4g") -> Any:
     """Build vtkStringArray for Z ticks (deep→shallow along scene zmin→zmax)."""
     from pyvista.plotting.cube_axes_actor import make_axis_labels
 
+    deep, shallow = _cube_z_depth_label_endpoints(z_spec)
+    # VTK maps tick index 0 to z_axis_range[0] at scene zmin (deepest); use descending labels.
     return make_axis_labels(
-        vmin=float(z_spec.z_label_at_min),
-        vmax=float(z_spec.z_label_at_max),
+        vmin=deep,
+        vmax=shallow,
         n=int(z_spec.n_zlabels),
         fmt=fmt,
     )
@@ -131,8 +152,8 @@ def apply_pyvista_cube_z_axis(
     PyVista's ``actor.bounds`` setter copies scene Z into ``z_axis_range`` (negative mm).
     Use VTK ``SetBounds`` plus explicit ``z_axis_range`` so labels stay positive depth mm.
 
-    VTK only draws Z tick numbers when ``SetZAxisRange`` is ascending (min < max). Depth
-    values are still deep→shallow along scene zmin→zmax via ``SetAxisLabels``. Do not call
+    ``SetZAxisRange`` uses (deep_mm, shallow_mm) so tick index 0 at scene zmin shows the
+    largest depth. Pair with descending ``SetAxisLabels`` strings. Do not call
     ``SetRebuildAxes`` afterward (it regenerates labels and hides Z ticks).
     """
     apply_pyvista_cube_axes_style(actor)
@@ -148,15 +169,27 @@ def apply_pyvista_cube_z_axis(
     actor.y_axis_range = (float(y_min), float(y_max))
     actor._n_zlabels = int(z_spec.n_zlabels)
     actor.SetZTitle(str(z_spec.ztitle))
-    # Ascending range required for VTK to render Z numerics on the cube edge.
-    actor.SetZAxisRange(
-        float(min(z_spec.z_label_at_min, z_spec.z_label_at_max)),
-        float(max(z_spec.z_label_at_min, z_spec.z_label_at_max)),
-    )
+    deep_mm, shallow_mm = _cube_z_depth_label_endpoints(z_spec)
+    # Match ``show_bounds`` axes_ranges: zmin (deepest scene Z) → deep_mm, zmax → shallow_mm.
+    actor.SetZAxisRange(deep_mm, shallow_mm)
+    try:
+        actor.z_axis_range = (deep_mm, shallow_mm)
+    except Exception:
+        pass
     actor.SetAxisLabels(2, _vtk_z_tick_labels(z_spec))
     actor._z_label_visibility = True
     actor.SetZAxisVisibility(True)
     actor.SetZAxisTickVisibility(True)
+    try:
+        actor.GetZAxesLabelProperty().SetOrientation(
+            float(PYVISTA_CUBE_Z_TICK_LABEL_ORIENTATION)
+        )
+    except Exception:
+        pass
+    try:
+        actor.SetLabelOffset(float(PYVISTA_CUBE_AXES_LABEL_OFFSET))
+    except Exception:
+        pass
     try:
         actor.SetUseTextActor3D(False)
     except Exception:

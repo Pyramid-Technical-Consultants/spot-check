@@ -48,9 +48,11 @@ from spot_check.analysis.csv_io import acquisition_csv_stem
 from spot_check.constants import project_root
 from spot_check.export import build_combined_export_rows, write_combined_export_csv
 from spot_check.gui.parsers import (
+    normalize_z_depth_metric,
     parse_aggregate_even_tail_n,
     parse_bounds_xy_tick_mm,
     parse_plan_qa_thresholds,
+    parse_upstream_wet_shifter_mm,
     plan_qa_thresholds_input_in_progress,
     spot_weight_mode_from_saved,
 )
@@ -233,8 +235,42 @@ class SpotCheckController:
         cb_plan_fwhm.setChecked(_bool_saved("scale_plan_spots_by_dicom_fwhm", False))
         cb_meas_sigma = QCheckBox("Measured: σ ellipsoids (fit σ → XY mm; B→X, A→Y)")
         cb_meas_sigma.setChecked(_bool_saved("measured_spots_sigma_world_mm", False))
-        cb_z_water = QCheckBox("Z: water depth (mm, proton CSDA approx.)")
+        cb_z_water = QCheckBox("Z: water depth (mm)")
         cb_z_water.setChecked(_bool_saved("z_axis_proton_water_depth_mm", True))
+        _Z_DEPTH_METRIC_ITEMS: tuple[tuple[str, str], ...] = (
+            ("csda", "CSDA"),
+            ("r90", "R90"),
+            ("r80", "R80"),
+        )
+        metric0 = normalize_z_depth_metric(
+            saved.get("z_depth_metric", sc_const.Z_DEPTH_METRIC_DEFAULT)
+        )
+        combo_z_depth = QComboBox()
+        for key, label in _Z_DEPTH_METRIC_ITEMS:
+            combo_z_depth.addItem(label, key)
+        for i in range(combo_z_depth.count()):
+            if combo_z_depth.itemData(i) == metric0:
+                combo_z_depth.setCurrentIndex(i)
+                break
+        combo_z_depth.setToolTip(
+            "Depth model in water for the Z axis: PSTAR CSDA range, or empirical R90/R80 "
+            "(distal 90%/80% falloff vs CSDA)."
+        )
+        raw_wet = saved.get(
+            "upstream_wet_shifter_mm", sc_const.UPSTREAM_WET_SHIFTER_MM_DEFAULT
+        )
+        try:
+            wet0 = float(raw_wet)
+            if wet0 < 0.0 or wet0 > float(sc_const.UPSTREAM_WET_SHIFTER_MM_MAX):
+                wet0 = float(sc_const.UPSTREAM_WET_SHIFTER_MM_DEFAULT)
+        except (TypeError, ValueError):
+            wet0 = float(sc_const.UPSTREAM_WET_SHIFTER_MM_DEFAULT)
+        e_wet = QLineEdit(f"{wet0:g}")
+        e_wet.setFixedWidth(72)
+        e_wet.setToolTip(
+            "Water-equivalent thickness (mm) of upstream range shifter / WET material. "
+            "Subtracted from the selected Z depth (shallower spots) when water depth is enabled."
+        )
         cb_align = QCheckBox("Rigid XY align measured → plan (any rotation / A↔B)")
         cb_align.setChecked(_bool_saved("auto_align_detector_xy", True))
         cb_agg = QCheckBox("One measured point per odd gate phase (weighted mean)")
@@ -347,6 +383,10 @@ class SpotCheckController:
             if xy_tick_save is None:
                 xy_tick_save = float(sc_const.BOUNDS_XY_TICK_MM_DEFAULT)
                 e_bxy.setText(f"{xy_tick_save:g}")
+            wet_save = parse_upstream_wet_shifter_mm(e_wet.text())
+            if wet_save is None:
+                wet_save = float(sc_const.UPSTREAM_WET_SHIFTER_MM_DEFAULT)
+                e_wet.setText(f"{wet_save:g}")
             _stash_qa_thresholds()
             qa_thr = parse_plan_qa_thresholds(e_qa_pass.text(), e_qa_warn.text())
             if qa_thr is not None:
@@ -401,6 +441,8 @@ class SpotCheckController:
                 scale_plan_spots_by_dicom_fwhm=cb_plan_fwhm.isChecked(),
                 measured_spots_sigma_world_mm=cb_meas_sigma.isChecked(),
                 z_axis_proton_water_depth_mm=cb_z_water.isChecked(),
+                upstream_wet_shifter_mm=float(wet_save),
+                z_depth_metric=_current_z_depth_metric(),
                 view_projection_perspective=cb_view_proj.isChecked(),
                 slice_band_on=bool(slice_chk.isChecked()),
                 slice_band_center_i=_sb_ci_persist,
@@ -432,6 +474,17 @@ class SpotCheckController:
             if p:
                 e_csv.setText(p)
                 _do_refresh()
+
+        def _sync_wet_shifter_ui() -> None:
+            on = cb_z_water.isChecked()
+            e_wet.setEnabled(on)
+            combo_z_depth.setEnabled(on)
+
+        def _current_z_depth_metric() -> str:
+            key = combo_z_depth.currentData()
+            if key is None:
+                return normalize_z_depth_metric(combo_z_depth.currentText())
+            return normalize_z_depth_metric(str(key))
 
         def _sync_qa_lines() -> None:
             en = cb_pqa.isChecked()
@@ -545,7 +598,16 @@ class SpotCheckController:
         vdisp.addWidget(wsw)
         vdisp.addWidget(cb_plan_fwhm)
         vdisp.addWidget(cb_meas_sigma)
-        vdisp.addWidget(cb_z_water)
+        z_wet_row = QHBoxLayout()
+        z_wet_row.addWidget(cb_z_water)
+        z_wet_row.addWidget(QLabel("Upstream WET (mm)"))
+        z_wet_row.addWidget(e_wet)
+        z_wet_row.addWidget(QLabel("Depth"))
+        z_wet_row.addWidget(combo_z_depth)
+        z_wet_row.addStretch(1)
+        w_z_wet = QWidget()
+        w_z_wet.setLayout(z_wet_row)
+        vdisp.addWidget(w_z_wet)
         vdisp.addWidget(cb_align)
         rt = QHBoxLayout()
         rt.addWidget(QLabel("XY ticks (mm)"))
@@ -698,6 +760,7 @@ class SpotCheckController:
         splitter.setCollapsible(1, False)
         splitter.setSizes([1000, 480])
 
+        _sync_wet_shifter_ui()
         _sync_qa_lines()
         _update_help()
 
@@ -721,6 +784,8 @@ class SpotCheckController:
             "plotter": None,
             "aligned": None,
             "z_water_depth": False,
+            "upstream_wet_mm": 0.0,
+            "z_depth_metric": sc_const.Z_DEPTH_METRIC_DEFAULT,
             "slice_on": bool(slice_chk.isChecked()),
             "slice_center_i": int(slice_sli.value()),
         }
@@ -943,11 +1008,27 @@ class SpotCheckController:
                     auto_vp = auto_p.viterbi_advance_penalty_mm2
 
             reuse_pl = _plot_cache.get("plotter")
+            wet_use = float(sc_const.UPSTREAM_WET_SHIFTER_MM_DEFAULT)
+            metric_use = _current_z_depth_metric()
+            if cb_z_water.isChecked():
+                wet_parsed = parse_upstream_wet_shifter_mm(e_wet.text())
+                if wet_parsed is None:
+                    _bump_load_generation_invalidate_async()
+                    analysis.idle_slice_band_controls_qt(slice_qt_bindings)
+                    _vtk_placeholder_message(
+                        f"Upstream WET: 0–{sc_const.UPSTREAM_WET_SHIFTER_MM_MAX:g} mm.",
+                        error=True,
+                    )
+                    status_lbl.setText("Fix upstream WET shifter (mm).")
+                    return
+                wet_use = float(wet_parsed)
             preserve_cam = (
                 reuse_pl is not None
                 and _plot_cache["pipeline_key"] == pipeline_key
                 and _plot_cache.get("aligned") == cb_align.isChecked()
                 and _plot_cache.get("z_water_depth") == cb_z_water.isChecked()
+                and float(_plot_cache.get("upstream_wet_mm", 0.0)) == wet_use
+                and str(_plot_cache.get("z_depth_metric", "csda")) == metric_use
             )
             if label and csv_display_name:
                 view_title = f"{label} — plan vs {csv_display_name}"
@@ -993,6 +1074,8 @@ class SpotCheckController:
                 scale_plan_spots_by_dicom_fwhm=cb_plan_fwhm.isChecked(),
                 measured_spots_sigma_world_mm=cb_meas_sigma.isChecked(),
                 z_axis_use_proton_water_depth_mm=cb_z_water.isChecked(),
+                upstream_wet_shifter_mm=wet_use,
+                z_depth_metric=metric_use,
                 view_projection_perspective=cb_view_proj.isChecked(),
                 reuse_plotter=reuse_pl if reuse_pl is not None else None,
                 reuse_camera=preserve_cam,
@@ -1004,6 +1087,8 @@ class SpotCheckController:
             _plot_cache["plotter"] = pl
             _plot_cache["aligned"] = cb_align.isChecked()
             _plot_cache["z_water_depth"] = cb_z_water.isChecked()
+            _plot_cache["upstream_wet_mm"] = wet_use
+            _plot_cache["z_depth_metric"] = metric_use
             try:
                 _plot_cache["slice_on"] = bool(slice_chk.isChecked())
                 if slice_sli.isEnabled():
@@ -1453,6 +1538,7 @@ class SpotCheckController:
             e_dcm,
             e_csv,
             e_bxy,
+            e_wet,
             e_agg_even,
         ):
             w.textChanged.connect(_schedule_refresh)
@@ -1462,10 +1548,11 @@ class SpotCheckController:
         for w in (e_qa_pass, e_qa_warn):
             w.editingFinished.connect(_commit_field_refresh)
         combo_sw.currentIndexChanged.connect(_do_refresh)
+        combo_z_depth.currentIndexChanged.connect(_do_refresh)
         cb_weight_ch.toggled.connect(_do_refresh)
         cb_plan_fwhm.toggled.connect(_do_refresh)
         cb_meas_sigma.toggled.connect(_do_refresh)
-        cb_z_water.toggled.connect(_do_refresh)
+        cb_z_water.toggled.connect(lambda _c: (_sync_wet_shifter_ui(), _do_refresh()))
         cb_align.toggled.connect(_do_refresh)
         cb_agg.toggled.connect(lambda _c: (_sync_layer_mode_ui(), _do_refresh()))
         cb_pqa.toggled.connect(lambda _c: (_sync_qa_lines(), _do_refresh()))
