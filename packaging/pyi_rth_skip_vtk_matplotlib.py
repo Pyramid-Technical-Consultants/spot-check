@@ -15,3 +15,9 @@ if _NAME not in sys.modules:
     _stub = types.ModuleType(_NAME)
     _stub.__doc__ = "Stubbed in frozen SpotCheck build (matplotlib not required)."
     sys.modules[_NAME] = _stub
+
+# Load PyVista after the stub so analysis._core sees a working import (before win_entry).
+try:
+    import pyvista  # noqa: F401
+except ImportError:
+    pass

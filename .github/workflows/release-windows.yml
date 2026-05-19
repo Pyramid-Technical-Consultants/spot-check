@@ -55,11 +55,10 @@ jobs:
         run: bash ./scripts/build-windows.sh
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
-          name: SpotCheck-${{ steps.ver.outputs.value }}-windows-x64
-          # Folder only; upload-artifact compresses once (avoid zip-in-zip).
-          path: dist/SpotCheck/
+          path: dist/SpotCheck-${{ steps.ver.outputs.value }}-windows-x64.zip
+          archive: false
           if-no-files-found: error
 
       - name: Create GitHub Release

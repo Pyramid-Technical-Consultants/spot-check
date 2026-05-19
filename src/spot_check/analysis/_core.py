@@ -82,10 +82,33 @@ import numpy as np
 if importlib.util.find_spec("pydicom") is None:  # pragma: no cover
     raise ImportError("RT Ion analysis requires pydicom. Install with: pip install pydicom")
 
+_pyvista_import_error: ImportError | None = None
+
 try:
     import pyvista as pv
-except ImportError:  # pragma: no cover
+except ImportError as _pv_exc:  # pragma: no cover
     pv = None  # type: ignore[assignment]
+    _pyvista_import_error = _pv_exc
+
+
+def require_pyvista() -> Any:
+    """Return the PyVista module, re-importing once if the optional first import failed."""
+    global pv, _pyvista_import_error
+    if pv is not None:
+        return pv
+    try:
+        import pyvista as _pv
+
+        pv = _pv
+        _pyvista_import_error = None
+        return pv
+    except ImportError as exc:
+        _pyvista_import_error = exc
+        detail = f": {exc}" if exc else ""
+        raise RuntimeError(
+            "PyVista is required for the 3D view"
+            f"{detail}. Install with: pip install pyvista"
+        ) from exc
 
 import logging
 
@@ -2340,8 +2363,7 @@ _GLYPH_UNIT_SPHERE: dict[tuple[int, int], Any] = {}
 
 
 def _unit_sphere_glyph_template(phi_resolution: int, theta_resolution: int) -> Any:
-    if pv is None:
-        raise RuntimeError("Install PyVista for GPU 3D: pip install pyvista")
+    require_pyvista()
     key = (int(phi_resolution), int(theta_resolution))
     tpl = _GLYPH_UNIT_SPHERE.get(key)
     if tpl is None:
@@ -2380,8 +2402,7 @@ def _instanced_axis_aligned_ellipsoids(
     apply per-axis scaling reliably on VTK 9.6 (glyphs stay near unit size), so we
     instance a unit sphere template with explicit point transforms.
     """
-    if pv is None:
-        raise RuntimeError("Install PyVista for GPU 3D: pip install pyvista")
+    require_pyvista()
     centers_u = np.asarray(centers, dtype=np.float64, order="C")
     semi_u = np.asarray(semiaxes_xyz, dtype=np.float64, order="C")
     n = int(centers_u.shape[0])
@@ -2413,8 +2434,7 @@ def _instanced_axis_aligned_ellipsoids(
 
 def _plan_spot_fwhm_glyph_mesh(plan_pts: np.ndarray, fwhm_xy_mm: np.ndarray) -> Any:
     """At each plan point, an axis-aligned ellipsoid with X/Y semiaxis = FWHM/2 (mm) and thin Z."""
-    if pv is None:
-        raise RuntimeError("Install PyVista for GPU 3D: pip install pyvista")
+    require_pyvista()
     n = int(plan_pts.shape[0])
     if fwhm_xy_mm.shape != (n, 2):
         raise ValueError("plan_fwhm_xy_mm must have shape (n_plan, 2)")
@@ -2446,8 +2466,7 @@ def _measured_spot_sigma_glyph_mesh(
 ) -> Any:
     """Per measured point, an axis-aligned ellipsoid: X/Y semiaxis = σ×scale (mm), diameter =
     2×scale×σ; thin Z."""
-    if pv is None:
-        raise RuntimeError("Install PyVista for GPU 3D: pip install pyvista")
+    require_pyvista()
     n = int(meas_pts.shape[0])
     if n == 0:
         return pv.PolyData(np.zeros((0, 3), dtype=np.float64))
@@ -3018,8 +3037,7 @@ def show_comparison_3d_pyvista(
     z_axis_use_proton_water_depth_mm: bool = True,
     view_projection_perspective: bool = True,
 ) -> Any:
-    if pv is None:
-        raise RuntimeError("Install PyVista for GPU 3D: pip install pyvista")
+    require_pyvista()
 
     qa_mode = str(plan_qa_mode).strip().lower().replace("-", "_")
     if qa_mode not in ("position", "dose"):

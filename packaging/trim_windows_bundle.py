@@ -95,7 +95,6 @@ _VTK_NAME_FRAGMENTS = (
     "vtkIOTecplot",
     "vtkIOVeraOut",
     "vtkIOXMLParser",
-    "vtkRenderingMatplotlib",
     "vtkRenderingLIC",
     "vtkRenderingLabel",
     "vtkRenderingImage",

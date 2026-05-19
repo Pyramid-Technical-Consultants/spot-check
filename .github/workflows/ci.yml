@@ -63,11 +63,11 @@ jobs:
         run: bash ./scripts/build-windows.sh
 
       - name: Upload beta artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
-          name: SpotCheck-${{ steps.ver.outputs.value }}-windows-x64-beta
-          # Upload the folder, not dist/*.zip — upload-artifact zips again (double zip).
-          path: dist/SpotCheck/
+          # v7 archive:false = download the .zip as-is (no zip-in-zip). Single file only.
+          path: dist/SpotCheck-${{ steps.ver.outputs.value }}-windows-x64.zip
+          archive: false
           if-no-files-found: error
           retention-days: 30
 

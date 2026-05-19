@@ -60,6 +60,15 @@ if [[ ! -f "$EXE" ]]; then
   exit 1
 fi
 
+INTERNAL="$OUT_DIR/_internal"
+if [[ ! -d "$INTERNAL" ]]; then
+  INTERNAL="$OUT_DIR"
+fi
+if [[ ! -d "$INTERNAL/pyvista" ]]; then
+  echo "ERROR: PyVista was not bundled under $INTERNAL/pyvista (3D view will fail)." >&2
+  exit 1
+fi
+
 ARCHIVE="$ROOT/dist/SpotCheck-${VERSION}-windows-x64.zip"
 rm -f "$ARCHIVE"
 (

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 spec_dir = Path(SPECPATH)
 root = spec_dir.parent
@@ -41,6 +41,7 @@ hiddenimports: list[str] = [
 hiddenimports += [
     m for m in collect_submodules("pyvista") if not m.startswith("pyvista.trame")
 ]
+datas: list = collect_data_files("pyvista")
 
 excludes: list[str] = [
     "matplotlib",
@@ -111,7 +112,7 @@ a = Analysis(
     [str(spec_dir / "win_entry.py")],
     pathex=[str(src)],
     binaries=[],
-    datas=[],
+    datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[str(hooks_dir)],
     hooksconfig={},
