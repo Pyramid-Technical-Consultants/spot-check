@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from spot_check.analysis._imports import *  # noqa: F403
 from spot_check.analysis.colors import _hex_to_rgb_u8
-from spot_check.analysis.measured import measured_charge_na_from_tuple
+from spot_check.analysis.measured import (
+    measured_charge_na_from_tuple,
+    measured_spot_weight_caption,
+)
+from spot_check.analysis.pyvista_backend import pv
 from spot_check.analysis.spatial import (
     _layer_plan_mu_by_energy_layer,
     distances_measured_xy_to_layer_nn_plan_mm,

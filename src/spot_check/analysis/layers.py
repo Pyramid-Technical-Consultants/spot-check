@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from spot_check.analysis._imports import *  # noqa: F403
-from spot_check.analysis.spatial import _min_xy_dist_to_nominal_energy
+from spot_check.analysis.spatial import _kdtree_query_k1, _min_xy_dist_to_nominal_energy
 
 
 def _opt_float_cell(row: dict[str, str], key: str) -> float | None:
@@ -15,6 +15,7 @@ def _opt_float_cell(row: dict[str, str], key: str) -> float | None:
     except ValueError:
         return None
 
+@dataclass
 class _PlanImputeLookup:
     """Nearest plan spot along X or Y only; sorted-axis queries O(log N)."""
 

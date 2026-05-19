@@ -14,7 +14,9 @@ from spot_check.analysis.layers import (
 )
 from spot_check.analysis.spatial import (
     _ab_from_plan_xy,
+    _build_layer_kdtrees,
     _emit_sqdist_to_layers_mm2,
+    _plan_xy_by_energy_layer,
     _plan_xy_from_optional_ab,
     nominal_layer_energies_mev,
 )

@@ -7,6 +7,7 @@ from spot_check.analysis.spatial import (
     _layer_nn_plan_targets,
     _layer_nn_rms_mm,
     _layer_xy_kdtrees_2d,
+    _plan_xy_by_energy_layer,
     nominal_layer_energies_mev,
 )
 
