@@ -230,5 +230,9 @@ test_data/
 # PyInstaller / local build artifacts
 .build-venv/
 build/
+build2/
 dist/
 *.spec.bak
+*.toc
+**/xref-spot-check.html
+**/warn-spot-check.txt

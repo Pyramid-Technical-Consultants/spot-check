@@ -55,6 +55,51 @@ _QT_EXE_NAMES = frozenset(
     }
 )
 
+# VTK payloads required for PyVista import + SpotCheck 3D (never trim).
+_VTK_KEEP_FRAGMENTS = (
+    "vtkFiltersSources",
+    "vtkCommonCore",
+    "vtkCommonDataModel",
+    "vtkCommonExecutionModel",
+    "vtkCommonMath",
+    "vtkCommonTransforms",
+    "vtkCommonSystem",
+    "vtkCommonMisc",
+    "vtkCommonComputationalGeometry",
+    "vtkFiltersGeneral",
+    "vtkFiltersCore",
+    "vtkFiltersGeometry",
+    "vtkRenderingCore",
+    "vtkRenderingOpenGL2",
+    "vtkInteractionStyle",
+    "vtkRenderingFreeType",
+    "vtkRenderingUI",
+    "vtkImagingCore",
+    "vtkIOImage",
+    "vtkIOCore",
+    "vtkIOXML",
+    "vtkIOXMLParser",
+    "vtkzlib",
+    "vtkdoubleconversion",
+    "vtkexpat",
+    "vtkfmt",
+    "vtkglew",
+    "vtkjpeg",
+    "vtkjson",
+    "vtkkissfft",
+    "vtklz4",
+    "vtklzma",
+    "vtkmetaio",
+    "vtkpng",
+    "vtksys",
+    "vtktiff",
+    "vtkzlib",
+    "vtkloguru",
+    "vtkpugixml",
+    "vtktoken",
+    "vtkWrappingPythonCore",
+)
+
 # VTK DLL / PYD name fragments not required for OpenGL scatter + cube axes + Qt embed.
 _VTK_NAME_FRAGMENTS = (
     "vtkIOFFMPEG",
@@ -132,6 +177,10 @@ def _should_remove(path: Path, *, bundle: Path, aggressive: bool) -> bool:
     lower = name.lower()
     rel = path.relative_to(bundle)
     rel_s = rel.as_posix()
+
+    # Never trim VTK payloads: substring rules can delete required DLLs (e.g. vtkFiltersSources).
+    if "vtk.libs" in rel.parts or rel_s.startswith("vtkmodules/"):
+        return False
 
     if lower in _QT_EXE_NAMES:
         return True

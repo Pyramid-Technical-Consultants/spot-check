@@ -68,6 +68,21 @@ if [[ ! -d "$INTERNAL/pyvista" ]]; then
   echo "ERROR: PyVista was not bundled under $INTERNAL/pyvista (3D view will fail)." >&2
   exit 1
 fi
+if [[ ! -d "$INTERNAL/vtk.libs" ]]; then
+  echo "ERROR: vtk.libs was not bundled (VTK import will fail in the frozen exe)." >&2
+  exit 1
+fi
+if ! compgen -G "$INTERNAL/vtk.libs/"'vtkFiltersSources'*.dll > /dev/null; then
+  echo "ERROR: vtkFiltersSources DLL missing from vtk.libs (PyVista import will fail)." >&2
+  exit 1
+fi
+
+echo "Frozen VTK smoke test (SPOT_CHECK_SMOKE=1)..."
+SPOT_CHECK_SMOKE=1 "$EXE" 2>&1 || {
+  echo "ERROR: Frozen executable failed VTK/PyVista smoke import." >&2
+  exit 1
+}
+echo "Frozen VTK smoke test passed."
 
 ARCHIVE="$ROOT/dist/SpotCheck-${VERSION}-windows-x64.zip"
 rm -f "$ARCHIVE"

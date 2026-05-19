@@ -5,8 +5,8 @@ Avoid collect_all() — it copies entire PySide6/VTK/SciPy trees (~2× bloat). P
 hooks + import tracing pull what the app needs; packaging/trim_windows_bundle.py drops
 unused Qt/VTK payloads afterward.
 
-Matplotlib is excluded; packaging/pyi_rth_skip_vtk_matplotlib.py stubs VTK's matplotlib
-backend (PyVista imports it for LaTeX; SpotCheck uses FreeType axis labels).
+Matplotlib is bundled for PyVista plotting.colors; packaging/pyi_rth_skip_vtk_matplotlib.py
+stubs VTK's vtkRenderingMatplotlib backend only (SpotCheck uses FreeType axis labels).
 
 SciPy is omitted from the frozen build (plan QA uses a slower fallback).
 """
@@ -44,7 +44,6 @@ hiddenimports += [
 datas: list = collect_data_files("pyvista")
 
 excludes: list[str] = [
-    "matplotlib",
     "mpl_toolkits",
     "pytest",
     "IPython",

@@ -15,6 +15,21 @@ def _trim_module():
     return mod
 
 
+def test_trim_bundle_never_removes_vtk_libs(tmp_path: Path) -> None:
+    trim_bundle = _trim_module().trim_bundle
+    root = tmp_path / "SpotCheck" / "_internal"
+    vtklibs = root / "vtk.libs"
+    vtklibs.mkdir(parents=True)
+    keep = vtklibs / "vtkFiltersSources-9.6.1.dll"
+    keep.write_bytes(b"x" * 800)
+    io_dll = vtklibs / "vtkIOFFMPEG-9.6.1.dll"
+    io_dll.write_bytes(b"y" * 800)
+    removed, _freed = trim_bundle(root.parent, aggressive=False)
+    assert keep.exists()
+    assert io_dll.exists()
+    assert removed == 0
+
+
 def test_trim_bundle_removes_qt_quick_dll(tmp_path: Path) -> None:
     trim_bundle = _trim_module().trim_bundle
     root = tmp_path / "SpotCheck"

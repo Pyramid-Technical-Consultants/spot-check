@@ -30,7 +30,11 @@ dependencies = [
 
 [project.optional-dependencies]
 fast = ["scipy"]
-build = ["pyinstaller>=6.6,<7", "pyinstaller-hooks-contrib>=2024.10"]
+build = [
+    "pyinstaller>=6.6,<7",
+    "pyinstaller-hooks-contrib>=2024.10",
+    "matplotlib>=3.8",
+]
 dev = ["pytest>=8", "ruff>=0.4", "mypy>=1.10", "pre-commit>=3.5"]
 
 [tool.pytest.ini_options]

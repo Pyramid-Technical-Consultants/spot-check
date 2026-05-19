@@ -1,3 +1,7 @@
-# PyInstaller hook: matplotlib is excluded from SpotCheck; this hook prevents accidental collection.
+"""Collect matplotlib for PyVista plotting (pyvista.plotting.colors imports it at load)."""
 
-excludedimports = ["matplotlib"]
+from __future__ import annotations
+
+from PyInstaller.utils.hooks import collect_submodules
+
+hiddenimports = collect_submodules("matplotlib")
