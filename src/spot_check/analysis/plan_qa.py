@@ -115,7 +115,7 @@ def plan_dose_qa_tier_counts(
     *,
     pass_pp: float,
     warn_pp: float,
-) -> tuple[int, int, int, int, int, int]:
+) -> tuple[int, int, int, int, int]:
     """Counts: pass, over_warn, over_fail, under_warn, under_fail (non-finite excluded)."""
     s = np.asarray(signed_delta_pp, dtype=np.float64).reshape(-1)
     finite = np.isfinite(s)

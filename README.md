@@ -119,7 +119,7 @@ spot-check/
 ├── scripts/            # setup, build-windows, bump-version, validate_auto_t0g10
 ├── src/spot_check/
 │   ├── analysis/       # measured, episodes, auto_columns, viz, plan QA
-│   ├── plan/           # DICOM
+│   ├── plan/           # DICOM + Pyramid plan CSV
 │   ├── geometry/       # Z axis, cube axes
 │   └── gui/            # PySide6 app
 └── tests/

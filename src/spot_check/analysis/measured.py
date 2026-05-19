@@ -188,9 +188,13 @@ def _weighted_mean_masked(
         return float("nan")
     return num / den
 
+
+_GateSpotBufRow = tuple[float, float, float, float, int, float | None, float | None, float]
+
+
 def _finalize_spot_channel_weighted(
-    buf: list[tuple[float, float, float, float, int, float | None, float | None]],
-) -> tuple[float, float, float, float, int, float, float]:
+    buf: list[_GateSpotBufRow],
+) -> tuple[float, float, float, float, int, float, float, float]:
     """Collapse one spot: weighted mean of A/B, layer, partial code, σ (weights in tuple buf column
     3)."""
     if not buf:
@@ -216,9 +220,6 @@ def _finalize_spot_channel_weighted(
     ch_ok = [math.isfinite(float(v)) and float(v) > 0 for v in ch_vals]
     ch_mean = _weighted_mean_masked(ch_vals, ws, ch_ok)
     return (a_mean, b_mean, lay_mean, sw, pcd_out, sig_a_mean, sig_b_mean, ch_mean)
-
-
-_GateSpotBufRow = tuple[float, float, float, float, int, float | None, float | None]
 
 
 def gate_counter_aggregated_layer_indices_from_csv(
@@ -332,16 +333,16 @@ def _aligned_auto_layer_indices(
 
 
 def _apply_gate_spot_aggregation(
-    rows: list[tuple[float, float, float, float, int]],
+    rows: list[tuple[float, ...]],
     gates: list[int],
     sigmas: list[tuple[float | None, float | None]],
-) -> list[tuple[float, float, float, float, int, float, float]]:
+) -> list[tuple[float, ...]]:
     """Group consecutive odd Gate Counter phases; even gates flush. Returns 7-tuples (last two =
     σ)."""
     if not (len(rows) == len(gates) == len(sigmas)):
         raise ValueError("rows, gates, sigmas length mismatch for spot aggregation")
-    out: list[tuple[float, float, float, float, int, float, float]] = []
-    buf: list[tuple[float, float, float, float, int, float | None, float | None]] = []
+    out: list[tuple[float, ...]] = []
+    buf: list[_GateSpotBufRow] = []
     prev_g: int | None = None
 
     def flush() -> None:
@@ -365,7 +366,7 @@ def _apply_gate_spot_aggregation(
 
 def _measured_tuple_for_spot_weighted_mean(
     t: tuple[float, ...],
-) -> tuple[float, float, float, float, int, float | None, float | None]:
+) -> _GateSpotBufRow:
     """Unpack measured row for :func:`_finalize_spot_channel_weighted`."""
     a, b = float(t[0]), float(t[1])
     lay = float(t[2])

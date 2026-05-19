@@ -138,10 +138,11 @@ def _infer_min_episode_rows(n_rows: int, n_plan: int) -> int:
 def _infer_viterbi_penalty_mm2(
     planned_xyz: Sequence[tuple[float, float, float]],
 ) -> float:
-    energies = nominal_layer_energies_mev(planned_xyz)
+    plan_list = list(planned_xyz)
+    energies = nominal_layer_energies_mev(plan_list)
     if not energies:
         return float(VITERBI_LAYER_ADVANCE_PENALTY_MM2_DEFAULT)
-    layer_xy = _plan_xy_by_energy_layer(planned_xyz, energies)
+    layer_xy = _plan_xy_by_energy_layer(plan_list, energies)
     cents: list[np.ndarray] = []
     for arr in layer_xy:
         pts = np.asarray(arr, dtype=np.float64).reshape(-1, 2)
