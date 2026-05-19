@@ -107,9 +107,10 @@ Output:
 - `dist/SpotCheck-<version>-windows-x64.zip` — zip for distribution
 
 The frozen build intentionally omits **SciPy** (~100MB); large plan QA runs use a slower
-fallback unless you use a dev install with `pip install -e ".[fast]"`. PyInstaller no longer
-uses `collect_all` on Qt/VTK, and `packaging/trim_windows_bundle.py` strips unused Qt/VTK
-payloads after the build — expect roughly **300–450MB** zip vs ~800MB+ with the old spec.
+fallback unless you use a dev install with `pip install -e ".[fast]"`. **Matplotlib** is
+included (required by PyVista’s VTK matplotlib text backend). PyInstaller no longer uses
+`collect_all` on Qt/VTK, and `packaging/trim_windows_bundle.py` strips unused Qt/VTK
+payloads after the build.
 
 Optional: pin the build version without editing the file:
 

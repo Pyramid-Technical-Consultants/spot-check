@@ -31,11 +31,14 @@ hiddenimports: list[str] = [
     "vtkmodules.vtkRenderingFreeType",
     "vtkmodules.vtkRenderingMatplotlib",
     "pydicom",
+    # PyVista imports vtkRenderingMatplotlib at startup; VTK needs matplotlib.
+    "matplotlib",
+    "matplotlib.backends",
+    "matplotlib.backends.backend_agg",
 ]
 
 excludes: list[str] = [
-    # Scientific / ML stacks not used
-    "matplotlib",
+    # Scientific / ML stacks not used (matplotlib required — see hiddenimports)
     "pytest",
     "IPython",
     "notebook",
