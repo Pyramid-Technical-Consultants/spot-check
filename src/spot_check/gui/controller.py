@@ -1118,7 +1118,8 @@ class SpotCheckController:
             )
             _plot_cache["label"] = ld.label
             _plot_cache["csv_display_name"] = ld.csv_display_name
-            build_note = f"Building 3D view — {ld.csv_display_name}…"
+            build_target = ld.csv_display_name or ld.label or "plan"
+            build_note = f"Building 3D view — {build_target}…"
             load_overlay_msg.setText(build_note)
             status_lbl.setText(build_note)
             try:
@@ -1368,7 +1369,11 @@ class SpotCheckController:
                 )
                 need_data = (
                     pipeline_key != _plot_cache["pipeline_key"]
-                    or _plot_cache["measured_unaligned"] is None
+                    or _plot_cache["planned"] is None
+                    or (
+                        has_csv
+                        and _plot_cache["measured_unaligned"] is None
+                    )
                 )
 
                 if need_data:

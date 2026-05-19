@@ -136,7 +136,8 @@ def show_comparison_3d_pyvista(
     exp_xyz_qa: np.ndarray | None = None
     weight_alpha_u8: np.ndarray | None = None
     if (
-        weight_measured_by_channel
+        n_m > 0
+        and weight_measured_by_channel
         and prep.meas_weight is not None
         and int(prep.meas_weight.shape[0]) == n_m
     ):
@@ -199,7 +200,8 @@ def show_comparison_3d_pyvista(
             if qa_draw_lines:
                 plan_qa_caption_extra += " Lines: warn+fail → NN plan spot."
     elif (
-        weight_measured_by_channel
+        n_m > 0
+        and weight_measured_by_channel
         and prep.meas_weight is not None
         and int(prep.meas_weight.shape[0]) == n_m
     ):

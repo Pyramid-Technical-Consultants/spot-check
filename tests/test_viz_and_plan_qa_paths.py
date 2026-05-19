@@ -62,6 +62,29 @@ def test_plan_qa_error_line_polylines_builds_with_pyvista(measured_csv_writer) -
     assert fail_lines is None or hasattr(fail_lines, "n_points")
 
 
+def test_show_comparison_3d_pyvista_plan_only_no_measured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan without acquisition CSV must render (no channel-weight percentile on empty)."""
+    import pyvista as pv
+
+    pl = pv.Plotter(off_screen=True)
+    monkeypatch.setattr(pl, "show", lambda *args, **kwargs: None)
+    try:
+        out = analysis.show_comparison_3d_pyvista(
+            list(MINIMAL_PLANNED_XYZ),
+            [],
+            title="plan only",
+            a_is_x=False,
+            weight_measured_by_channel=True,
+            reuse_plotter=pl,
+            reembed_qt=False,
+        )
+        assert out is pl
+    finally:
+        pl.close()
+
+
 def test_show_comparison_3d_pyvista_dose_qa_coloring(
     measured_csv_writer,
     monkeypatch: pytest.MonkeyPatch,

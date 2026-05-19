@@ -20,7 +20,9 @@ def _measured_alpha_u8_from_channel_weights(
 ) -> np.ndarray:
     """Per-point alpha uint8 from IX512 channel-sum style weights (same mapping as 3D measured
     tint)."""
-    w = np.maximum(np.asarray(weights, dtype=np.float64), 1e-18)
+    w = np.maximum(np.asarray(weights, dtype=np.float64).reshape(-1), 1e-18)
+    if w.size == 0:
+        return np.zeros(0, dtype=np.uint8)
     lo, hi = float(np.percentile(w, 4)), float(np.percentile(w, 96))
     if hi <= lo * 1.001:
         wn = np.ones_like(w, dtype=np.float64)
