@@ -210,17 +210,18 @@ def show_comparison_3d_pyvista(
             gold_mask=gold_mask,
         )
 
-    use_rgba = plan_qa_coloring or (gold_mask is not None and bool(np.any(gold_mask)))
-    if use_rgba and "rgba" not in meas_cloud.point_data and gold_mask is not None:
-        r0, g0, b0 = _hex_to_rgb_u8(_MEASURED_COLOR_3D)
-        r1, g1, b1 = _hex_to_rgb_u8(_PARTIAL_AXIS_MEAS_COLOR_3D)
-        gm = gold_mask
-        rgba = np.zeros((n_m, 4), dtype=np.uint8)
-        rgba[:, 0] = np.where(gm, np.uint8(r1), np.uint8(r0))
-        rgba[:, 1] = np.where(gm, np.uint8(g1), np.uint8(g0))
-        rgba[:, 2] = np.where(gm, np.uint8(b1), np.uint8(b0))
-        rgba[:, 3] = 255
-        meas_cloud["rgba"] = rgba
+    if n_m > 0:
+        use_rgba = plan_qa_coloring or (gold_mask is not None and bool(np.any(gold_mask)))
+        if use_rgba and "rgba" not in meas_cloud.point_data and gold_mask is not None:
+            r0, g0, b0 = _hex_to_rgb_u8(_MEASURED_COLOR_3D)
+            r1, g1, b1 = _hex_to_rgb_u8(_PARTIAL_AXIS_MEAS_COLOR_3D)
+            gm = gold_mask
+            rgba = np.zeros((n_m, 4), dtype=np.uint8)
+            rgba[:, 0] = np.where(gm, np.uint8(r1), np.uint8(r0))
+            rgba[:, 1] = np.where(gm, np.uint8(g1), np.uint8(g0))
+            rgba[:, 2] = np.where(gm, np.uint8(b1), np.uint8(b0))
+            rgba[:, 3] = 255
+            meas_cloud["rgba"] = rgba
 
     meas_idx = np.arange(int(n_m), dtype=np.int64)
     if qa_hide_pass_spots and qa_metric is not None:

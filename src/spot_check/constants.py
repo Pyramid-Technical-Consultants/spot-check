@@ -37,6 +37,11 @@ AUTO_EDGE_ROLLING_WINDOW: Final[int] = 15
 AUTO_EDGE_ON_WEIGHT_FRAC: Final[float] = 0.45
 # When raw episode count equals the plan, skip merge/split alignment.
 AUTO_EDGE_COUNT_ALIGN_FRAC: Final[float] = 0.01
+# Plan XY hint: search this many rows around each inter-spot boundary when refining spans.
+AUTO_PLAN_BOUNDARY_REFINE_ROWS: Final[int] = 32
+AUTO_PLAN_BOUNDARY_REFINE_PASSES: Final[int] = 4
+# Blend plan vs signal merge cost when aligning episode count (0 = signal only, 1 = plan only).
+AUTO_PLAN_MERGE_BLEND: Final[float] = 0.65
 # Episode merge scoring: centroid XY delta² (mm²) + coeff × (Δt s)² when aligning M→N_plan.
 AUTO_EPISODE_MERGE_DT_MM2_PER_S: Final[float] = 50.0
 

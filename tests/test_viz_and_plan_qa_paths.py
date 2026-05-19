@@ -77,6 +77,7 @@ def test_show_comparison_3d_pyvista_plan_only_no_measured(
             title="plan only",
             a_is_x=False,
             weight_measured_by_channel=True,
+            plan_qa_coloring=True,
             reuse_plotter=pl,
             reembed_qt=False,
         )

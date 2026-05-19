@@ -15,6 +15,9 @@ from spot_check.constants import (
     AUTO_EDGE_ROLLING_WINDOW,
     AUTO_EDGE_TINY_MERGE_ROWS,
     AUTO_EPISODE_MERGE_DT_MM2_PER_S,
+    AUTO_PLAN_BOUNDARY_REFINE_PASSES,
+    AUTO_PLAN_BOUNDARY_REFINE_ROWS,
+    AUTO_PLAN_MERGE_BLEND,
 )
 
 # Half-open row index range into a contiguous table.
@@ -337,6 +340,24 @@ def _merge_pair_cost_cols(
     i: int,
     *,
     dt_coeff: float,
+    plan_xy: np.ndarray | None = None,
+    row_w: np.ndarray | None = None,
+) -> float:
+    if plan_xy is not None and row_w is not None and i + 1 < len(plan_xy):
+        sig = _merge_pair_cost_signal(fins, cols, spans, i, dt_coeff=dt_coeff)
+        plan_c = _merge_pair_cost_plan(cols, spans, i, plan_xy, row_w)
+        blend = float(AUTO_PLAN_MERGE_BLEND)
+        return blend * plan_c + (1.0 - blend) * sig
+    return _merge_pair_cost_signal(fins, cols, spans, i, dt_coeff=dt_coeff)
+
+
+def _merge_pair_cost_signal(
+    fins: Sequence[FinBuf],
+    cols: AutoFitColumns,
+    spans: Sequence[EpisodeSpan],
+    i: int,
+    *,
+    dt_coeff: float,
 ) -> float:
     lt, rt = fins[i], fins[i + 1]
     da = float(lt[0]) - float(rt[0])
@@ -346,6 +367,142 @@ def _merge_pair_cost_cols(
     right_start = spans[i + 1][0]
     t_gap = float(cols.t[right_start]) - float(cols.t[left_end])
     return dist_sq + float(dt_coeff) * (max(0.0, t_gap) ** 2)
+
+
+def _xy_sqdist(ax: float, ay: float, bx: float, by: float) -> float:
+    dx = ax - bx
+    dy = ay - by
+    return dx * dx + dy * dy
+
+
+def _span_xy_centroid(
+    cols: AutoFitColumns,
+    span: EpisodeSpan,
+    row_w: np.ndarray,
+) -> tuple[float, float]:
+    s, e = span
+    if e <= s:
+        return float(cols.mx[s]), float(cols.my[s])
+    ww = row_w[s:e]
+    den = float(ww.sum())
+    if den <= 0.0:
+        return float(cols.mx[s]), float(cols.my[s])
+    mx = float(np.dot(cols.mx[s:e], ww) / den)
+    my = float(np.dot(cols.my[s:e], ww) / den)
+    return mx, my
+
+
+def _plan_pair_cost(
+    cols: AutoFitColumns,
+    left: EpisodeSpan,
+    right: EpisodeSpan,
+    plan_a: np.ndarray,
+    plan_b: np.ndarray,
+    row_w: np.ndarray,
+) -> float:
+    c0 = _span_xy_centroid(cols, left, row_w)
+    c1 = _span_xy_centroid(cols, right, row_w)
+    return _xy_sqdist(c0[0], c0[1], float(plan_a[0]), float(plan_a[1])) + _xy_sqdist(
+        c1[0], c1[1], float(plan_b[0]), float(plan_b[1])
+    )
+
+
+def _merge_pair_cost_plan(
+    cols: AutoFitColumns,
+    spans: Sequence[EpisodeSpan],
+    i: int,
+    plan_xy: np.ndarray,
+    row_w: np.ndarray,
+) -> float:
+    """Low cost when merging episodes *i* and *i+1* best matches plan spot *i*."""
+    s0, e0 = spans[i]
+    s1, e1 = spans[i + 1]
+    ww0 = float(row_w[s0:e0].sum())
+    ww1 = float(row_w[s1:e1].sum())
+    sw = ww0 + ww1
+    if sw <= 0.0:
+        cm = _span_xy_centroid(cols, spans[i], row_w)
+    else:
+        c0 = _span_xy_centroid(cols, spans[i], row_w)
+        c1 = _span_xy_centroid(cols, spans[i + 1], row_w)
+        cm = (
+            (c0[0] * ww0 + c1[0] * ww1) / sw,
+            (c0[1] * ww0 + c1[1] * ww1) / sw,
+        )
+    p0 = plan_xy[i]
+    return min(
+        _xy_sqdist(cm[0], cm[1], float(p0[0]), float(p0[1])),
+        _xy_sqdist(cm[0], cm[1], float(plan_xy[i + 1][0]), float(plan_xy[i + 1][1])),
+    )
+
+
+def refine_spans_with_plan_xy(
+    cols: AutoFitColumns,
+    spans: list[EpisodeSpan],
+    plan_xy: np.ndarray,
+    *,
+    window_rows: int = AUTO_PLAN_BOUNDARY_REFINE_ROWS,
+    passes: int = AUTO_PLAN_BOUNDARY_REFINE_PASSES,
+) -> list[EpisodeSpan]:
+    """Nudge inter-spot row boundaries using plan XY + measured centroids."""
+    k = len(spans)
+    if k < 2 or plan_xy.shape[0] < k:
+        return spans
+    row_w = delivery_row_weights(cols)
+    win = max(2, int(window_rows))
+    out = list(spans)
+    for _ in range(max(1, int(passes))):
+        changed = False
+        for i in range(k - 1):
+            if i + 1 >= plan_xy.shape[0]:
+                break
+            s0, e0 = out[i]
+            s1, e1 = out[i + 1]
+            if e1 <= s0 + 1:
+                continue
+            lo = max(s0 + 1, e0 - win, s1 - win)
+            hi = min(e1 - 1, e0 + win, s1 + win)
+            if hi <= lo:
+                continue
+            pa = plan_xy[i]
+            pb = plan_xy[i + 1]
+            best_split = e0
+            best_cost = _plan_pair_cost(cols, (s0, e0), (s1, e1), pa, pb, row_w)
+            for split in range(lo, hi + 1):
+                if split <= s0 or split >= e1:
+                    continue
+                cost = _plan_pair_cost(cols, (s0, split), (split, e1), pa, pb, row_w)
+                if cost < best_cost - 1e-9:
+                    best_cost = cost
+                    best_split = split
+            if best_split != e0:
+                out[i] = (s0, best_split)
+                out[i + 1] = (best_split, e1)
+                changed = True
+        if not changed:
+            break
+    return out
+
+
+def _best_plan_split_in_span(
+    cols: AutoFitColumns,
+    span: EpisodeSpan,
+    plan_a: np.ndarray,
+    plan_b: np.ndarray,
+    row_w: np.ndarray,
+) -> int:
+    """Row index *k* in ``[s+1, e-1]`` minimizing plan-pair cost for a two-spot split."""
+    s, e = span
+    if e - s < 2:
+        return -1
+    best_k = -1
+    best_cost = float("inf")
+    for k in range(s + 1, e):
+        cost = _plan_pair_cost(cols, (s, k), (k, e), plan_a, plan_b, row_w)
+        if cost < best_cost:
+            best_cost = cost
+            best_k = k
+    return best_k
 
 
 def _span_max_internal_gap_cols(cols: AutoFitColumns, span: EpisodeSpan) -> tuple[int, float]:
@@ -503,8 +660,9 @@ def align_episode_spans_to_plan_count_cols(
     n_plan: int,
     *,
     merge_dt_coeff: float = AUTO_EPISODE_MERGE_DT_MM2_PER_S,
+    plan_xy: np.ndarray | None = None,
 ) -> tuple[list[EpisodeSpan], AutoEpisodeDiagnostics]:
-    """Merge/split spans until ``len(spans) == n_plan`` when raw count is far off."""
+    """Merge/split spans until ``len(spans) == n_plan``; optional plan XY refines boundaries."""
     raw_n = len(spans)
     if n_plan <= 0:
         diag_bad = AutoEpisodeDiagnostics(
@@ -516,31 +674,44 @@ def align_episode_spans_to_plan_count_cols(
         _set_last_diag(diag_bad)
         return spans, diag_bad
 
+    row_w = delivery_row_weights(cols) if plan_xy is not None else None
+    work = list(spans)
+
     if raw_n == n_plan:
+        if plan_xy is not None and row_w is not None:
+            work = refine_spans_with_plan_xy(cols, work, plan_xy)
         diag_ok = AutoEpisodeDiagnostics(
             n_raw_episodes=raw_n,
-            n_after_align=raw_n,
+            n_after_align=len(work),
             n_plan=n_plan,
             count_align_ok=True,
         )
         _set_last_diag(diag_ok)
-        return list(spans), diag_ok
+        return work, diag_ok
 
-    work = list(spans)
     fins = fin_bufs_from_spans_batch(cols, work)
     count_align_ok = True
 
+    def merge_cost(i: int) -> float:
+        return _merge_pair_cost_cols(
+            fins,
+            cols,
+            work,
+            i,
+            dt_coeff=merge_dt_coeff,
+            plan_xy=plan_xy,
+            row_w=row_w,
+        )
+
     heap: list[tuple[float, int]] = []
     for i in range(len(work) - 1):
-        heapq.heappush(
-            heap, (_merge_pair_cost_cols(fins, cols, work, i, dt_coeff=merge_dt_coeff), i)
-        )
+        heapq.heappush(heap, (merge_cost(i), i))
 
     while len(work) > n_plan and heap:
         c_heap, i = heapq.heappop(heap)
         if i >= len(work) - 1:
             continue
-        c_now = _merge_pair_cost_cols(fins, cols, work, i, dt_coeff=merge_dt_coeff)
+        c_now = merge_cost(i)
         if c_now > c_heap + 1e-12:
             heapq.heappush(heap, (c_now, i))
             continue
@@ -551,35 +722,43 @@ def align_episode_spans_to_plan_count_cols(
         fins[i] = _merge_fin_bufs(fins[i], fins.pop(i + 1))
         for j in (i - 1, i):
             if 0 <= j < len(work) - 1:
-                heapq.heappush(
-                    heap,
-                    (_merge_pair_cost_cols(fins, cols, work, j, dt_coeff=merge_dt_coeff), j),
-                )
+                heapq.heappush(heap, (merge_cost(j), j))
 
-    gap_meta = [_span_max_internal_gap_cols(cols, sp) for sp in work]
     while len(work) < n_plan:
         best_ei = -1
         best_k = -1
-        best_dt = -1.0
-        for ei, (k, dt) in enumerate(gap_meta):
-            if k >= 0 and dt > best_dt:
-                best_dt = dt
-                best_k = k
-                best_ei = ei
+        best_key = -1.0
+        for ei, (s, e) in enumerate(work):
+            if e - s < 2:
+                continue
+            if plan_xy is not None and row_w is not None and ei + 1 < plan_xy.shape[0]:
+                k = _best_plan_split_in_span(
+                    cols, (s, e), plan_xy[ei], plan_xy[ei + 1], row_w
+                )
+                if k < 0:
+                    continue
+                left, right = (s, k), (k, e)
+                key = _plan_pair_cost(cols, left, right, plan_xy[ei], plan_xy[ei + 1], row_w)
+            else:
+                k, dt = _span_max_internal_gap_cols(cols, (s, e))
+                if k < 0:
+                    continue
+                key = dt
+            if best_ei < 0 or key < best_key:
+                best_ei, best_k, best_key = ei, k, key
         if best_ei < 0:
             count_align_ok = False
             break
         s, e = work[best_ei]
-        left: EpisodeSpan = (s, s + best_k)
-        right: EpisodeSpan = (s + best_k, e)
+        left: EpisodeSpan = (s, best_k)
+        right: EpisodeSpan = (best_k, e)
         work[best_ei : best_ei + 1] = [left, right]
-        gap_meta[best_ei : best_ei + 1] = [
-            _span_max_internal_gap_cols(cols, left),
-            _span_max_internal_gap_cols(cols, right),
-        ]
 
     if len(work) != n_plan:
         count_align_ok = False
+
+    if count_align_ok and plan_xy is not None and len(work) == n_plan:
+        work = refine_spans_with_plan_xy(cols, work, plan_xy)
 
     diag = AutoEpisodeDiagnostics(
         n_raw_episodes=raw_n,
@@ -601,6 +780,7 @@ def segment_align_auto_columns(
     min_episode_rows: int,
     dead_ratio: float = AUTO_EDGE_DEAD_RATIO_DEFAULT,
     tiny_merge_rows: int = AUTO_EDGE_TINY_MERGE_ROWS,
+    plan_xy: np.ndarray | None = None,
 ) -> tuple[list[EpisodeSpan], AutoEpisodeDiagnostics]:
     spans = segment_into_episodes_cols(
         cols,
@@ -611,7 +791,15 @@ def segment_align_auto_columns(
         dead_ratio=dead_ratio,
         tiny_merge_rows=tiny_merge_rows,
     )
-    return align_episode_spans_to_plan_count_cols(cols, spans, n_plan_spots)
+    if plan_xy is not None and len(spans) >= 2 and n_plan_spots >= 2:
+        n_ref = min(len(spans), n_plan_spots)
+        head = refine_spans_with_plan_xy(
+            cols, spans[:n_ref], plan_xy[:n_ref]
+        )
+        spans = head + spans[n_ref:]
+    return align_episode_spans_to_plan_count_cols(
+        cols, spans, n_plan_spots, plan_xy=plan_xy
+    )
 
 
 def _optional_float(v: float | None) -> float:

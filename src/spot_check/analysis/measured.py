@@ -660,6 +660,7 @@ def measured_spot_abc_from_csv(
             min_episode_rows=min_rows,
             dead_ratio=dead_ratio,
             tiny_merge_rows=tiny_merge,
+            plan_xy=plan_xy2,
         )
         assign_by_delivery = _diag.count_align_ok and len(aligned_groups) == n_plan_spots
 

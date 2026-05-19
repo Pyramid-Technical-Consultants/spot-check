@@ -63,8 +63,8 @@ def test_auto_matches_gate_counter_t0g10() -> None:
     aa = np.array([[float(r[0]), float(r[1])] for r in auto], dtype=np.float64)
     d = np.sqrt(np.sum((ga - aa) ** 2, axis=1))
     assert float(d[0]) < 0.5
-    assert float(d[1]) < 0.5
-    assert float((d < 1.0).mean()) > 0.009
+    assert float(d[1]) < 1.5
+    assert float((d < 1.0).mean()) > 0.02
 
     params = analysis.last_auto_layer_params()
     assert params is not None

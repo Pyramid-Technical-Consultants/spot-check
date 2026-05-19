@@ -15,8 +15,8 @@ Layer assignment (nominal energy index per row):
   ``Gate Counter`` is ignored unless ``aggregate_spots=True``.
 
 - **auto** — **deadtime** segmentation from IX512 channel sum + fit amplitude A (rolling
-  baseline), plan spot-count check, then delivery-order layers (when aligned) or **monotone
-  Viterbi**. Never reads ``Gate Counter`` — use **gate_counter** when that column is available.
+  baseline), plan spot-count alignment with optional **plan XY boundary refinement**, then
+  delivery-order layers (when aligned) or **monotone Viterbi**. Never reads ``Gate Counter``.
   ``aggregate_spots`` is ignored in **auto** mode.
 
 - **plan_viterbi** — global decode: each row keeps measured A/B; layer index comes from
