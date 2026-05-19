@@ -53,6 +53,7 @@ pyinstaller packaging/spot-check.spec --noconfirm --clean
 
 OUT_DIR="$ROOT/dist/SpotCheck"
 python "$ROOT/packaging/trim_windows_bundle.py" "$OUT_DIR"
+python "$ROOT/packaging/trim_windows_bundle.py" "$OUT_DIR" --report | tail -n 12
 EXE="$OUT_DIR/SpotCheck.exe"
 if [[ ! -f "$EXE" ]]; then
   echo "Expected executable not found: $EXE" >&2

@@ -106,11 +106,10 @@ Output:
 - `dist/SpotCheck/SpotCheck.exe` — run this (keep the whole folder together)
 - `dist/SpotCheck-<version>-windows-x64.zip` — zip for distribution
 
-The frozen build intentionally omits **SciPy** (~100MB); large plan QA runs use a slower
-fallback unless you use a dev install with `pip install -e ".[fast]"`. **Matplotlib** is
-included (required by PyVista’s VTK matplotlib text backend). PyInstaller no longer uses
-`collect_all` on Qt/VTK, and `packaging/trim_windows_bundle.py` strips unused Qt/VTK
-payloads after the build.
+The frozen build omits **SciPy** and **matplotlib** (a runtime hook stubs PyVista’s optional
+VTK matplotlib text backend; axis labels use FreeType). `packaging/trim_windows_bundle.py`
+strips unused Qt/VTK/PIL payloads after PyInstaller (including `opengl32sw.dll` by default —
+set `SPOT_CHECK_TRIM_AGGRESSIVE=0` before building if 3D fails on software-OpenGL systems).
 
 Optional: pin the build version without editing the file:
 

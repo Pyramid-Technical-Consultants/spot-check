@@ -23,7 +23,7 @@ def test_trim_bundle_removes_qt_quick_dll(tmp_path: Path) -> None:
     quick.write_bytes(b"x" * 1000)
     keep = root / "Qt6Widgets.dll"
     keep.write_bytes(b"y" * 500)
-    removed, freed = trim_bundle(root)
+    removed, freed = trim_bundle(root, aggressive=False)
     assert removed >= 1
     assert freed >= 1000
     assert not quick.exists()

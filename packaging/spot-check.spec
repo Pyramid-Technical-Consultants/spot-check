@@ -5,8 +5,10 @@ Avoid collect_all() — it copies entire PySide6/VTK/SciPy trees (~2× bloat). P
 hooks + import tracing pull what the app needs; packaging/trim_windows_bundle.py drops
 unused Qt/VTK payloads afterward.
 
-SciPy is omitted from the frozen build (plan QA uses a slower fallback). Install
-.[fast] for dev/CI tests with cKDTree acceleration.
+Matplotlib is excluded; packaging/pyi_rth_skip_vtk_matplotlib.py stubs VTK's matplotlib
+backend (PyVista imports it for LaTeX; SpotCheck uses FreeType axis labels).
+
+SciPy is omitted from the frozen build (plan QA uses a slower fallback).
 """
 from __future__ import annotations
 
@@ -15,13 +17,11 @@ from pathlib import Path
 spec_dir = Path(SPECPATH)
 root = spec_dir.parent
 src = root / "src"
+hooks_dir = spec_dir / "hooks"
 
 block_cipher = None
 
-# PyVista / VTK (see https://docs.pyvista.org/extras/pyinstaller.html)
 hiddenimports: list[str] = [
-    "vtkmodules",
-    "vtkmodules.all",
     "vtkmodules.qt.QVTKRenderWindowInteractor",
     "vtkmodules.util",
     "vtkmodules.util.numpy_support",
@@ -29,16 +29,12 @@ hiddenimports: list[str] = [
     "vtkmodules.vtkRenderingOpenGL2",
     "vtkmodules.vtkInteractionStyle",
     "vtkmodules.vtkRenderingFreeType",
-    "vtkmodules.vtkRenderingMatplotlib",
     "pydicom",
-    # PyVista imports vtkRenderingMatplotlib at startup; VTK needs matplotlib.
-    "matplotlib",
-    "matplotlib.backends",
-    "matplotlib.backends.backend_agg",
 ]
 
 excludes: list[str] = [
-    # Scientific / ML stacks not used (matplotlib required — see hiddenimports)
+    "matplotlib",
+    "mpl_toolkits",
     "pytest",
     "IPython",
     "notebook",
@@ -54,9 +50,7 @@ excludes: list[str] = [
     "distributed",
     "xarray",
     "zarr",
-    # SciPy omitted from frozen build (optional at dev time via [fast])
     "scipy",
-    # Unused Qt bindings / toolkits
     "PyQt5",
     "PyQt6",
     "PySide2",
@@ -109,12 +103,12 @@ a = Analysis(
     binaries=[],
     datas=[],
     hiddenimports=hiddenimports,
-    hookspath=[],
+    hookspath=[str(hooks_dir)],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[str(spec_dir / "pyi_rth_skip_vtk_matplotlib.py")],
     excludes=excludes,
     noarchive=False,
-    optimize=0,
+    optimize=1,
 )
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
