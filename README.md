@@ -1,12 +1,12 @@
 # SpotCheck
 
-Compare **RT Ion therapy plans** (DICOM) with **machine acquisition exports** (CSV) in an interactive 3D viewer. SpotCheck loads planned spot positions and nominal energies, aligns measured fit positions to the plan, and highlights pass/warn/fail against plan QA thresholds.
+Compare **RT Ion therapy plans** (DICOM or Pyramid plan CSV) with **machine acquisition exports** (CSV) in an interactive 3D viewer. SpotCheck loads planned spot positions and nominal energies, aligns measured fit positions to the plan, and highlights pass/warn/fail against plan QA thresholds.
 
 **Not a medical device.** Validate any clinical workflow independently before use.
 
 ## What it does
 
-- **Plan** — Read spot (x, y, nominal energy) from Ion Control Point sequences; optional scanning spot FWHM for ellipsoid plan markers.
+- **Plan** — Read spot (x, y, nominal energy) from Ion Control Point DICOM or Pyramid plan CSV (`X_POSITION`, `Y_POSITION`, `ENERGY`, `CHARGE_REQ`, optional `BEAM_SIZE`); optional FWHM for ellipsoid plan markers.
 - **Acquisition** — Parse tabular exports (`.csv` or `.csv.gz`): fit positions, amplitudes, IX512 channel sum, optional Gate Counter and σ columns.
 - **Layer assignment** — Group rows into delivered spots and assign a nominal energy layer index (see [Layer modes](#layer-modes)).
 - **3D view** — PyVista plan vs measured clouds; proton water-depth Z axis; optional layer slice band, plan QA coloring, and error lines to nearest plan spots.
@@ -19,7 +19,7 @@ The PySide6 GUI persists paths and settings in `.spot_check_gui_state.json` (pro
 | Mode | Used in GUI | Summary |
 |------|-------------|---------|
 | **gate_counter** | Yes (default) | Odd **Gate Counter** phases = one spot; even = deadtime. Nominal layer follows DICOM delivery order. Requires Gate Counter on the CSV when aggregating spots. |
-| **auto** | Yes | **Signal** episodes from timing, on-spot weight, and XY step; merge/split to match plan spot count. Does **not** read Gate Counter. Layers use plan delivery order when alignment succeeds, otherwise monotone **Viterbi** on episode centroids. Thresholds inferred from CSV + plan (`infer_auto_layer_params`). |
+| **auto** | Yes | **Signal** episodes (timing, weight, XY); merge/split to plan spot count. Gate Counter is not used for segmentation. When alignment succeeds, nominal layers match gate_counter aggregation if that column is present; otherwise delivery order, else **Viterbi** on centroids. Thresholds from `infer_auto_layer_params`. |
 | **time_gap** | API only | Layer steps from inter-row Δt and refill heuristics. |
 | **plan_viterbi** | API only | Per-row monotone Viterbi decode to nearest plan layer (no episode segmentation). |
 

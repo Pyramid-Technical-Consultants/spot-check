@@ -14,12 +14,10 @@ Layer assignment (nominal energy index per row):
 - **time_gap** — ``TIME_LAYER_GAP_S_DEFAULT`` plus refill heuristics (constants below).
   ``Gate Counter`` is ignored unless ``aggregate_spots=True``.
 
-- **auto** — one delivered spot per episode from **signal** segmentation (timing, weight, XY).
-  **Never reads ``Gate Counter``** — use **gate_counter** when that column is available. Episodes
-  are inferred (:func:`infer_auto_layer_params`) and aligned to the plan spot count, then
-  **monotone Viterbi** (or delivery-order layers when the count aligns). ``aggregate_spots``
-  is ignored in **auto** mode. Gate-counter exports in ``test_data/`` are for **validation**
-  (compare auto vs gate_counter); auto must not consume that column.
+- **auto** — **deadtime** segmentation from IX512 channel sum + fit amplitude A (rolling
+  baseline), plan spot-count check, then delivery-order layers (when aligned) or **monotone
+  Viterbi**. Never reads ``Gate Counter`` — use **gate_counter** when that column is available.
+  ``aggregate_spots`` is ignored in **auto** mode.
 
 - **plan_viterbi** — global decode: each row keeps measured A/B; layer index comes from
   a monotone path (stay or +1 layer) minimizing distance-to-plan, plus a penalty for
@@ -82,10 +80,19 @@ from spot_check.plan import (
     infer_csv_plan_tag as infer_csv_plan_tag,
 )
 from spot_check.plan import (
+    is_supported_plan_file as is_supported_plan_file,
+)
+from spot_check.plan import (
+    plan_label_from_path as plan_label_from_path,
+)
+from spot_check.plan import (
     planned_spot_position_counts_from_dicom as planned_spot_position_counts_from_dicom,
 )
 from spot_check.plan import (
     planned_spot_xyz_and_counts_from_dicom as planned_spot_xyz_and_counts_from_dicom,
+)
+from spot_check.plan import (
+    planned_spot_xyz_and_counts_from_plan as planned_spot_xyz_and_counts_from_plan,
 )
 from spot_check.plan import (
     planned_spot_xyz_from_dicom as planned_spot_xyz_from_dicom,

@@ -6,7 +6,11 @@ import gzip
 from pathlib import Path
 
 from spot_check import analysis
-from spot_check.analysis.csv_io import acquisition_csv_stem, open_acquisition_csv
+from spot_check.analysis.csv_io import (
+    acquisition_csv_has_gate_counter,
+    acquisition_csv_stem,
+    open_acquisition_csv,
+)
 from tests.conftest import MINIMAL_PLANNED_XYZ, minimal_measured_rows, write_measured_csv
 
 
@@ -14,6 +18,17 @@ def test_acquisition_csv_stem() -> None:
     assert acquisition_csv_stem(Path("foo.csv")) == "foo"
     assert acquisition_csv_stem(Path("foo.csv.gz")) == "foo"
     assert acquisition_csv_stem(Path("15186535_T0G40_data.csv.gz")) == "15186535_T0G40_data"
+
+
+def test_acquisition_csv_has_gate_counter(tmp_path: Path) -> None:
+    path = write_measured_csv(tmp_path / "g.csv", minimal_measured_rows())
+    assert acquisition_csv_has_gate_counter(path)
+    plain = tmp_path / "no_gate.csv"
+    plain.write_text(
+        "time (s),IX512 Channel Sum (nA),Fit Amplitude A (nA)\n0,1,0.5\n",
+        encoding="utf-8",
+    )
+    assert not acquisition_csv_has_gate_counter(plain)
 
 
 def test_measured_spot_abc_from_csv_gz_matches_plain(tmp_path: Path) -> None:

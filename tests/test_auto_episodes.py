@@ -11,8 +11,18 @@ from spot_check.analysis.episodes import AutoFitRow, segment_align_auto_episodes
 from tests.conftest import MINIMAL_PLANNED_XYZ, minimal_measured_rows, write_measured_csv
 
 
-def _row(i: int, *, dt: float = 10.0) -> AutoFitRow:
+def _row(
+    i: int,
+    *,
+    dt: float = 10.0,
+    on_spot: bool = True,
+    spot_len: int = 10,
+) -> AutoFitRow:
+    """Synthetic row: high channel sum + fit A on-spot, low off-spot (deadtime)."""
     x = float(i)
+    high = 100.0
+    low = 5.0
+    on = on_spot
     return AutoFitRow(
         t=float(i * dt),
         mx=x,
@@ -21,16 +31,29 @@ def _row(i: int, *, dt: float = 10.0) -> AutoFitRow:
         b=0.0,
         mx_p=x,
         my_p=0.0,
-        weight=1.0,
-        ch_n=1.0,
+        weight=high if on else low,
+        ch_n=high if on else low,
         pcd=0,
         sa=None,
         sb=None,
     )
 
 
+def _spot_rows(n_spots: int, *, spot_len: int = 10, dead_len: int = 1) -> list[AutoFitRow]:
+    rows: list[AutoFitRow] = []
+    idx = 0
+    for _ in range(n_spots):
+        for _ in range(spot_len):
+            rows.append(_row(idx, on_spot=True))
+            idx += 1
+        for _ in range(dead_len):
+            rows.append(_row(idx, on_spot=False))
+            idx += 1
+    return rows
+
+
 def test_segment_align_preserves_count_when_raw_equals_plan() -> None:
-    rows = [_row(i) for i in range(4)]
+    rows = _spot_rows(4)
     groups, diag = segment_align_auto_episodes(
         rows,
         n_plan_spots=4,
@@ -38,6 +61,7 @@ def test_segment_align_preserves_count_when_raw_equals_plan() -> None:
         min_on_spot_weight_na=1e-12,
         spot_xy_jump_mm=50.0,
         min_episode_rows=1,
+        dead_ratio=0.55,
     )
     assert len(groups) == 4
     assert diag.count_align_ok
@@ -45,7 +69,7 @@ def test_segment_align_preserves_count_when_raw_equals_plan() -> None:
 
 
 def test_merge_when_more_episodes_than_plan() -> None:
-    rows = [_row(i, dt=10.0) for i in range(5)]
+    rows = _spot_rows(5)
     groups, diag = segment_align_auto_episodes(
         rows,
         n_plan_spots=2,
@@ -53,6 +77,7 @@ def test_merge_when_more_episodes_than_plan() -> None:
         min_on_spot_weight_na=1e-12,
         spot_xy_jump_mm=50.0,
         min_episode_rows=1,
+        dead_ratio=0.55,
     )
     assert len(groups) == 2
     assert diag.count_align_ok
@@ -61,17 +86,32 @@ def test_merge_when_more_episodes_than_plan() -> None:
 
 def test_auto_measured_inferred_params_match_plan(tmp_path: Path) -> None:
     """Default API infers episode settings from CSV + plan."""
-    rows_csv = [
-        {
-            "time (s)": str(i * 2.0),
-            "IX512 Channel Sum (nA)": "1.0",
-            "Fit Amplitude A (nA)": "0.5",
-            "Fit Mean Position A (mm)": str(float(i)),
-            "Fit Mean Position B (mm)": "0.0",
-            "Gate Counter": str(2 * i + 1),
-        }
-        for i in range(4)
-    ]
+    rows_csv = []
+    idx = 0
+    for spot in range(4):
+        for _ in range(8):
+            rows_csv.append(
+                {
+                    "time (s)": str(idx * 0.01),
+                    "IX512 Channel Sum (nA)": "100.0",
+                    "Fit Amplitude A (nA)": "10.0",
+                    "Fit Mean Position A (mm)": str(float(spot)),
+                    "Fit Mean Position B (mm)": "0.0",
+                    "Gate Counter": str(2 * spot + 1),
+                }
+            )
+            idx += 1
+        rows_csv.append(
+            {
+                "time (s)": str(idx * 0.01),
+                "IX512 Channel Sum (nA)": "5.0",
+                "Fit Amplitude A (nA)": "0.5",
+                "Fit Mean Position A (mm)": str(float(spot)),
+                "Fit Mean Position B (mm)": "0.0",
+                "Gate Counter": str(2 * spot + 2),
+            }
+        )
+        idx += 1
     csv_path = write_measured_csv(tmp_path / "four_inferred.csv", rows_csv)
     out = analysis.measured_spot_abc_from_csv(
         csv_path,
@@ -84,18 +124,33 @@ def test_auto_measured_inferred_params_match_plan(tmp_path: Path) -> None:
 
 
 def test_auto_measured_row_count_matches_plan(tmp_path: Path) -> None:
-    """Synthetic CSV with four spaced rows vs four plan spots."""
-    rows_csv = [
-        {
-            "time (s)": str(i * 2.0),
-            "IX512 Channel Sum (nA)": "1.0",
-            "Fit Amplitude A (nA)": "0.5",
-            "Fit Mean Position A (mm)": str(float(i)),
-            "Fit Mean Position B (mm)": "0.0",
-            "Gate Counter": str(2 * i + 1),
-        }
-        for i in range(4)
-    ]
+    """Synthetic CSV with four spaced spots vs four plan spots."""
+    rows_csv = []
+    idx = 0
+    for spot in range(4):
+        for _ in range(8):
+            rows_csv.append(
+                {
+                    "time (s)": str(idx * 0.01),
+                    "IX512 Channel Sum (nA)": "100.0",
+                    "Fit Amplitude A (nA)": "10.0",
+                    "Fit Mean Position A (mm)": str(float(spot)),
+                    "Fit Mean Position B (mm)": "0.0",
+                    "Gate Counter": str(2 * spot + 1),
+                }
+            )
+            idx += 1
+        rows_csv.append(
+            {
+                "time (s)": str(idx * 0.01),
+                "IX512 Channel Sum (nA)": "5.0",
+                "Fit Amplitude A (nA)": "0.5",
+                "Fit Mean Position A (mm)": str(float(spot)),
+                "Fit Mean Position B (mm)": "0.0",
+                "Gate Counter": str(2 * spot + 2),
+            }
+        )
+        idx += 1
     csv_path = write_measured_csv(tmp_path / "four.csv", rows_csv)
     out = analysis.measured_spot_abc_from_csv(
         csv_path,

@@ -12,7 +12,8 @@ only under controlled configuration management.
 
 **Intended use**
 
-- Load one **RT Ion Plan** (``.dcm``) and one **tabular acquisition** export (``.csv``).
+- Load one **plan** (RT Ion ``.dcm`` or Pyramid plan ``.csv``) and one **acquisition**
+  export (``.csv``).
 - Assign CSV rows to nominal energy layers per configurable rules, then compare
   **measured vs planned** spot handling in 3D and optional **plan QA** coloring.
 - The 3D view **refreshes automatically** when inputs validate (numeric fields use a

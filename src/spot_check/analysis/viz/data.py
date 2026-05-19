@@ -16,72 +16,88 @@ def prepare_comparison_3d_data(
     max_measured_draw: int | None = None,
     plan_fwhm_xy_mm: np.ndarray | None = None,
 ) -> Comparison3DData:
-    if not planned_xyz:
-        raise PlanDataError("No planned spots extracted from DICOM")
-    if not measured_abc:
-        raise AcquisitionDataError("No measured points found in CSV")
+    if not planned_xyz and not measured_abc:
+        raise PlanDataError("No plan spots and no measured points to display")
+    if a_is_x:
+        xlab, ylab = "Fit A (mm)", "Fit B (mm)"
+    else:
+        xlab, ylab = "Fit B (mm)", "Fit A (mm)"
+
     n_plan = len(planned_xyz)
     fwhm_arr: np.ndarray | None = None
-    if plan_fwhm_xy_mm is not None:
-        fa = np.asarray(plan_fwhm_xy_mm, dtype=np.float64).reshape(-1)
-        if fa.size != 2 * n_plan:
-            raise ValueError("plan_fwhm_xy_mm must have length 2 * n_plan or shape (n_plan, 2)")
-        fwhm_arr = fa.reshape(n_plan, 2)
-    e_hi, e_lo = _plan_energy_bounds_mev(planned_xyz)
-    plan_xyz = np.asarray(planned_xyz, dtype=np.float64).reshape(-1, 3)
-    layer_e = nominal_layer_energies_mev(planned_xyz)
+    if n_plan:
+        if plan_fwhm_xy_mm is not None:
+            fa = np.asarray(plan_fwhm_xy_mm, dtype=np.float64).reshape(-1)
+            if fa.size != 2 * n_plan:
+                raise ValueError(
+                    "plan_fwhm_xy_mm must have length 2 * n_plan or shape (n_plan, 2)"
+                )
+            fwhm_arr = fa.reshape(n_plan, 2)
+        e_hi, e_lo = _plan_energy_bounds_mev(planned_xyz)
+        plan_xyz = np.asarray(planned_xyz, dtype=np.float64).reshape(-1, 3)
+    else:
+        e_hi, e_lo = 0.0, 0.0
+        plan_xyz = np.zeros((0, 3), dtype=np.float64)
 
     rows = list(measured_abc)
     if max_measured_draw is not None and len(rows) > max_measured_draw:
         rows = rows[:max_measured_draw]
 
-    z_mapped = energies_for_measured_time_layers(layer_e, rows)
-
-    if a_is_x:
-        xlab, ylab = "Fit A (mm)", "Fit B (mm)"
-        mx = [t[0] for t in rows]
-        my = [t[1] for t in rows]
-    else:
-        xlab, ylab = "Fit B (mm)", "Fit A (mm)"
-        mx = [t[1] for t in rows]
-        my = [t[0] for t in rows]
-
-    wts: list[float] = []
-    parts: list[int] = []
-    for t in rows:
-        wts.append(float(t[3]) if len(t) >= 4 else 1.0)
-        parts.append(int(t[4]) if len(t) >= 5 else 0)
-    meas_weight = np.asarray(wts, dtype=np.float64)
-    meas_partial_raw = np.asarray(parts, dtype=np.int8)
-
-    meas_xyz = np.column_stack([mx, my, z_mapped]).astype(np.float64)
-    sig_plot_x: list[float] = []
-    sig_plot_y: list[float] = []
-    for t in rows:
-        if len(t) >= 7:
-            try:
-                sa = float(t[5])
-                if not math.isfinite(sa):
-                    sa = float("nan")
-            except (TypeError, ValueError):
-                sa = float("nan")
-            try:
-                sb = float(t[6])
-                if not math.isfinite(sb):
-                    sb = float("nan")
-            except (TypeError, ValueError):
-                sb = float("nan")
+    if rows:
+        if planned_xyz:
+            layer_e = nominal_layer_energies_mev(planned_xyz)
+            z_mapped = energies_for_measured_time_layers(layer_e, rows)
         else:
-            sa, sb = float("nan"), float("nan")
+            z_mapped = [max(0.0, float(round(float(t[2])))) for t in rows]
+            e_vals = [float(z) for z in z_mapped]
+            e_hi, e_lo = (max(e_vals), min(e_vals)) if e_vals else (0.0, 0.0)
         if a_is_x:
-            sig_plot_x.append(sa)
-            sig_plot_y.append(sb)
+            mx = [t[0] for t in rows]
+            my = [t[1] for t in rows]
         else:
-            sig_plot_x.append(sb)
-            sig_plot_y.append(sa)
-    meas_sigma_xy = np.column_stack(
-        [np.asarray(sig_plot_x, dtype=np.float64), np.asarray(sig_plot_y, dtype=np.float64)]
-    )
+            mx = [t[1] for t in rows]
+            my = [t[0] for t in rows]
+        wts: list[float] = []
+        parts: list[int] = []
+        for t in rows:
+            wts.append(float(t[3]) if len(t) >= 4 else 1.0)
+            parts.append(int(t[4]) if len(t) >= 5 else 0)
+        meas_weight = np.asarray(wts, dtype=np.float64)
+        meas_partial_raw = np.asarray(parts, dtype=np.int8)
+        meas_xyz = np.column_stack([mx, my, z_mapped]).astype(np.float64)
+        sig_plot_x: list[float] = []
+        sig_plot_y: list[float] = []
+        for t in rows:
+            if len(t) >= 7:
+                try:
+                    sa = float(t[5])
+                    if not math.isfinite(sa):
+                        sa = float("nan")
+                except (TypeError, ValueError):
+                    sa = float("nan")
+                try:
+                    sb = float(t[6])
+                    if not math.isfinite(sb):
+                        sb = float("nan")
+                except (TypeError, ValueError):
+                    sb = float("nan")
+            else:
+                sa, sb = float("nan"), float("nan")
+            if a_is_x:
+                sig_plot_x.append(sa)
+                sig_plot_y.append(sb)
+            else:
+                sig_plot_x.append(sb)
+                sig_plot_y.append(sa)
+        meas_sigma_xy = np.column_stack(
+            [np.asarray(sig_plot_x, dtype=np.float64), np.asarray(sig_plot_y, dtype=np.float64)]
+        )
+    else:
+        meas_weight = np.zeros(0, dtype=np.float64)
+        meas_partial_raw = np.zeros(0, dtype=np.int8)
+        meas_xyz = np.zeros((0, 3), dtype=np.float64)
+        meas_sigma_xy = np.zeros((0, 2), dtype=np.float64)
+
     return Comparison3DData(
         plan_xyz=plan_xyz,
         meas_xyz=meas_xyz,

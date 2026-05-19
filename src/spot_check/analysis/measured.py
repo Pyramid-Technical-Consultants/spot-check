@@ -323,6 +323,14 @@ def gate_counter_aggregated_layer_indices_from_csv(
     return np.asarray(layers, dtype=np.int64)
 
 
+def _aligned_auto_layer_indices(
+    n_episodes: int,
+    spots_per_layer: Sequence[int],
+) -> np.ndarray:
+    """Nominal layers when auto episode count matches the plan (delivery order)."""
+    return delivery_layer_indices(n_episodes, spots_per_layer)
+
+
 def _apply_gate_spot_aggregation(
     rows: list[tuple[float, float, float, float, int]],
     gates: list[int],
@@ -403,10 +411,11 @@ def measured_spot_abc_from_csv(
 
     Returns 8-tuples ``(A, B, layer, weight, partial, σ_A, σ_B, channel_sum_nA)`` (σ may be NaN).
 
-    **auto** segments acquisition rows into signal-based episodes and **never reads**
-    ``Gate Counter`` (use **gate_counter** mode when that column is available). Episodes are
-    aligned to the plan spot count when possible, then nominal layers use delivery order or
-    monotone Viterbi on episode centroids.
+    **auto** segments acquisition rows into delivery episodes from **deadtime** in IX512
+    channel sum and fit amplitude A (never reads ``Gate Counter``). Rows below a rolling
+    baseline × calibrated ratio are off-spot; short glitches merge forward. Episodes are
+    aligned to the plan spot count when the raw count is far off, then nominal layers use
+    delivery order or monotone Viterbi on episode centroids.
     ``aggregate_spots`` and ``aggregate_even_rows_after_odd`` are ignored in **auto** mode.
 
     When ``auto_infer_params`` is True (default), episode gap, XY jump, on-spot weight floor,
@@ -583,6 +592,7 @@ def measured_spot_abc_from_csv(
         from spot_check.analysis.auto_columns import load_auto_fit_columns_from_csv
         from spot_check.analysis.episodes import (
             aggregate_spans_batch,
+            cols_with_delivery_weights,
             segment_align_auto_columns,
         )
         if not layer_energies or max_layer is None:
@@ -624,12 +634,21 @@ def measured_spot_abc_from_csv(
             min_w = auto_p.min_on_spot_weight_na
             min_rows = auto_p.min_episode_rows
             vit_pen = auto_p.viterbi_advance_penalty_mm2
+            dead_ratio = auto_p.dead_ratio
+            tiny_merge = auto_p.tiny_merge_rows
         else:
             gap_s = float(auto_episode_gap_s)
             xy_jump = float(auto_spot_xy_jump_mm)
             min_w = float(auto_min_on_spot_weight_na)
             min_rows = int(auto_min_episode_rows)
             vit_pen = float(viterbi_advance_penalty_mm2)
+            from spot_check.constants import (
+                AUTO_EDGE_DEAD_RATIO_DEFAULT,
+                AUTO_EDGE_TINY_MERGE_ROWS,
+            )
+
+            dead_ratio = float(AUTO_EDGE_DEAD_RATIO_DEFAULT)
+            tiny_merge = int(AUTO_EDGE_TINY_MERGE_ROWS)
 
         aligned_groups, _diag = segment_align_auto_columns(
             cols,
@@ -638,12 +657,13 @@ def measured_spot_abc_from_csv(
             min_on_spot_weight_na=min_w,
             spot_xy_jump_mm=xy_jump,
             min_episode_rows=min_rows,
+            dead_ratio=dead_ratio,
+            tiny_merge_rows=tiny_merge,
         )
         assign_by_delivery = _diag.count_align_ok and len(aligned_groups) == n_plan_spots
 
-        aggs = aggregate_spans_batch(cols, aligned_groups)
+        aggs = aggregate_spans_batch(cols_with_delivery_weights(cols), aligned_groups)
         ab_buf_auto = [(a.a, a.b) for a in aggs]
-        xy_buf_auto = [[a.mx, a.my] for a in aggs]
         w_buf_auto = [a.weight for a in aggs]
         ch_buf_auto = [a.ch_n for a in aggs]
         partial_codes_auto = [a.pcd for a in aggs]
@@ -651,9 +671,9 @@ def measured_spot_abc_from_csv(
         sig_acc_auto = [(a.sa, a.sb) for a in aggs]
 
         if assign_by_delivery:
-            layers_idx_auto = delivery_layer_indices(len(aggs), spots_per_layer)
+            layers_idx_auto = _aligned_auto_layer_indices(len(aggs), spots_per_layer)
         else:
-            meas_xy_auto = np.asarray(xy_buf_auto, dtype=np.float64)
+            meas_xy_auto = np.asarray([(a.mx, a.my) for a in aggs], dtype=np.float64)
             emit_auto = _emit_sqdist_to_layers_mm2(meas_xy_auto, layer_xy)
             layers_idx_auto = viterbi_monotone_layer_assign(emit_auto, vit_pen)
         hi_auto = max_layer

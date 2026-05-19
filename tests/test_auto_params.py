@@ -32,7 +32,36 @@ def _cols_from_dt(
         my_p=z.copy(),
         weight=w,
         ch_n=w,
+        fit_a=w,
         pcd=pcd,
+        sa=nan,
+        sb=nan,
+    )
+
+
+def _cols_with_spots(n_spots: int, *, spot_len: int = 12, dead_len: int = 1) -> AutoFitColumns:
+    high, low = 100.0, 5.0
+    chunks: list[tuple[float, float]] = []
+    for _ in range(n_spots):
+        chunks.extend([(high, high)] * spot_len + [(low, low)] * dead_len)
+    ch = np.array([c[0] for c in chunks], dtype=np.float64)
+    fa = np.array([c[1] for c in chunks], dtype=np.float64)
+    n = ch.size
+    t = np.arange(n, dtype=np.float64) * 0.01
+    z = np.zeros(n, dtype=np.float64)
+    nan = np.full(n, np.nan, dtype=np.float64)
+    return AutoFitColumns(
+        t=t,
+        mx=t.copy(),
+        my=z,
+        a=t,
+        b=z,
+        mx_p=t,
+        my_p=z,
+        weight=ch,
+        ch_n=ch,
+        fit_a=fa,
+        pcd=np.zeros(n, dtype=np.int64),
         sa=nan,
         sb=nan,
     )
@@ -44,10 +73,11 @@ def test_infer_episode_gap_from_timing() -> None:
     assert 0.005 <= p.episode_gap_s <= 5.0
 
 
-def test_infer_xy_jump_from_plan_spacing() -> None:
-    cols = _cols_from_dt(0.1, 4, step_xy=0.01)
+def test_infer_dead_ratio_calibrated() -> None:
+    cols = _cols_with_spots(40)
     p = infer_auto_layer_params(cols, MINIMAL_PLANNED_XYZ)
-    assert 2.0 <= p.spot_xy_jump_mm <= 80.0
+    assert 0.52 <= p.dead_ratio <= 0.64
+    assert p.tiny_merge_rows >= 1
 
 
 def test_infer_min_weight_from_distribution() -> None:
@@ -62,6 +92,7 @@ def test_infer_min_weight_from_distribution() -> None:
         my_p=np.zeros(5),
         weight=w,
         ch_n=w,
+        fit_a=w,
         pcd=np.zeros(5, dtype=np.int64),
         sa=np.full(5, np.nan),
         sb=np.full(5, np.nan),

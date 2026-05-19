@@ -36,6 +36,7 @@ class AutoFitColumns:
     my_p: np.ndarray
     weight: np.ndarray
     ch_n: np.ndarray
+    fit_a: np.ndarray
     pcd: np.ndarray
     sa: np.ndarray
     sb: np.ndarray
@@ -56,6 +57,7 @@ def _empty_columns() -> AutoFitColumns:
         my_p=z,
         weight=z,
         ch_n=z,
+        fit_a=z,
         pcd=np.zeros(0, dtype=np.int32),
         sa=z,
         sb=z,
@@ -140,6 +142,7 @@ def _parse_acquisition_prealloc(
     b_mm = np.empty(n_cap, dtype=np.float64)
     w_arr = np.empty(n_cap, dtype=np.float64)
     ch_arr = np.empty(n_cap, dtype=np.float64)
+    fa_arr = np.empty(n_cap, dtype=np.float64)
     sa = np.empty(n_cap, dtype=np.float64)
     sb = np.empty(n_cap, dtype=np.float64)
 
@@ -177,6 +180,8 @@ def _parse_acquisition_prealloc(
                 w_arr[i] = max(c, 1e-9) if c == c and c > 0 else 1.0
         else:
             w_arr[i] = 1.0
+        v_fa = _cell_float(parts, col_fa)
+        fa_arr[i] = max(v_fa, 1e-9) if v_fa == v_fa and v_fa > 0 else 1.0
         if col_ch is not None:
             c = _cell_float(parts, col_ch)
             ch_arr[i] = max(c, 1e-9) if c == c and c > 0 else 1.0
@@ -194,12 +199,13 @@ def _parse_acquisition_prealloc(
             b_mm = _grow_f64(b_mm, n_cap)
             w_arr = _grow_f64(w_arr, n_cap)
             ch_arr = _grow_f64(ch_arr, n_cap)
+            fa_arr = _grow_f64(fa_arr, n_cap)
             sa = _grow_f64(sa, n_cap)
             sb = _grow_f64(sb, n_cap)
 
     if i == 0:
         z = np.zeros(0, dtype=np.float64)
-        return z, z, z, z, z, z, z
+        return z, z, z, z, z, z, z, z
 
     return (
         t[:i],
@@ -207,6 +213,7 @@ def _parse_acquisition_prealloc(
         b_mm[:i],
         w_arr[:i],
         ch_arr[:i],
+        fa_arr[:i],
         sa[:i],
         sb[:i],
     )
@@ -237,7 +244,7 @@ def load_auto_fit_columns_from_csv(
             swm=swm,
             max_points=max_points,
         )
-    t, a_mm, b_mm, w_arr, ch_arr, sa, sb = parsed
+    t, a_mm, b_mm, w_arr, ch_arr, fa_arr, sa, sb = parsed
     if t.shape[0] == 0:
         return _empty_columns()
 
@@ -250,6 +257,7 @@ def load_auto_fit_columns_from_csv(
         pcd = pcd[keep]
         w_arr = w_arr[keep]
         ch_arr = ch_arr[keep]
+        fa_arr = fa_arr[keep]
         sa = sa[keep]
         sb = sb[keep]
 
@@ -269,6 +277,7 @@ def load_auto_fit_columns_from_csv(
         my_p=my_p,
         weight=w_arr,
         ch_n=ch_arr,
+        fit_a=fa_arr,
         pcd=pcd,
         sa=sa,
         sb=sb,

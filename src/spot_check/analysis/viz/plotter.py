@@ -142,7 +142,7 @@ def show_comparison_3d_pyvista(
     ):
         weight_alpha_u8 = _measured_alpha_u8_from_channel_weights(prep.meas_weight)
     qa_metric: np.ndarray | None = None
-    if plan_qa_coloring:
+    if plan_qa_coloring and n_m > 0 and planned_xyz:
         if qa_mode == "dose":
             dev_pp, plan_frac_qa, meas_frac_qa, dist_qa = plan_dose_fraction_deviation_pp(
                 planned_xyz, plan_mu, rows_for_qa, a_is_x=a_is_x
@@ -336,8 +336,15 @@ def show_comparison_3d_pyvista(
         return m
 
     plan_e_mev = np.asarray(prep.plan_xyz[:, 2], dtype=np.float64).reshape(-1)
-    x_all = np.r_[plan_pts[:, 0], meas_pts[:, 0]]
-    y_all = np.r_[plan_pts[:, 1], meas_pts[:, 1]]
+    if plan_pts.shape[0] and meas_pts.shape[0]:
+        x_all = np.r_[plan_pts[:, 0], meas_pts[:, 0]]
+        y_all = np.r_[plan_pts[:, 1], meas_pts[:, 1]]
+    elif plan_pts.shape[0]:
+        x_all = plan_pts[:, 0]
+        y_all = plan_pts[:, 1]
+    else:
+        x_all = meas_pts[:, 0]
+        y_all = meas_pts[:, 1]
     x_min, x_max = float(np.min(x_all)), float(np.max(x_all))
     y_min, y_max = float(np.min(y_all)), float(np.max(y_all))
     eff_tick = (
@@ -414,23 +421,25 @@ def show_comparison_3d_pyvista(
         except Exception:
             pass
 
-    if plan_rendered_fwhm_glyphs and plan_glyphs is not None:
-        plan_actor = pl.add_mesh(
-            plan_glyphs,
-            color=_PLAN_COLOR_3D,
-            opacity=0.45,
-            pickable=True,
-            smooth_shading=False,
-            lighting=False,
-        )
-    else:
-        plan_actor = pl.add_mesh(
-            plan_cloud,
-            color=_PLAN_COLOR_3D,
-            opacity=0.45,
-            pickable=True,
-            **point_kw,
-        )
+    plan_actor: Any | None = None
+    if plan_pts.shape[0] > 0:
+        if plan_rendered_fwhm_glyphs and plan_glyphs is not None:
+            plan_actor = pl.add_mesh(
+                plan_glyphs,
+                color=_PLAN_COLOR_3D,
+                opacity=0.45,
+                pickable=True,
+                smooth_shading=False,
+                lighting=False,
+            )
+        else:
+            plan_actor = pl.add_mesh(
+                plan_cloud,
+                color=_PLAN_COLOR_3D,
+                opacity=0.45,
+                pickable=True,
+                **point_kw,
+            )
 
     line_warn_actor: Any | None = None
     line_fail_actor: Any | None = None

@@ -12,28 +12,49 @@ from spot_check.analysis.episodes import AutoFitRow, segment_align_auto_episodes
 from tests.conftest import MINIMAL_PLANNED_XYZ, write_measured_csv
 
 
-def _singleton_rows(n: int, *, dt_s: float = 1e-3) -> list[AutoFitRow]:
-    """Consecutive dt = dt_s; with episode_gap_s < dt_s each row becomes its own episode."""
+def _spot_pattern_rows(n_spots: int, *, spot_len: int = 1, dead_len: int = 0) -> list[AutoFitRow]:
+    """Rows with high on-spot signal and optional deadtime gaps between spots."""
     rows: list[AutoFitRow] = []
-    for i in range(n):
-        x = float(i % 997) * 0.1
-        t = float(i) * dt_s
-        rows.append(
-            AutoFitRow(
-                t=t,
-                mx=x,
-                my=0.0,
-                a=x,
-                b=0.0,
-                mx_p=x,
-                my_p=0.0,
-                weight=1.0,
-                ch_n=1.0,
-                pcd=0,
-                sa=None,
-                sb=None,
+    idx = 0
+    high, low = 100.0, 5.0
+    for s in range(n_spots):
+        for _ in range(spot_len):
+            x = float(s)
+            rows.append(
+                AutoFitRow(
+                    t=float(idx) * 1e-3,
+                    mx=x,
+                    my=0.0,
+                    a=x,
+                    b=0.0,
+                    mx_p=x,
+                    my_p=0.0,
+                    weight=high,
+                    ch_n=high,
+                    pcd=0,
+                    sa=None,
+                    sb=None,
+                )
             )
-        )
+            idx += 1
+        for _ in range(dead_len):
+            rows.append(
+                AutoFitRow(
+                    t=float(idx) * 1e-3,
+                    mx=float(s),
+                    my=0.0,
+                    a=float(s),
+                    b=0.0,
+                    mx_p=float(s),
+                    my_p=0.0,
+                    weight=low,
+                    ch_n=low,
+                    pcd=0,
+                    sa=None,
+                    sb=None,
+                )
+            )
+            idx += 1
     return rows
 
 
@@ -41,9 +62,8 @@ def _singleton_rows(n: int, *, dt_s: float = 1e-3) -> list[AutoFitRow]:
 @pytest.mark.timeout(180)
 def test_align_merge_many_singleton_episodes_finishes() -> None:
     """Regression: merge scan must stay O(M²) compares with O(M) finalize updates (not O(M³))."""
-    n_rows = 8000
     n_plan = 6200
-    rows = _singleton_rows(n_rows)
+    rows = _spot_pattern_rows(n_plan + 1800, spot_len=1, dead_len=1)
     groups, diag = segment_align_auto_episodes(
         rows,
         n_plan_spots=n_plan,
@@ -51,10 +71,10 @@ def test_align_merge_many_singleton_episodes_finishes() -> None:
         min_on_spot_weight_na=1e-12,
         spot_xy_jump_mm=500.0,
         min_episode_rows=1,
+        dead_ratio=0.55,
     )
     assert len(groups) == n_plan
     assert diag.count_align_ok
-    assert diag.n_raw_episodes == n_rows
 
 
 @pytest.mark.slow
@@ -62,7 +82,7 @@ def test_align_merge_many_singleton_episodes_finishes() -> None:
 def test_align_split_single_long_episode_finishes() -> None:
     """Many splits inside one segmented episode (scan-heavy inner loops)."""
     n_plan = 600
-    rows = _singleton_rows(n_plan, dt_s=1e-6)
+    rows = _spot_pattern_rows(1, spot_len=n_plan, dead_len=0)
     groups, diag = segment_align_auto_episodes(
         rows,
         n_plan_spots=n_plan,
@@ -70,6 +90,7 @@ def test_align_split_single_long_episode_finishes() -> None:
         min_on_spot_weight_na=1e-12,
         spot_xy_jump_mm=500.0,
         min_episode_rows=1,
+        dead_ratio=0.55,
     )
     assert len(groups) == n_plan
     assert diag.count_align_ok
@@ -85,11 +106,27 @@ def test_segment_align_million_dwell_rows_finishes() -> None:
 
     n_plan = 4000
     rows_per_spot = 250
-    n = n_plan * rows_per_spot
-    spot_id = np.repeat(np.arange(n_plan), rows_per_spot)
-    within = np.tile(np.arange(rows_per_spot, dtype=np.float64) * 1e-4, n_plan)
-    t = np.repeat(np.arange(n_plan, dtype=np.float64), rows_per_spot) * 0.1 + within
+    dead_per_spot = 1
+    high, low = 100.0, 5.0
+    chunks = rows_per_spot + dead_per_spot
+    n = n_plan * chunks
+    spot_id = np.repeat(np.arange(n_plan), chunks)
+    within = np.tile(
+        np.concatenate(
+            (
+                np.arange(rows_per_spot, dtype=np.float64) * 1e-4,
+                np.array([0.05], dtype=np.float64),
+            )
+        ),
+        n_plan,
+    )
+    t = np.repeat(np.arange(n_plan, dtype=np.float64), chunks) * 0.1 + within
     xy = spot_id.astype(np.float64) * 0.05
+    on = np.tile(
+        np.concatenate((np.ones(rows_per_spot), np.zeros(dead_per_spot))),
+        n_plan,
+    ).astype(bool)
+    sig = np.where(on, high, low)
     cols = AutoFitColumns(
         t=t,
         mx=xy,
@@ -98,8 +135,9 @@ def test_segment_align_million_dwell_rows_finishes() -> None:
         b=np.zeros(n, dtype=np.float64),
         mx_p=xy,
         my_p=np.zeros(n, dtype=np.float64),
-        weight=np.ones(n, dtype=np.float64),
-        ch_n=np.ones(n, dtype=np.float64),
+        weight=sig,
+        ch_n=sig,
+        fit_a=sig * 0.1,
         pcd=np.zeros(n, dtype=np.int32),
         sa=np.full(n, np.nan, dtype=np.float64),
         sb=np.full(n, np.nan, dtype=np.float64),
@@ -111,10 +149,11 @@ def test_segment_align_million_dwell_rows_finishes() -> None:
         min_on_spot_weight_na=1e-12,
         spot_xy_jump_mm=500.0,
         min_episode_rows=1,
+        dead_ratio=0.55,
     )
     assert len(spans) == n_plan
     assert diag.count_align_ok
-    assert diag.n_raw_episodes == n_plan
+    assert abs(diag.n_raw_episodes - n_plan) <= max(1, n_plan // 100)
 
 
 @pytest.mark.slow

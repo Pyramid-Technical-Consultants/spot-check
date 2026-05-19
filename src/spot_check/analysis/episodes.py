@@ -9,7 +9,13 @@ from typing import Sequence
 import numpy as np
 
 from spot_check.analysis.auto_columns import AutoFitColumns
-from spot_check.constants import AUTO_EPISODE_MERGE_DT_MM2_PER_S
+from spot_check.constants import (
+    AUTO_EDGE_DEAD_RATIO_DEFAULT,
+    AUTO_EDGE_ON_WEIGHT_FRAC,
+    AUTO_EDGE_ROLLING_WINDOW,
+    AUTO_EDGE_TINY_MERGE_ROWS,
+    AUTO_EPISODE_MERGE_DT_MM2_PER_S,
+)
 
 # Half-open row index range into a contiguous table.
 EpisodeSpan = tuple[int, int]
@@ -91,78 +97,69 @@ def _weighted_mean_nan(vals: np.ndarray, weights: np.ndarray) -> float | None:
     return float(np.dot(v, w) / den)
 
 
-def _finalize_span_cols(cols: AutoFitColumns, span: EpisodeSpan) -> FinBuf:
-    s, e = span
-    sl = slice(s, e)
-    w = np.maximum(cols.weight[sl], 1e-18)
-    sw = float(w.sum())
-    a_mean = float(np.dot(cols.a[sl], w) / sw)
-    b_mean = float(np.dot(cols.b[sl], w) / sw)
-    pcd_seg = cols.pcd[sl]
-    pcd_out = int(pcd_seg.max()) if (pcd_seg > 0).any() else 0
-    sig_a = _weighted_mean_nan(cols.sa[sl], w)
-    sig_b = _weighted_mean_nan(cols.sb[sl], w)
-    sa = float("nan") if sig_a is None else float(sig_a)
-    sb = float("nan") if sig_b is None else float(sig_b)
-    ch_seg = cols.ch_n[sl]
-    ch_ok = np.isfinite(ch_seg) & (ch_seg > 0)
-    if ch_ok.any():
-        ch_mean = float(np.dot(ch_seg[ch_ok], w[ch_ok]) / w[ch_ok].sum())
-    else:
-        ch_mean = sw
-    return (a_mean, b_mean, 0.0, sw, pcd_out, sa, sb, ch_mean)
-
-
 def _episode_bincount_stats(
     cols: AutoFitColumns, spans: list[EpisodeSpan]
 ) -> tuple[np.ndarray, ...]:
     """Weighted per-episode sums for all rows (``O(n_rows)``)."""
     k = len(spans)
     n = len(cols)
-    ep = np.empty(n, dtype=np.int32)
+    ep = np.full(n, -1, dtype=np.int32)
     for i, (s, e) in enumerate(spans):
         ep[s:e] = i
 
-    w = np.maximum(cols.weight, 1e-18)
-    sum_w = np.bincount(ep, weights=w, minlength=k)
-    sum_aw = np.bincount(ep, weights=w * cols.a, minlength=k)
-    sum_bw = np.bincount(ep, weights=w * cols.b, minlength=k)
-    sum_mx = np.bincount(ep, weights=w * cols.mx, minlength=k)
-    sum_my = np.bincount(ep, weights=w * cols.my, minlength=k)
+    ok = ep >= 0
+    if not ok.any():
+        z = np.zeros(k, dtype=np.float64)
+        return (z, z, z, z, z, np.zeros(k, dtype=np.int32), z, z, z, z, z, z, z, z, z, z)
+
+    ep_ok = ep[ok]
+    w_all = np.maximum(cols.weight, 1e-18)
+    w = w_all[ok]
+    sum_w = np.bincount(ep_ok, weights=w, minlength=k)
+    sum_aw = np.bincount(ep_ok, weights=w * cols.a[ok], minlength=k)
+    sum_bw = np.bincount(ep_ok, weights=w * cols.b[ok], minlength=k)
+    sum_mx = np.bincount(ep_ok, weights=w * cols.mx[ok], minlength=k)
+    sum_my = np.bincount(ep_ok, weights=w * cols.my[ok], minlength=k)
 
     pcd_max = np.zeros(k, dtype=np.int32)
-    np.maximum.at(pcd_max, ep, cols.pcd)
+    np.maximum.at(pcd_max, ep_ok, cols.pcd[ok])
 
-    sa_ok = np.isfinite(cols.sa)
-    sb_ok = np.isfinite(cols.sb)
+    sa_m = ok & np.isfinite(cols.sa)
+    sb_m = ok & np.isfinite(cols.sb)
     sum_sa = np.zeros(k, dtype=np.float64)
     sum_sa_w = np.zeros(k, dtype=np.float64)
     sum_sb = np.zeros(k, dtype=np.float64)
     sum_sb_w = np.zeros(k, dtype=np.float64)
-    if sa_ok.any():
-        np.add.at(sum_sa, ep[sa_ok], (cols.sa[sa_ok] * w[sa_ok]))
-        np.add.at(sum_sa_w, ep[sa_ok], w[sa_ok])
-    if sb_ok.any():
-        np.add.at(sum_sb, ep[sb_ok], (cols.sb[sb_ok] * w[sb_ok]))
-        np.add.at(sum_sb_w, ep[sb_ok], w[sb_ok])
+    if sa_m.any():
+        e_sa = ep[sa_m]
+        w_sa = w_all[sa_m]
+        np.add.at(sum_sa, e_sa, cols.sa[sa_m] * w_sa)
+        np.add.at(sum_sa_w, e_sa, w_sa)
+    if sb_m.any():
+        e_sb = ep[sb_m]
+        w_sb = w_all[sb_m]
+        np.add.at(sum_sb, e_sb, cols.sb[sb_m] * w_sb)
+        np.add.at(sum_sb_w, e_sb, w_sb)
 
-    ch_ok = np.isfinite(cols.ch_n) & (cols.ch_n > 0)
+    ch_m = ok & np.isfinite(cols.ch_n) & (cols.ch_n > 0)
     sum_ch = np.zeros(k, dtype=np.float64)
     sum_ch_w = np.zeros(k, dtype=np.float64)
-    if ch_ok.any():
-        np.add.at(sum_ch, ep[ch_ok], (cols.ch_n[ch_ok] * w[ch_ok]))
-        np.add.at(sum_ch_w, ep[ch_ok], w[ch_ok])
+    if ch_m.any():
+        e_ch = ep[ch_m]
+        w_ch = w_all[ch_m]
+        np.add.at(sum_ch, e_ch, cols.ch_n[ch_m] * w_ch)
+        np.add.at(sum_ch_w, e_ch, w_ch)
 
-    has_pp = np.isfinite(cols.mx_p) | np.isfinite(cols.my_p)
+    pp_m = ok & (np.isfinite(cols.mx_p) | np.isfinite(cols.my_p))
     sum_pp_mx = np.zeros(k, dtype=np.float64)
     sum_pp_mx_w = np.zeros(k, dtype=np.float64)
     sum_pp_my = np.zeros(k, dtype=np.float64)
     sum_pp_my_w = np.zeros(k, dtype=np.float64)
-    if has_pp.any():
-        epp = ep[has_pp]
-        wpp = w[has_pp]
-        mxv = cols.mx_p[has_pp]
-        myv = cols.my_p[has_pp]
+    if pp_m.any():
+        epp = ep[pp_m]
+        wpp = w_all[pp_m]
+        mxv = cols.mx_p[pp_m]
+        myv = cols.my_p[pp_m]
         mx_ok = np.isfinite(mxv)
         my_ok = np.isfinite(myv)
         if mx_ok.any():
@@ -301,43 +298,6 @@ def aggregate_spans_batch(
     return out
 
 
-def aggregate_span_cols(cols: AutoFitColumns, span: EpisodeSpan) -> SpanAggregate:
-    """Vectorized weighted collapse of one episode span (``O(span length)`` NumPy)."""
-    s, e = span
-    sl = slice(s, e)
-    w = np.maximum(cols.weight[sl], 1e-18)
-    sw = float(w.sum())
-    fin = _finalize_span_cols(cols, span)
-    mx_m = float(np.dot(cols.mx[sl], w) / sw)
-    my_m = float(np.dot(cols.my[sl], w) / sw)
-    mx_p = cols.mx_p[sl]
-    my_p = cols.my_p[sl]
-    has_p = np.isfinite(mx_p) | np.isfinite(my_p)
-    if has_p.any():
-        wp = w[has_p]
-        mx_pp = _weighted_mean_nan(mx_p[has_p], wp)
-        my_pp = _weighted_mean_nan(my_p[has_p], wp)
-    else:
-        mx_pp, my_pp = None, None
-    sig_a = float(fin[5])
-    sig_b = float(fin[6])
-    sa_o = None if sig_a != sig_a else sig_a
-    sb_o = None if sig_b != sig_b else sig_b
-    return SpanAggregate(
-        a=float(fin[0]),
-        b=float(fin[1]),
-        mx=mx_m,
-        my=my_m,
-        weight=float(fin[3]),
-        ch_n=float(fin[7]),
-        pcd=int(fin[4]),
-        sa=sa_o,
-        sb=sb_o,
-        mx_pp=mx_pp,
-        my_pp=my_pp,
-    )
-
-
 def _weighted_merge_pair(xl: float, xr: float, sw_l: float, sw_r: float) -> float:
     """Merge two episode scalars; skip NaN sides (matches batch bincount aggregates)."""
     xl_ok = xl == xl
@@ -424,6 +384,97 @@ def _merge_short_spans(spans: list[EpisodeSpan], min_rows: int) -> None:
                 break
 
 
+def _rolling_mean(x: np.ndarray, window: int) -> np.ndarray:
+    """Centered rolling mean; output length always matches *x* (unlike ``convolve(..., same)``)."""
+    n = int(x.size)
+    if n == 0:
+        return x
+    w = max(1, min(int(window), n))
+    if w == 1:
+        return np.asarray(x, dtype=np.float64)
+    k = np.ones(w, dtype=np.float64) / w
+    full = np.convolve(x, k, mode="full")
+    start = (w - 1) // 2
+    return full[start : start + n]
+
+
+def _deadtime_mask(
+    ch: np.ndarray,
+    fa: np.ndarray,
+    *,
+    dead_ratio: float,
+    window: int = AUTO_EDGE_ROLLING_WINDOW,
+) -> np.ndarray:
+    """Rows with both IX512 sum and fit-A below a rolling baseline × *dead_ratio*."""
+    rm_ch = _rolling_mean(ch, window)
+    rm_fa = _rolling_mean(fa, window)
+    ratio = float(dead_ratio)
+    return (ch <= rm_ch * ratio) & (fa <= rm_fa * ratio)
+
+
+def _on_spans_from_deadtime(dead: np.ndarray) -> list[EpisodeSpan]:
+    """Contiguous non-deadtime runs (each delivered spot)."""
+    n = int(dead.size)
+    if n <= 0:
+        return []
+    spans: list[EpisodeSpan] = []
+    s = 0
+    while s < n:
+        while s < n and dead[s]:
+            s += 1
+        if s >= n:
+            break
+        e = s + 1
+        while e < n and not dead[e]:
+            e += 1
+        if e > s:
+            spans.append((s, e))
+        s = e
+    return spans
+
+
+def _merge_tiny_forward_spans(
+    spans: list[EpisodeSpan],
+    *,
+    max_rows: int,
+) -> list[EpisodeSpan]:
+    """Merge short false on-spot glitches into the following episode."""
+    cap = max(0, int(max_rows))
+    if cap <= 0 or len(spans) < 2:
+        return spans
+    out: list[EpisodeSpan] = []
+    i = 0
+    while i < len(spans):
+        s, e = spans[i]
+        while (e - s) <= cap and i + 1 < len(spans):
+            i += 1
+            e = spans[i][1]
+        out.append((s, e))
+        i += 1
+    return out
+
+
+def delivery_row_weights(
+    cols: AutoFitColumns,
+    *,
+    window: int = AUTO_EDGE_ROLLING_WINDOW,
+    on_frac: float = AUTO_EDGE_ON_WEIGHT_FRAC,
+) -> np.ndarray:
+    """Down-weight deadtime / off-spot rows for episode aggregation (numpy-only rolling mean)."""
+    ch, fa = cols.ch_n, cols.fit_a
+    rm_ch = _rolling_mean(ch, window)
+    rm_fa = _rolling_mean(fa, window)
+    on = (ch >= rm_ch * on_frac) & (fa >= rm_fa * on_frac)
+    return np.maximum(cols.weight, 1e-18) * on.astype(np.float64)
+
+
+def cols_with_delivery_weights(cols: AutoFitColumns) -> AutoFitColumns:
+    """Copy with aggregation weights scaled by on-spot signal (channel sum + fit A)."""
+    from dataclasses import replace
+
+    return replace(cols, weight=delivery_row_weights(cols))
+
+
 def segment_into_episodes_cols(
     cols: AutoFitColumns,
     *,
@@ -431,24 +482,17 @@ def segment_into_episodes_cols(
     min_on_spot_weight_na: float,
     spot_xy_jump_mm: float,
     min_episode_rows: int,
+    dead_ratio: float = AUTO_EDGE_DEAD_RATIO_DEFAULT,
+    tiny_merge_rows: int = AUTO_EDGE_TINY_MERGE_ROWS,
 ) -> list[EpisodeSpan]:
-    """Vectorized segmentation on column arrays."""
+    """Segment on deadtime between spots (low IX512 sum + fit-A vs rolling baseline)."""
+    del episode_gap_s, min_on_spot_weight_na, spot_xy_jump_mm  # legacy kwargs
     n = len(cols)
     if n == 0:
         return []
-    dt = np.diff(cols.t)
-    dxy_sq = np.diff(cols.a) ** 2 + np.diff(cols.b) ** 2
-    w = cols.weight
-    min_w = float(min_on_spot_weight_na)
-    jump_sq = float(spot_xy_jump_mm) ** 2
-    br = (dt >= float(episode_gap_s)) | (w[1:] < min_w)
-    br |= (w[:-1] >= min_w) & (w[1:] >= min_w) & (dxy_sq > jump_sq)
-    if not br.any():
-        spans = [(0, n)]
-    else:
-        starts = np.concatenate(([0], np.nonzero(br)[0] + 1))
-        ends = np.concatenate((np.nonzero(br)[0] + 1, [n]))
-        spans = [(int(s), int(e)) for s, e in zip(starts, ends)]
+    dead = _deadtime_mask(cols.ch_n, cols.fit_a, dead_ratio=dead_ratio)
+    spans = _on_spans_from_deadtime(dead)
+    spans = _merge_tiny_forward_spans(spans, max_rows=tiny_merge_rows)
     _merge_short_spans(spans, min_episode_rows)
     return [sp for sp in spans if sp[1] > sp[0]]
 
@@ -460,7 +504,7 @@ def align_episode_spans_to_plan_count_cols(
     *,
     merge_dt_coeff: float = AUTO_EPISODE_MERGE_DT_MM2_PER_S,
 ) -> tuple[list[EpisodeSpan], AutoEpisodeDiagnostics]:
-    """Merge/split spans until ``len(spans) == n_plan`` when possible."""
+    """Merge/split spans until ``len(spans) == n_plan`` when raw count is far off."""
     raw_n = len(spans)
     if n_plan <= 0:
         diag_bad = AutoEpisodeDiagnostics(
@@ -471,6 +515,16 @@ def align_episode_spans_to_plan_count_cols(
         )
         _set_last_diag(diag_bad)
         return spans, diag_bad
+
+    if raw_n == n_plan:
+        diag_ok = AutoEpisodeDiagnostics(
+            n_raw_episodes=raw_n,
+            n_after_align=raw_n,
+            n_plan=n_plan,
+            count_align_ok=True,
+        )
+        _set_last_diag(diag_ok)
+        return list(spans), diag_ok
 
     work = list(spans)
     fins = fin_bufs_from_spans_batch(cols, work)
@@ -545,6 +599,8 @@ def segment_align_auto_columns(
     min_on_spot_weight_na: float,
     spot_xy_jump_mm: float,
     min_episode_rows: int,
+    dead_ratio: float = AUTO_EDGE_DEAD_RATIO_DEFAULT,
+    tiny_merge_rows: int = AUTO_EDGE_TINY_MERGE_ROWS,
 ) -> tuple[list[EpisodeSpan], AutoEpisodeDiagnostics]:
     spans = segment_into_episodes_cols(
         cols,
@@ -552,6 +608,8 @@ def segment_align_auto_columns(
         min_on_spot_weight_na=min_on_spot_weight_na,
         spot_xy_jump_mm=spot_xy_jump_mm,
         min_episode_rows=min_episode_rows,
+        dead_ratio=dead_ratio,
+        tiny_merge_rows=tiny_merge_rows,
     )
     return align_episode_spans_to_plan_count_cols(cols, spans, n_plan_spots)
 
@@ -577,6 +635,7 @@ def _rows_to_columns(rows: Sequence[AutoFitRow]) -> AutoFitColumns:
             my_p=z,
             weight=z,
             ch_n=z,
+            fit_a=z,
             pcd=np.zeros(0, dtype=np.int32),
             sa=z,
             sb=z,
@@ -591,6 +650,7 @@ def _rows_to_columns(rows: Sequence[AutoFitRow]) -> AutoFitColumns:
         my_p=np.fromiter((_optional_float(r.my_p) for r in rows), dtype=np.float64, count=n),
         weight=np.fromiter((r.weight for r in rows), dtype=np.float64, count=n),
         ch_n=np.fromiter((r.ch_n for r in rows), dtype=np.float64, count=n),
+        fit_a=np.fromiter((r.weight for r in rows), dtype=np.float64, count=n),
         pcd=np.fromiter((r.pcd for r in rows), dtype=np.int32, count=n),
         sa=np.fromiter((_optional_float(r.sa) for r in rows), dtype=np.float64, count=n),
         sb=np.fromiter((_optional_float(r.sb) for r in rows), dtype=np.float64, count=n),
@@ -622,6 +682,8 @@ def segment_align_auto_episodes(
     min_on_spot_weight_na: float,
     spot_xy_jump_mm: float,
     min_episode_rows: int,
+    dead_ratio: float = AUTO_EDGE_DEAD_RATIO_DEFAULT,
+    tiny_merge_rows: int = AUTO_EDGE_TINY_MERGE_ROWS,
 ) -> tuple[list[EpisodeSpan], AutoEpisodeDiagnostics]:
     return segment_align_auto_columns(
         _rows_to_columns(rows),
@@ -630,6 +692,8 @@ def segment_align_auto_episodes(
         min_on_spot_weight_na=min_on_spot_weight_na,
         spot_xy_jump_mm=spot_xy_jump_mm,
         min_episode_rows=min_episode_rows,
+        dead_ratio=dead_ratio,
+        tiny_merge_rows=tiny_merge_rows,
     )
 
 

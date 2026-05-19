@@ -46,6 +46,7 @@ def test_merge_fin_bufs_matches_batch_aggregate_for_spans() -> None:
         my_p=np.zeros(4, dtype=np.float64),
         weight=np.ones(4, dtype=np.float64),
         ch_n=np.ones(4, dtype=np.float64),
+        fit_a=np.ones(4, dtype=np.float64),
         pcd=np.zeros(4, dtype=np.int32),
         sa=np.array([1.0, float("nan"), 3.0, float("nan")], dtype=np.float64),
         sb=np.array([float("nan"), 2.0, float("nan"), 4.0], dtype=np.float64),

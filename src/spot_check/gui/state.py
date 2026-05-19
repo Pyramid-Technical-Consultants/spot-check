@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-
-from PySide6.QtWidgets import QMainWindow
+from typing import TYPE_CHECKING
 
 from spot_check.constants import project_root
+
+if TYPE_CHECKING:
+    from PySide6.QtWidgets import QMainWindow
 from spot_check.gui.defaults import DEFAULT_GUI_STATE
 
 logger = logging.getLogger(__name__)

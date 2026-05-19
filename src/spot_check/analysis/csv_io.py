@@ -2,11 +2,25 @@
 
 from __future__ import annotations
 
+import csv
 import gzip
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TextIO
+
+from spot_check.constants import GATE_COUNTER_KEY
+
+
+def acquisition_csv_has_gate_counter(csv_path: Path) -> bool:
+    """True when the acquisition CSV includes a Gate Counter column."""
+    with open_acquisition_csv(csv_path) as f:
+        reader = csv.reader(f)
+        try:
+            header = next(reader)
+        except StopIteration:
+            return False
+    return GATE_COUNTER_KEY in [h.strip() for h in header]
 
 
 def acquisition_csv_stem(csv_path: Path) -> str:

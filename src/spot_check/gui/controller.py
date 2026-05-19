@@ -58,6 +58,7 @@ from spot_check.gui.pipeline import (
     GuiRefreshContext,
     PipelineLoadOK,
     file_mtime,
+    is_acquisition_csv_file,
     pipeline_load_job,
 )
 from spot_check.gui.state import (
@@ -116,7 +117,10 @@ class SpotCheckController:
         vtk_host.setStyleSheet("background-color: #0d1117;")
         vtk_layout = QVBoxLayout(vtk_host)
         vtk_layout.setContentsMargins(0, 0, 0, 0)
-        vtk_placeholder = QLabel("3D view — pick .dcm + .csv; updates when inputs validate.")
+        vtk_placeholder = QLabel(
+            "3D view — pick a plan (.dcm or Pyramid .csv) and/or acquisition .csv; "
+            "updates when inputs validate."
+        )
         vtk_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         vtk_placeholder.setWordWrap(True)
         vtk_placeholder.setStyleSheet("color: #8b949e; font-size: 11pt; padding: 24px;")
@@ -406,9 +410,12 @@ class SpotCheckController:
             init = str(Path(e_dcm.text().strip()).parent) if e_dcm.text().strip() else str(FOLDER)
             p, _ = QFileDialog.getOpenFileName(
                 win,
-                "Plan (.dcm)",
+                "Plan (DICOM or Pyramid CSV)",
                 init if Path(init).is_dir() else str(FOLDER),
-                "DICOM (*.dcm);;All files (*.*)",
+                (
+                    "Plan files (*.dcm *.csv);;DICOM (*.dcm);;"
+                    "Pyramid plan CSV (*.csv);;All files (*.*)"
+                ),
             )
             if p:
                 e_dcm.setText(p)
@@ -469,6 +476,24 @@ class SpotCheckController:
                     f"({sc_const.GATE_COUNTER_KEY})."
                 )
 
+        def _path_clear_button(edit: QLineEdit) -> QPushButton:
+            btn = QPushButton("×")
+            btn.setFixedWidth(28)
+            btn.setToolTip("Clear file path")
+            btn.setEnabled(bool(edit.text().strip()))
+
+            def _sync_clear_enabled(_text: str = "") -> None:
+                btn.setEnabled(bool(edit.text().strip()))
+
+            edit.textChanged.connect(_sync_clear_enabled)
+
+            def _clear_path() -> None:
+                edit.clear()
+                _do_refresh()
+
+            btn.clicked.connect(_clear_path)
+            return btn
+
         # --- drawer sections ---
         gb_files = QGroupBox("Files")
         fl = QFormLayout(gb_files)
@@ -479,6 +504,7 @@ class SpotCheckController:
         b_dcm = QPushButton("Browse…")
         b_dcm.clicked.connect(browse_dcm)
         h_dcm.addWidget(b_dcm)
+        h_dcm.addWidget(_path_clear_button(e_dcm))
         row_csv = QWidget()
         h_csv = QHBoxLayout(row_csv)
         h_csv.setContentsMargins(0, 0, 0, 0)
@@ -486,7 +512,8 @@ class SpotCheckController:
         b_csv = QPushButton("Browse…")
         b_csv.clicked.connect(browse_csv)
         h_csv.addWidget(b_csv)
-        fl.addRow("Plan (.dcm)", row_dcm)
+        h_csv.addWidget(_path_clear_button(e_csv))
+        fl.addRow("Plan", row_dcm)
         fl.addRow("CSV", row_csv)
         btn_export_csv = QPushButton("Export combined CSV…")
         btn_export_csv.setToolTip(
@@ -574,7 +601,7 @@ class SpotCheckController:
                 )
                 return
             if not planned or not measured:
-                lbl_qa_counts.setText("Counts: — (load plan and CSV)")
+                lbl_qa_counts.setText("Counts: — (need plan and CSV)")
                 return
             try:
                 n_pass, n_warn, n_fail = analysis.plan_qa_measured_spot_pass_warn_fail(
@@ -833,17 +860,16 @@ class SpotCheckController:
             nonlocal pending_ctx
             p = analysis
             pipeline_key = ctx.pipeline_key
-            planned = _plot_cache.get("planned")
+            planned_raw = _plot_cache.get("planned")
             plan_fwhm_xy = _plot_cache.get("plan_fwhm_xy")
             n_plan_kept = int(_plot_cache.get("n_plan_kept", 0))
             n_plan_raw = int(_plot_cache.get("n_plan_raw", 0))
-            measured_unaligned = _plot_cache.get("measured_unaligned")
+            measured_raw = _plot_cache.get("measured_unaligned")
             label = str(_plot_cache.get("label", ""))
             csv_display_name = str(_plot_cache.get("csv_display_name", ""))
-            if planned is None or measured_unaligned is None:
+            if planned_raw is None and measured_raw is None:
                 logger.error(
-                    "Plot cache inconsistency: pipeline_key matched but "
-                    "planned or measured_unaligned is None"
+                    "Plot cache inconsistency: pipeline_key matched but no data cached"
                 )
                 _plot_cache["pipeline_key"] = None
                 _plot_cache["plotter"] = None
@@ -855,11 +881,24 @@ class SpotCheckController:
                 status_lbl.setText("State error — change option or re-select files.")
                 return
 
+            planned = list(planned_raw) if planned_raw is not None else []
+            measured_unaligned = list(measured_raw) if measured_raw is not None else []
+            if not planned and not measured_unaligned:
+                _plot_cache["pipeline_key"] = None
+                _plot_cache["plotter"] = None
+                analysis.idle_slice_band_controls_qt(slice_qt_bindings)
+                _vtk_placeholder_message(
+                    "Select a plan (.dcm or Pyramid .csv) and/or acquisition .csv.",
+                    error=False,
+                )
+                status_lbl.setText("Ready — pick plan and/or CSV.")
+                return
+
             measured = list(measured_unaligned)
             detector_align_caption: str | None = None
             align_note = ""
             align_cache_key = (pipeline_key, bool(cb_align.isChecked()))
-            if cb_align.isChecked():
+            if cb_align.isChecked() and planned and measured:
                 cached_aligned = _plot_cache.get("measured_aligned")
                 cached_align_key = _plot_cache.get("align_cache_key")
                 if cached_aligned is not None and cached_align_key == align_cache_key:
@@ -910,10 +949,18 @@ class SpotCheckController:
                 and _plot_cache.get("aligned") == cb_align.isChecked()
                 and _plot_cache.get("z_water_depth") == cb_z_water.isChecked()
             )
+            if label and csv_display_name:
+                view_title = f"{label} — plan vs {csv_display_name}"
+            elif label:
+                view_title = f"{label} — plan"
+            elif csv_display_name:
+                view_title = csv_display_name
+            else:
+                view_title = "SpotCheck"
             pl = p.show_comparison_3d_pyvista(
                 planned,
                 measured,
-                title=f"{label} — plan vs {csv_display_name}",
+                title=view_title,
                 a_is_x=False,
                 layer_mode=ctx.layer_mode,
                 layer_gap_s=auto_gap,
@@ -969,12 +1016,18 @@ class SpotCheckController:
                 if need_data
                 else " (reused plan/CSV; camera kept when only display options changed)."
             )
-            plan_line = f"Plan spots: {n_plan_kept} after meterset filter (weight>0"
-            if n_plan_raw != n_plan_kept:
-                plan_line += f"; {n_plan_raw} raw slots in CP maps before that filter"
-            plan_line += ")"
-            meas_line = f"Measured points: {n_meas} built and plotted"
-            if ctx.layer_mode == "auto":
+            if planned:
+                plan_line = f"Plan spots: {n_plan_kept} after meterset filter (weight>0"
+                if n_plan_raw != n_plan_kept:
+                    plan_line += f"; {n_plan_raw} raw slots in CP maps before that filter"
+                plan_line += ")"
+            else:
+                plan_line = "Plan: (none)"
+            if measured:
+                meas_line = f"Measured points: {n_meas} built and plotted"
+            else:
+                meas_line = "Measured: (none)"
+            if measured and ctx.layer_mode == "auto":
                 auto_p = analysis.last_auto_layer_params()
                 if auto_p is not None:
                     meas_line += (
@@ -996,7 +1049,7 @@ class SpotCheckController:
                     )
                     if not diag_auto.count_align_ok:
                         meas_line += " (spot-count align incomplete)"
-            if ctx.aggregate_spots and ctx.layer_mode != "auto":
+            if measured and ctx.aggregate_spots and ctx.layer_mode != "auto":
                 _cap = p.measured_spot_weight_caption(ctx.spot_weight_mode_run)
                 meas_line += f" (one {_cap}-weighted mean per odd gate spot)"
                 if ctx.agg_even_n > 0 and ctx.layer_mode == "gate_counter":
@@ -1024,7 +1077,8 @@ class SpotCheckController:
                     meas_line += "; error lines for warn+fail"
             if cb_meas_sigma.isChecked():
                 meas_line += ". Measured: σ-sized ellipsoids in world XY (mm; see 3D caption)"
-            status_lbl.setText(f"Updated. {plan_line}. {meas_line}.{align_note}{cache_note}")
+            parts = [plan_line, meas_line]
+            status_lbl.setText(f"Updated. {'. '.join(parts)}.{align_note}{cache_note}")
             _update_plan_qa_counts_label(
                 planned,
                 measured,
@@ -1049,12 +1103,14 @@ class SpotCheckController:
                 return
             ld = res
             _plot_cache["pipeline_key"] = ld.pipeline_key
-            _plot_cache["planned"] = ld.planned
+            _plot_cache["planned"] = ld.planned if ld.planned else []
             _plot_cache["plan_fwhm_xy"] = ld.plan_fwhm_xy
             _plot_cache["plan_mu"] = ld.plan_mu
             _plot_cache["n_plan_kept"] = ld.n_plan_kept
             _plot_cache["n_plan_raw"] = ld.n_plan_raw
-            _plot_cache["measured_unaligned"] = ld.measured_unaligned
+            _plot_cache["measured_unaligned"] = (
+                ld.measured_unaligned if ld.measured_unaligned else []
+            )
             _plot_cache["measured_aligned"] = ld.measured_aligned
             _plot_cache["align_info"] = ld.align_info
             _plot_cache["align_cache_key"] = (
@@ -1106,7 +1162,7 @@ class SpotCheckController:
             dcm_s = e_dcm.text().strip()
             csv_s = e_csv.text().strip()
             if not dcm_s or not csv_s:
-                status_lbl.setText("Export: set plan (.dcm) and CSV paths first.")
+                status_lbl.setText("Export: set plan and acquisition CSV paths first.")
                 return
             dcm = Path(dcm_s)
             csv_path = Path(csv_s)
@@ -1139,7 +1195,7 @@ class SpotCheckController:
                 planned = _plot_cache.get("planned")
                 plan_mu = _plot_cache.get("plan_mu")
                 if planned is None or plan_mu is None:
-                    planned, _, plan_mu, _, _ = analysis.planned_spot_xyz_and_counts_from_dicom(dcm)
+                    planned, _, plan_mu, _, _ = analysis.planned_spot_xyz_and_counts_from_plan(dcm)
                 label = str(_plot_cache.get("label") or "")
                 measured = analysis.measured_spot_abc_from_csv(
                     csv_path,
@@ -1207,23 +1263,26 @@ class SpotCheckController:
             nonlocal pending_ctx, load_generation
             persist()
             p = analysis
-            dcm = Path(e_dcm.text().strip())
-            csv_path = Path(e_csv.text().strip())
-            if not dcm.is_file():
+            plan_text = e_dcm.text().strip()
+            csv_text = e_csv.text().strip()
+            plan_path = Path(plan_text) if plan_text else None
+            csv_path = Path(csv_text) if csv_text else None
+            has_plan = plan_path is not None and analysis.is_supported_plan_file(plan_path)
+            has_csv = csv_path is not None and is_acquisition_csv_file(csv_path)
+
+            if not has_plan and not has_csv:
                 _bump_load_generation_invalidate_async()
                 _plot_cache["plotter"] = None
                 _plot_cache["pipeline_key"] = None
+                _plot_cache["planned"] = None
+                _plot_cache["measured_unaligned"] = None
+                _plot_cache["measured_aligned"] = None
                 analysis.idle_slice_band_controls_qt(slice_qt_bindings)
-                _vtk_placeholder_message("Select a valid plan (.dcm).", error=True)
-                status_lbl.setText("Need valid .dcm.")
-                return
-            if not csv_path.is_file():
-                _bump_load_generation_invalidate_async()
-                _plot_cache["plotter"] = None
-                _plot_cache["pipeline_key"] = None
-                analysis.idle_slice_band_controls_qt(slice_qt_bindings)
-                _vtk_placeholder_message("Select a valid CSV.", error=True)
-                status_lbl.setText("Need valid CSV.")
+                _vtk_placeholder_message(
+                    "Select a plan (.dcm or Pyramid .csv) and/or acquisition .csv.",
+                    error=False,
+                )
+                status_lbl.setText("Ready — pick plan and/or CSV.")
                 return
             xy_tick_use = parse_bounds_xy_tick_mm(e_bxy.text())
             if xy_tick_use is None:
@@ -1285,18 +1344,18 @@ class SpotCheckController:
                 spot_weight_mode_run = p.normalize_measured_spot_weight_mode(sw_internal_run)
 
                 pipeline_key = (
-                    str(dcm.resolve()),
-                    file_mtime(dcm),
-                    str(csv_path.resolve()),
-                    file_mtime(csv_path),
+                    str(plan_path.resolve()) if has_plan and plan_path else "",
+                    file_mtime(plan_path) if has_plan and plan_path else -1.0,
+                    str(csv_path.resolve()) if has_csv and csv_path else "",
+                    file_mtime(csv_path) if has_csv and csv_path else -1.0,
                     layer_mode,
                     bool(cb_agg.isChecked()),
                     int(agg_even_n),
                     spot_weight_mode_run,
                 )
                 ctx = GuiRefreshContext(
-                    dcm=dcm,
-                    csv_path=csv_path,
+                    plan_path=plan_path if has_plan else None,
+                    csv_path=csv_path if has_csv else None,
                     xy_tick_use=float(xy_tick_use),
                     qa_mode=qa_mode_run,
                     qa_pass_f=qa_pass_f,
@@ -1316,16 +1375,20 @@ class SpotCheckController:
                     load_generation += 1
                     gen = load_generation
                     pending_ctx = ctx
-                    csv_name = csv_path.name
-                    load_note = f"Loading plan/CSV — {dcm.name}, {csv_name}…"
-                    if cb_align.isChecked():
-                        load_note = f"Loading + aligning — {dcm.name}, {csv_name}…"
+                    load_parts: list[str] = []
+                    if has_plan and plan_path is not None:
+                        load_parts.append(plan_path.name)
+                    if has_csv and csv_path is not None:
+                        load_parts.append(csv_path.name)
+                    load_note = f"Loading {' + '.join(load_parts)}…"
+                    if cb_align.isChecked() and has_plan and has_csv:
+                        load_note = f"Loading + aligning {' + '.join(load_parts)}…"
                     status_lbl.setText(load_note)
                     _show_loading(gen, load_note)
 
                     def _job() -> PipelineLoadOK:
                         return pipeline_load_job(
-                            ctx.dcm,
+                            ctx.plan_path,
                             ctx.csv_path,
                             layer_mode=ctx.layer_mode,
                             aggregate_spots=ctx.aggregate_spots,
@@ -1339,10 +1402,9 @@ class SpotCheckController:
 
                 planned = _plot_cache["planned"]
                 measured_unaligned = _plot_cache["measured_unaligned"]
-                if planned is None or measured_unaligned is None:
+                if planned is None and measured_unaligned is None:
                     logger.error(
-                        "Plot cache inconsistency: pipeline_key matched but "
-                        "planned or measured_unaligned is None"
+                        "Plot cache inconsistency: pipeline_key matched but no data cached"
                     )
                     _plot_cache["pipeline_key"] = None
                     _plot_cache["plotter"] = None

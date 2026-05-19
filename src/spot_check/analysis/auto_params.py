@@ -11,6 +11,8 @@ from spot_check.analysis.auto_columns import AutoFitColumns
 from spot_check.analysis.episodes import segment_into_episodes_cols
 from spot_check.analysis.spatial import _plan_xy_by_energy_layer, nominal_layer_energies_mev
 from spot_check.constants import (
+    AUTO_EDGE_DEAD_RATIO_DEFAULT,
+    AUTO_EDGE_TINY_MERGE_ROWS,
     AUTO_MIN_EPISODE_ROWS_DEFAULT,
     AUTO_MIN_ON_SPOT_WEIGHT_NA_DEFAULT,
     AUTO_SPOT_XY_JUMP_MM_DEFAULT,
@@ -30,6 +32,8 @@ class AutoLayerParams:
     min_on_spot_weight_na: float
     min_episode_rows: int
     viterbi_advance_penalty_mm2: float
+    dead_ratio: float
+    tiny_merge_rows: int
 
 
 def last_auto_layer_params() -> AutoLayerParams | None:
@@ -39,19 +43,6 @@ def last_auto_layer_params() -> AutoLayerParams | None:
 def _set_last_params(p: AutoLayerParams | None) -> None:
     global _last_params
     _last_params = p
-
-
-def _median_consecutive_plan_step_mm(
-    planned_xyz: Sequence[tuple[float, float, float]],
-) -> float:
-    if len(planned_xyz) < 2:
-        return float(AUTO_SPOT_XY_JUMP_MM_DEFAULT)
-    xy = np.asarray([(float(p[0]), float(p[1])) for p in planned_xyz], dtype=np.float64)
-    d = np.sqrt(np.sum(np.diff(xy, axis=0) ** 2, axis=1))
-    d = d[np.isfinite(d) & (d > 1e-6)]
-    if d.size == 0:
-        return float(AUTO_SPOT_XY_JUMP_MM_DEFAULT)
-    return float(np.median(d))
 
 
 def _infer_episode_gap_s(t: np.ndarray, n_plan: int) -> float:
@@ -83,61 +74,48 @@ def _infer_episode_gap_s(t: np.ndarray, n_plan: int) -> float:
     return float(np.clip(gap, 0.005, 5.0))
 
 
-def _calibrate_xy_jump_mm(
+def _calibrate_dead_ratio(
     cols: AutoFitColumns,
     n_plan: int,
     *,
-    episode_gap_s: float,
-    min_on_spot_weight_na: float,
     min_episode_rows: int,
+    tiny_merge_rows: int,
 ) -> float:
-    """Pick XY step threshold so signal episodes approximate the plan spot count."""
+    """Pick deadtime ratio so episode count approximates the plan spot count."""
     if n_plan <= 0 or len(cols) < 2:
-        return float(AUTO_SPOT_XY_JUMP_MM_DEFAULT)
-    lo, hi = 1.0, 120.0
-    best_xy = float(AUTO_SPOT_XY_JUMP_MM_DEFAULT)
+        return float(AUTO_EDGE_DEAD_RATIO_DEFAULT)
+    best_ratio = float(AUTO_EDGE_DEAD_RATIO_DEFAULT)
     best_err = float("inf")
-    for _ in range(22):
-        mid = (lo + hi) * 0.5
+    grid = np.linspace(0.52, 0.64, 49)
+    counts: list[int] = []
+    for ratio in grid:
         n_ep = len(
             segment_into_episodes_cols(
                 cols,
-                episode_gap_s=episode_gap_s,
-                min_on_spot_weight_na=min_on_spot_weight_na,
-                spot_xy_jump_mm=mid,
+                episode_gap_s=1.0,
+                min_on_spot_weight_na=0.0,
+                spot_xy_jump_mm=999.0,
                 min_episode_rows=min_episode_rows,
+                dead_ratio=float(ratio),
+                tiny_merge_rows=tiny_merge_rows,
             )
         )
+        counts.append(n_ep)
         err = abs(n_ep - n_plan)
         if err < best_err:
             best_err = err
-            best_xy = mid
-        if n_ep > n_plan:
-            lo = mid
-        else:
-            hi = mid
-    return float(np.clip(best_xy, 2.0, 80.0))
-
-
-def _infer_spot_xy_jump_mm(
-    cols: AutoFitColumns,
-    planned_xyz: Sequence[tuple[float, float, float]],
-    *,
-    episode_gap_s: float,
-    min_on_spot_weight_na: float,
-    min_episode_rows: int,
-) -> float:
-    n_plan = len(planned_xyz)
-    if n_plan > 0 and len(cols) >= 2:
-        return _calibrate_xy_jump_mm(
-            cols,
-            n_plan,
-            episode_gap_s=episode_gap_s,
-            min_on_spot_weight_na=min_on_spot_weight_na,
-            min_episode_rows=min_episode_rows,
-        )
-    step = _median_consecutive_plan_step_mm(planned_xyz)
-    return float(np.clip(step * 0.42, 0.8, 15.0))
+            best_ratio = float(ratio)
+    if best_err > 0:
+        counts_arr = np.asarray(counts, dtype=np.int64)
+        above = np.nonzero(counts_arr >= n_plan)[0]
+        below = np.nonzero(counts_arr <= n_plan)[0]
+        if above.size and below.size:
+            ia = int(above[0])
+            ib = int(below[-1])
+            if ia > ib and counts_arr[ia] != counts_arr[ib]:
+                t = (n_plan - counts_arr[ib]) / float(counts_arr[ia] - counts_arr[ib])
+                best_ratio = float(grid[ib] + t * (grid[ia] - grid[ib]))
+    return float(np.clip(best_ratio, 0.52, 0.64))
 
 
 def _infer_min_on_spot_weight_na(weight: np.ndarray) -> float:
@@ -188,21 +166,18 @@ def infer_auto_layer_params(
     """Derive auto-mode thresholds from acquisition timing, weights, and plan geometry."""
     n_plan = len(planned_xyz)
     min_rows = _infer_min_episode_rows(len(cols), n_plan)
-    min_w = _infer_min_on_spot_weight_na(cols.weight)
-    gap_s = _infer_episode_gap_s(cols.t, n_plan)
-    xy_jump = _infer_spot_xy_jump_mm(
-        cols,
-        planned_xyz,
-        episode_gap_s=gap_s,
-        min_on_spot_weight_na=min_w,
-        min_episode_rows=min_rows,
+    tiny_merge = int(AUTO_EDGE_TINY_MERGE_ROWS)
+    dead_ratio = _calibrate_dead_ratio(
+        cols, n_plan, min_episode_rows=min_rows, tiny_merge_rows=tiny_merge
     )
     params = AutoLayerParams(
-        episode_gap_s=gap_s,
-        spot_xy_jump_mm=xy_jump,
-        min_on_spot_weight_na=min_w,
+        episode_gap_s=_infer_episode_gap_s(cols.t, n_plan),
+        spot_xy_jump_mm=float(AUTO_SPOT_XY_JUMP_MM_DEFAULT),
+        min_on_spot_weight_na=_infer_min_on_spot_weight_na(cols.weight),
         min_episode_rows=min_rows,
         viterbi_advance_penalty_mm2=_infer_viterbi_penalty_mm2(planned_xyz),
+        dead_ratio=dead_ratio,
+        tiny_merge_rows=tiny_merge,
     )
     _set_last_params(params)
     return params

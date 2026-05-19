@@ -30,6 +30,13 @@ VITERBI_LAYER_ADVANCE_PENALTY_MM2_DEFAULT: Final[float] = 400.0
 AUTO_MIN_ON_SPOT_WEIGHT_NA_DEFAULT: Final[float] = 1e-9
 AUTO_SPOT_XY_JUMP_MM_DEFAULT: Final[float] = 3.0
 AUTO_MIN_EPISODE_ROWS_DEFAULT: Final[int] = 1
+# Delivery-edge segmentation: rows below rolling IX512 sum + fit-A baselines are deadtime.
+AUTO_EDGE_DEAD_RATIO_DEFAULT: Final[float] = 0.60
+AUTO_EDGE_TINY_MERGE_ROWS: Final[int] = 2
+AUTO_EDGE_ROLLING_WINDOW: Final[int] = 15
+AUTO_EDGE_ON_WEIGHT_FRAC: Final[float] = 0.45
+# When raw episode count equals the plan, skip merge/split alignment.
+AUTO_EDGE_COUNT_ALIGN_FRAC: Final[float] = 0.01
 # Episode merge scoring: centroid XY delta² (mm²) + coeff × (Δt s)² when aligning M→N_plan.
 AUTO_EPISODE_MERGE_DT_MM2_PER_S: Final[float] = 50.0
 
