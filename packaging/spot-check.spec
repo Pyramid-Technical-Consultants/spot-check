@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_submodules
+
 spec_dir = Path(SPECPATH)
 root = spec_dir.parent
 src = root / "src"
@@ -22,6 +24,11 @@ hooks_dir = spec_dir / "hooks"
 block_cipher = None
 
 hiddenimports: list[str] = [
+    "pyvista",
+    "pyvista.plotting",
+    "pyvista.core",
+    "pyvista.tracing",
+    "vtkmodules",
     "vtkmodules.qt.QVTKRenderWindowInteractor",
     "vtkmodules.util",
     "vtkmodules.util.numpy_support",
@@ -30,6 +37,9 @@ hiddenimports: list[str] = [
     "vtkmodules.vtkInteractionStyle",
     "vtkmodules.vtkRenderingFreeType",
     "pydicom",
+]
+hiddenimports += [
+    m for m in collect_submodules("pyvista") if not m.startswith("pyvista.trame")
 ]
 
 excludes: list[str] = [

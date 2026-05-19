@@ -66,7 +66,8 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: SpotCheck-${{ steps.ver.outputs.value }}-windows-x64-beta
-          path: dist/SpotCheck-${{ steps.ver.outputs.value }}-windows-x64.zip
+          # Upload the folder, not dist/*.zip — upload-artifact zips again (double zip).
+          path: dist/SpotCheck/
           if-no-files-found: error
           retention-days: 30
 

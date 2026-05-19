@@ -136,12 +136,12 @@ ruff check --fix src tests packaging
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
 | **CI** | Push / PR to `main` / `master` | Ruff, compile, pytest |
-| **CI → Windows exe (beta)** | Every **push** (not tags) | Beta `.zip` artifact after tests pass |
-| **Release Windows** | Tag `v*` or manual | Stable `.zip` + GitHub Release on tags |
+| **CI → Windows exe (beta)** | Every **push** (not tags) | Beta folder artifact (one zip from Actions) |
+| **Release Windows** | Tag `v*` or manual | Stable `.zip` on GitHub Release + folder artifact |
 
-**Beta builds:** On each push, CI uploads `SpotCheck-<version>-beta.<run>.<sha>-windows-x64-beta` under **Actions → workflow run → Artifacts** (kept 30 days). The in-app version string matches (e.g. `1.0.0-beta.42.a1b2c3d`) so you can tell builds apart.
+**Beta builds:** On each push, download **Actions → workflow run → Artifacts** → unzip once → run `SpotCheck/SpotCheck.exe` (keep the whole folder). CI uploads `dist/SpotCheck/`, not the release zip, so you are not double-zipped.
 
-**Stable releases:** Tag `v1.0.0` (must match `src/spot_check/_version.py`) → Release Windows workflow → GitHub Release + artifact.
+**Stable releases:** Tag `v1.0.0` (must match `src/spot_check/_version.py`) → GitHub Release attaches `SpotCheck-<version>-windows-x64.zip` (single zip for distribution).
 
 Manual stable build without a tag: Actions → *Release Windows* → *Run workflow*.
 

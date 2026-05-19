@@ -58,7 +58,8 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: SpotCheck-${{ steps.ver.outputs.value }}-windows-x64
-          path: dist/SpotCheck-${{ steps.ver.outputs.value }}-windows-x64.zip
+          # Folder only; upload-artifact compresses once (avoid zip-in-zip).
+          path: dist/SpotCheck/
           if-no-files-found: error
 
       - name: Create GitHub Release
