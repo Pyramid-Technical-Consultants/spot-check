@@ -78,10 +78,21 @@ if ! compgen -G "$INTERNAL/vtk.libs/"'vtkFiltersSources'*.dll > /dev/null; then
 fi
 
 echo "Frozen VTK smoke test (SPOT_CHECK_SMOKE=1)..."
-SPOT_CHECK_SMOKE=1 "$EXE" 2>&1 || {
-  echo "ERROR: Frozen executable failed VTK/PyVista smoke import." >&2
+SMOKE_RC=0
+if command -v timeout >/dev/null 2>&1; then
+  timeout 120 env SPOT_CHECK_SMOKE=1 "$EXE" 2>&1 || SMOKE_RC=$?
+else
+  env SPOT_CHECK_SMOKE=1 "$EXE" 2>&1 || SMOKE_RC=$?
+fi
+if [[ "$SMOKE_RC" -ne 0 ]]; then
+  echo "ERROR: Frozen executable failed VTK/PyVista smoke import (exit $SMOKE_RC)." >&2
   exit 1
-}
+fi
+MPL_RC="$INTERNAL/matplotlib/mpl-data/matplotlibrc"
+if [[ ! -f "$MPL_RC" ]]; then
+  echo "ERROR: matplotlibrc missing from bundle ($MPL_RC)." >&2
+  exit 1
+fi
 echo "Frozen VTK smoke test passed."
 
 ARCHIVE="$ROOT/dist/SpotCheck-${VERSION}-windows-x64.zip"

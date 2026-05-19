@@ -5,12 +5,17 @@ import sys
 
 # Post-build / CI smoke: SPOT_CHECK_SMOKE=1 SpotCheck.exe  -> import VTK and exit 0.
 if os.environ.get("SPOT_CHECK_SMOKE", "").strip() in ("1", "true", "yes"):
-    import pyvista as _pv
+    try:
+        import pyvista as _pv
 
-    _pl = _pv.Plotter(off_screen=True)
-    _pl.close()
-    print(f"SPOT_CHECK_SMOKE ok pyvista={_pv.__version__}", file=sys.stderr)
-    raise SystemExit(0)
+        _pl = _pv.Plotter(off_screen=True)
+        _pl.close()
+        print(f"SPOT_CHECK_SMOKE ok pyvista={_pv.__version__}", file=sys.stderr)
+    except Exception as exc:
+        print(f"SPOT_CHECK_SMOKE failed: {exc}", file=sys.stderr)
+        # console=False builds can hang CI on an uncaught-exception dialog; _exit skips that.
+        os._exit(1)
+    os._exit(0)
 
 # Runtime hook stubs vtkRenderingMatplotlib, then imports pyvista. Bind here too so
 # spot_check.analysis._core.pv is set even if that module imported before pyvista loaded.

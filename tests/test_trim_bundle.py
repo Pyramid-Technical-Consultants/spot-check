@@ -30,6 +30,22 @@ def test_trim_bundle_never_removes_vtk_libs(tmp_path: Path) -> None:
     assert removed == 0
 
 
+def test_trim_bundle_keeps_matplotlibrc(tmp_path: Path) -> None:
+    trim_bundle = _trim_module().trim_bundle
+    root = tmp_path / "SpotCheck" / "_internal"
+    mpl_data = root / "matplotlib" / "mpl-data"
+    mpl_data.mkdir(parents=True)
+    rc = mpl_data / "matplotlibrc"
+    rc.write_text("# test\n", encoding="utf-8")
+    sample = mpl_data / "sample_data"
+    sample.mkdir()
+    (sample / "logo2.png").write_bytes(b"x" * 50)
+    removed, _freed = trim_bundle(root.parent, aggressive=False)
+    assert rc.exists()
+    assert not sample.exists()
+    assert removed >= 1
+
+
 def test_trim_bundle_removes_qt_quick_dll(tmp_path: Path) -> None:
     trim_bundle = _trim_module().trim_bundle
     root = tmp_path / "SpotCheck"

@@ -161,8 +161,9 @@ _PIL_CODEC_FRAGMENTS = (
     "_webp",
 )
 
-# Matplotlib payload if it was collected anyway.
+# Matplotlib payload if it was collected anyway (keep matplotlibrc + minimal fonts).
 _MPL_DIR_NAMES = frozenset({"sample_data", "stylelib"})
+_MPL_KEEP_FILES = frozenset({"matplotlibrc", "fontlist-v390.json", "fontlist-v330.json"})
 
 _KEEP_MPL_FONT_PREFIXES = ("DejaVuSans", "DejaVuSansDisplay", "STIXGeneral")
 
@@ -201,6 +202,9 @@ def _should_remove(path: Path, *, bundle: Path, aggressive: bool) -> bool:
     if path.is_dir() and name in _MPL_DIR_NAMES and "matplotlib" in rel.parts:
         return True
 
+    if path.is_file() and "matplotlib/mpl-data" in rel_s:
+        if name in _MPL_KEEP_FILES:
+            return False
     if path.is_file() and "matplotlib/mpl-data/fonts" in rel_s:
         if not any(name.startswith(p) for p in _KEEP_MPL_FONT_PREFIXES):
             return True
