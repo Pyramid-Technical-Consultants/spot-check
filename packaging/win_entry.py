@@ -8,7 +8,7 @@ import spot_check.analysis._core as _analysis_core
 
 _analysis_core.pv = pyvista
 
-from spot_check.gui import main
+from spot_check.gui import main  # noqa: E402
 
 if __name__ == "__main__":
     main()
