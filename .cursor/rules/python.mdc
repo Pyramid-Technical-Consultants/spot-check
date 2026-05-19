@@ -1,0 +1,51 @@
+---
+description: Python standards for spot-check — style, layout, tests, and CI lint
+alwaysApply: true
+---
+
+# Python (spot-check)
+
+Apply these on **every** Python change. CI enforces them; do not defer cleanup to a follow-up.
+
+## Layout
+
+| Path | Purpose |
+|------|---------|
+| `src/spot_check/` | Application package (`py.typed`) |
+| `tests/` | Pytest (`pythonpath = ["src"]`) |
+| `packaging/` | PyInstaller hooks, trim scripts, frozen entry |
+
+Requires **Python 3.10+**. Match existing modules: naming, imports, typing level, and docstring density.
+
+## Style
+
+- **Line length: 100** — code, comments, and docstrings.
+- **Imports**: stdlib → third party → local; sorted; no unused imports.
+- **Formatting**: keep diffs small; prefer wrapping long lines over disabling rules.
+- **Comments**: only for non-obvious logic; code should read clearly without narration.
+
+```python
+# Prefer a shorter comment or a wrapped line over exceeding 100 columns.
+```
+
+## Quality bar
+
+- **Lint before done** — run `ruff check src tests packaging` (or IDE lints on every file you touched).
+- **Tests** — add or update tests in `tests/` when behavior changes; run `pytest -q`.
+- **Scope** — smallest correct change; no drive-by refactors or new abstractions for one-liners.
+- **Dependencies** — runtime deps stay in `[project.dependencies]`; build-only tools in `[project.optional-dependencies]`.
+
+## Patterns
+
+- Prefer explicit imports over star imports except in `src/spot_check/analysis/**` (shared `_imports` barrel; F405 ignored there only).
+- Use `from __future__ import annotations` where the codebase already does.
+- GUI / VTK / PyVista: follow `spot_check.analysis.pyvista_backend` and existing viz modules; do not duplicate backend setup.
+- Frozen Windows build: changes under `packaging/` may need a smoke check (`SPOT_CHECK_SMOKE=1`); see `scripts/build-windows.sh`.
+
+## Before you finish
+
+1. Edited only what the task needs; conventions match surrounding files.
+2. `ruff check src tests packaging` passes (or equivalent lint on changed files).
+3. Relevant tests pass if you changed behavior.
+
+Do not tell the user “CI will catch” lint or test failures — fix them in the same change.
