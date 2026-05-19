@@ -14,6 +14,12 @@ from spot_check.analysis import (
     pyvista_backend,
     spatial,
 )
+from spot_check.analysis import (
+    auto_params as auto_params_mod,
+)
+from spot_check.analysis import (
+    episodes as episodes_mod,
+)
 from spot_check.analysis.viz import data as viz_data
 from spot_check.analysis.viz import embed as viz_embed
 from spot_check.analysis.viz import glyphs as viz_glyphs
@@ -28,6 +34,8 @@ _SUBMODULES = (
     alignment,
     layers,
     measured,
+    auto_params_mod,
+    episodes_mod,
     viz_data,
     viz_glyphs,
     viz_embed,

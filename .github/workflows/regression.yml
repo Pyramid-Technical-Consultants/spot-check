@@ -1,0 +1,31 @@
+name: Regression
+
+on:
+  schedule:
+    - cron: "0 12 * * 1"
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  slow-and-clinic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: pip install -e ".[fast,dev]"
+
+      - name: Ruff
+        run: ruff check src tests packaging
+
+      - name: Slow performance tests
+        run: pytest -q -m slow
+
+      - name: Clinic T0G10 agreement (optional test_data)
+        run: pytest -q tests/test_auto_t0g10_agreement.py tests/test_gate_counter_layers.py -k t0g10

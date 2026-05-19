@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 import pydicom
 
+from spot_check.analysis.csv_io import acquisition_csv_stem
 from spot_check.constants import CSV_LABEL_RE, project_root
 from spot_check.exceptions import PlanDataError
 
@@ -45,7 +46,7 @@ def find_dicom_for_csv(
     csv_path: Path,
     folder: Path = DEFAULT_PLAN_SEARCH_DIR,
 ) -> Path:
-    label = rt_plan_label_from_csv_stem(csv_path.stem)
+    label = rt_plan_label_from_csv_stem(acquisition_csv_stem(csv_path))
     if not label:
         raise ValueError(f"Cannot infer RT plan label from CSV name: {csv_path.name}")
     for p in sorted(folder.glob("*.dcm")):

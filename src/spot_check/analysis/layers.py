@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import bisect
+from typing import Sequence
+
 from spot_check.analysis._imports import *  # noqa: F403
 from spot_check.analysis.spatial import _kdtree_query_k1, _min_xy_dist_to_nominal_energy
 
@@ -34,58 +37,85 @@ class _PlanImputeLookup:
             ord_y=np.argsort(arr[:, 1]),
         )
 
+    def impute_xy_arrays(
+        self, mx_p: np.ndarray, my_p: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Fill missing plan axes for many rows (partial rows only call 1D nearest-plan)."""
+        mx = np.asarray(mx_p, dtype=np.float64, order="C").copy()
+        my = np.asarray(my_p, dtype=np.float64, order="C").copy()
+        both = np.isfinite(mx) & np.isfinite(my)
+        mx[both] = mx_p[both]
+        my[both] = my_p[both]
+        px, py = self.pts[:, 0], self.pts[:, 1]
+        spx = px[self.ord_x]
+        spy = py[self.ord_y]
+        need_x = np.isfinite(mx) & ~np.isfinite(my)
+        for i in np.flatnonzero(need_x):
+            bx, by = _pick_axis_band(spx, self.ord_x, px, py, float(mx[i]))
+            mx[i] = bx
+            my[i] = by
+        need_y = ~np.isfinite(mx) & np.isfinite(my)
+        for i in np.flatnonzero(need_y):
+            bx, by = _pick_axis_band(spy, self.ord_y, px, py, float(my[i]))
+            mx[i] = bx
+            my[i] = by
+        neither = ~np.isfinite(mx) & ~np.isfinite(my)
+        if neither.any():
+            i0 = int(self.ord_x[0])
+            mx[neither] = px[i0]
+            my[neither] = py[i0]
+        return mx, my
+
+
+def _pick_axis_band(
+    spv: np.ndarray,
+    ordv: np.ndarray,
+    px: np.ndarray,
+    py: np.ndarray,
+    mcoord: float,
+) -> tuple[float, float]:
+    """1D nearest plan spot on ``spv`` with tie-band + smallest plan index."""
+    n = int(spv.shape[0])
+    if n == 0:
+        return float("nan"), float("nan")
+    idx = int(np.searchsorted(spv, mcoord, side="left"))
+    if idx <= 0:
+        lo_i = hi_i = 0
+    elif idx >= n:
+        lo_i = hi_i = n - 1
+    else:
+        lo_i, hi_i = idx - 1, idx
+    best_d = min(abs(float(spv[lo_i]) - mcoord), abs(float(spv[hi_i]) - mcoord))
+    lo, hi = min(lo_i, hi_i), max(lo_i, hi_i)
+    tol = max(1e-9, 1e-12 * max(1.0, abs(mcoord)))
+    while lo > 0 and abs(float(spv[lo - 1]) - mcoord) <= best_d + tol:
+        lo -= 1
+    while hi + 1 < n and abs(float(spv[hi + 1]) - mcoord) <= best_d + tol:
+        hi += 1
+    best_j = int(np.min(ordv[lo : hi + 1]))
+    return float(px[best_j]), float(py[best_j])
+
+
 def _impute_plan_axis_fast(
     lk: _PlanImputeLookup,
     mx: float | None,
     my: float | None,
 ) -> tuple[float, float]:
-    """Copy measured axis; fill the other from the closest plan spot on that axis (1D).
-
-    Matches the original linear scan: all spots achieving min |Δaxis| are considered;
-    tie-break is the smallest row index (plan / bucket order).
-    """
-    px, py = lk.pts[:, 0], lk.pts[:, 1]
-    ox, oy = lk.ord_x, lk.ord_y
+    """Copy measured axis; fill the other from the closest plan spot on that axis (1D)."""
     if mx is not None and my is not None:
         return float(mx), float(my)
+    px, py = lk.pts[:, 0], lk.pts[:, 1]
     if mx is None and my is None:
-        i0 = int(ox[0])
+        i0 = int(lk.ord_x[0])
         return float(px[i0]), float(py[i0])
-    tol_coord = 1e-9
-
-    def _pick_after_expanding(
-        spv: np.ndarray, ordv: np.ndarray, mcoord: float
-    ) -> tuple[float, float]:
-        """spv = sorted coordinate; ordv maps sorted pos -> row index."""
-        n = int(spv.shape[0])
-        if n == 0:
-            return float("nan"), float("nan")
-        idx = int(np.searchsorted(spv, mcoord, side="left"))
-        pos_cand: list[int] = []
-        if idx > 0:
-            pos_cand.append(idx - 1)
-        if idx < n:
-            pos_cand.append(idx)
-        best_d = min(abs(float(spv[i]) - mcoord) for i in pos_cand)
-        tol = max(tol_coord, 1e-12 * max(1.0, abs(mcoord)))
-        lo = min(pos_cand)
-        hi = max(pos_cand)
-        while lo > 0 and abs(float(spv[lo - 1]) - mcoord) <= best_d + tol:
-            lo -= 1
-        while hi + 1 < n and abs(float(spv[hi + 1]) - mcoord) <= best_d + tol:
-            hi += 1
-        cand_rows = ordv[lo : hi + 1].astype(np.int64, copy=False)
-        best_j = int(np.min(cand_rows))
-        return float(px[best_j]), float(py[best_j])
-
     if mx is not None:
-        spx = px[ox]
-        bx, by = _pick_after_expanding(spx, ox, float(mx))
+        spx = px[lk.ord_x]
+        bx, by = _pick_axis_band(spx, lk.ord_x, px, py, float(mx))
         if math.isnan(bx):
             return float(mx), 0.0
         return bx, by
-    spv_y = py[oy]
-    bx, by = _pick_after_expanding(spv_y, oy, float(my))  # type: ignore[arg-type]
+    spy = py[lk.ord_y]
+    bx, by = _pick_axis_band(spy, lk.ord_y, px, py, float(my))  # type: ignore[arg-type]
     if math.isnan(bx):
         return 0.0, float(my)  # type: ignore[arg-type]
     return bx, by
@@ -149,6 +179,20 @@ def _layer_advance_plausible_vs_refill(
         d_next > REFILL_REJECT_RATIO * ratio_base
     )
     return not worse
+
+def delivery_layer_indices(n_spots: int, spots_per_layer: Sequence[int]) -> np.ndarray:
+    """Nominal layer index per delivered spot in DICOM/plan order (matches gate_counter)."""
+    if n_spots <= 0:
+        return np.zeros(0, dtype=np.int64)
+    cumul: list[int] = [0]
+    for c in spots_per_layer:
+        cumul.append(cumul[-1] + int(c))
+    hi = max(0, len(spots_per_layer) - 1)
+    out = np.empty(n_spots, dtype=np.int64)
+    for i in range(n_spots):
+        out[i] = max(0, min(bisect.bisect_right(cumul, i) - 1, hi))
+    return out
+
 
 def energies_for_measured_time_layers(
     layer_energies: list[float],
@@ -217,29 +261,3 @@ def viterbi_monotone_layer_assign(
         k = int(back[i, k])
         layers[i - 1] = k
     return layers
-
-def build_unified_advance_penalty_mm2(
-    times_s: np.ndarray,
-    meas_xy: np.ndarray,
-    *,
-    base_penalty_mm2: float,
-    layer_gap_s: float,
-    refill_same_spot_xy_tol_mm: float,
-    short_dt_extra_mm2: float = UNIFIED_SHORT_DT_EXTRA_MM2,
-    same_spot_refill_block_mm2: float = UNIFIED_SAME_SPOT_REFILL_BLOCK_MM2,
-) -> np.ndarray:
-    """
-    Per-row Viterbi advance penalty: ``base`` + time/refill modifiers on steps ``i>=1``.
-    Row index ``i`` uses ``Δt`` and ``ΔXY`` from valid row ``i-1`` to ``i``.
-    """
-    n = meas_xy.shape[0]
-    pen = np.full(n, float(base_penalty_mm2), dtype=np.float64)
-    if n <= 1:
-        return pen
-    dt = np.diff(times_s.astype(np.float64))
-    dxy = np.linalg.norm(np.diff(meas_xy.astype(np.float64), axis=0), axis=1)
-    long_gap = dt >= float(layer_gap_s)
-    same_small = dxy <= float(refill_same_spot_xy_tol_mm)
-    pen[1:] += np.where(~long_gap, float(short_dt_extra_mm2), 0.0)
-    pen[1:] += np.where(long_gap & same_small, float(same_spot_refill_block_mm2), 0.0)
-    return pen

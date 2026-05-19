@@ -1,25 +1,40 @@
 # SpotCheck
 
-Engineering QA tooling to compare **RT Ion therapy plans** (DICOM) against **tabular acquisition exports** (CSV), with interactive 3D visualization.
+Compare **RT Ion therapy plans** (DICOM) with **machine acquisition exports** (CSV) in an interactive 3D viewer. SpotCheck loads planned spot positions and nominal energies, aligns measured fit positions to the plan, and highlights pass/warn/fail against plan QA thresholds.
 
 **Not a medical device.** Validate any clinical workflow independently before use.
 
+## What it does
+
+- **Plan** — Read spot (x, y, nominal energy) from Ion Control Point sequences; optional scanning spot FWHM for ellipsoid plan markers.
+- **Acquisition** — Parse tabular exports (`.csv` or `.csv.gz`): fit positions, amplitudes, IX512 channel sum, optional Gate Counter and σ columns.
+- **Layer assignment** — Group rows into delivered spots and assign a nominal energy layer index (see [Layer modes](#layer-modes)).
+- **3D view** — PyVista plan vs measured clouds; proton water-depth Z axis; optional layer slice band, plan QA coloring, and error lines to nearest plan spots.
+- **Detector alignment** — Optional 2D rigid fit of measured XY to plan (multi-start ICP; GUI on by default).
+
+The PySide6 GUI persists paths and settings in `.spot_check_gui_state.json` (project root in dev; next to the executable when frozen).
+
+## Layer modes
+
+| Mode | Used in GUI | Summary |
+|------|-------------|---------|
+| **gate_counter** | Yes (default) | Odd **Gate Counter** phases = one spot; even = deadtime. Nominal layer follows DICOM delivery order. Requires Gate Counter on the CSV when aggregating spots. |
+| **auto** | Yes | **Signal** episodes from timing, on-spot weight, and XY step; merge/split to match plan spot count. Does **not** read Gate Counter. Layers use plan delivery order when alignment succeeds, otherwise monotone **Viterbi** on episode centroids. Thresholds inferred from CSV + plan (`infer_auto_layer_params`). |
+| **time_gap** | API only | Layer steps from inter-row Δt and refill heuristics. |
+| **plan_viterbi** | API only | Per-row monotone Viterbi decode to nearest plan layer (no episode segmentation). |
+
+**Auto vs gate_counter:** Auto is for exports **without** a reliable Gate Counter. Clinic-scale fixtures under `test_data/` (e.g. T0G10) are used in tests to check that auto agrees with gate_counter when both apply; production auto mode does not consume that column.
+
+Python details: `spot_check.analysis` package docstring and `measured_spot_abc_from_csv()`.
+
 ## Install (development)
 
-On **Windows** (especially the Microsoft Store `python`), do **not** run bare `pip install -e .` — it installs into a user folder whose path is too long for PySide6 and fails with `OSError: [Errno 2] No such file or directory` under `...\PySide6\qml\...`.
-
-Use the project virtualenv instead:
-
-**Command Prompt (no PowerShell script policy issues):**
+Requires **Python 3.10+**. On Windows, use the project venv (avoids PySide6 path-length issues with Store Python):
 
 ```bat
 scripts\setup.bat
 run-spot-check.bat
 ```
-
-Or after setup, double-click `run-spot-check.bat` in the project root.
-
-**PowerShell:**
 
 ```powershell
 .\scripts\setup.ps1
@@ -27,138 +42,86 @@ Or after setup, double-click `run-spot-check.bat` in the project root.
 spot-check
 ```
 
-If `setup.ps1` is blocked (*running scripts is disabled*), either use `scripts\setup.bat` above or run once:
-
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\scripts\setup.ps1
-```
-
-That only relaxes policy for the current PowerShell window.
-
-**Git Bash / macOS / Linux:**
-
 ```bash
 ./scripts/setup.sh
 source .venv/bin/activate
 spot-check
 ```
 
-Manual equivalent:
+Manual: `python -m venv .venv`, activate, then `pip install -e ".[fast,dev]"`.
 
-```bash
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-# Unix:    source .venv/bin/activate
-pip install -e ".[fast,dev]"
-```
+- **`fast`** — SciPy (faster plan QA and Viterbi on large spot lists).
+- **`dev`** — pytest, ruff, pre-commit, mypy.
 
-`fast` adds SciPy for accelerated plan QA and Viterbi layer assignment on large acquisitions.
-
-If you must install outside a venv, enable [Windows long paths](https://pip.pypa.io/warnings/enable-long-paths) and prefer [python.org](https://www.python.org/downloads/) over the Store build.
-
-## Run the GUI
+## Run
 
 ```bash
 spot-check
-```
-
-Or:
-
-```bash
+# or
 python -m spot_check.gui
 ```
 
-Window layout and control values persist in `.spot_check_gui_state.json` next to the executable (frozen build) or the project root (development).
+Logging: set `SPOT_CHECK_LOG` to `DEBUG`, `INFO`, `WARNING`, or `ERROR`.
 
-Set `SPOT_CHECK_LOG` to `DEBUG`, `INFO`, `WARNING`, or `ERROR` for stderr logging.
+## Development
+
+```bash
+ruff check src tests packaging
+pytest -q
+pytest -q -m slow          # large episode / CSV regressions
+```
+
+Optional clinic checks (need `test_data/` plan + CSV):  
+`pytest -q tests/test_auto_t0g10_agreement.py`
+
+Pre-commit (after setup): same Ruff rules on staged `src/`, `tests/`, `packaging/`.
 
 ## Versioning
 
-The release version lives in a single file:
-
-- `src/spot_check/_version.py` → `__version__`
-
-`pyproject.toml` reads that value automatically. The GUI window title shows the current version.
-
-Bump the version:
+Version: `src/spot_check/_version.py` (`__version__`). Bump:
 
 ```bash
 ./scripts/bump-version.sh patch   # or minor | major | 1.2.3
-git add src/spot_check/_version.py
-git commit -m "chore: release v1.0.1"
-git tag v1.0.1
-git push && git push --tags
 ```
 
-The git tag `vX.Y.Z` must match `__version__` in `_version.py`. Pushing a tag triggers the Windows release workflow.
+Tag `vX.Y.Z` must match `__version__` for the Windows release workflow.
 
-## Build Windows executable (local)
+## Windows executable
 
-Requires **Git Bash** (or WSL) on Windows:
+Git Bash on Windows:
 
 ```bash
 ./scripts/build-windows.sh
 ```
 
-Output:
+- `dist/SpotCheck/SpotCheck.exe` — run with the full folder
+- `dist/SpotCheck-<version>-windows-x64.zip` — distribution zip
 
-- `dist/SpotCheck/SpotCheck.exe` — run this (keep the whole folder together)
-- `dist/SpotCheck-<version>-windows-x64.zip` — zip for distribution
+Frozen builds omit SciPy/matplotlib; `packaging/trim_windows_bundle.py` trims Qt/VTK bulk. Set `SPOT_CHECK_TRIM_AGGRESSIVE=0` before build if 3D fails on software OpenGL.
 
-The frozen build omits **SciPy** and **matplotlib** (a runtime hook stubs PyVista’s optional
-VTK matplotlib text backend; axis labels use FreeType). `packaging/trim_windows_bundle.py`
-strips unused Qt/VTK/PIL payloads after PyInstaller (including `opengl32sw.dll` by default —
-set `SPOT_CHECK_TRIM_AGGRESSIVE=0` before building if 3D fails on software-OpenGL systems).
+`test_data/` is not bundled (gitignored).
 
-Optional: pin the build version without editing the file:
-
-```bash
-SPOT_CHECK_VERSION=1.0.1 ./scripts/build-windows.sh
-```
-
-Test data under `test_data/` is not included in the bundle (and is gitignored).
-
-## Lint (before push)
-
-CI runs `ruff check src tests packaging`. After `scripts/setup.*`, **pre-commit** hooks run the same check (with `--fix`) on staged files under `src/`, `tests/`, and `packaging/`.
-
-Manual check:
-
-```bash
-ruff check src tests packaging
-# or auto-fix import order / other fixable issues:
-ruff check --fix src tests packaging
-```
-
-## CI / releases
+## CI
 
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
-| **CI** | Push / PR to `main` / `master` | Ruff, compile, pytest |
-| **CI → Windows exe (beta)** | Every **push** (not tags) | Beta `SpotCheck-<version>-windows-x64.zip` (direct download) |
-| **Release Windows** | Tag `v*` or manual | Same `.zip` on GitHub Release + Actions artifact |
-
-**Beta builds:** **Actions → workflow run → Artifacts** → download `SpotCheck-<version>-windows-x64.zip` (one file, not zip-in-zip; uses `upload-artifact@v7` with `archive: false`) → unzip once → run `SpotCheck/SpotCheck.exe`.
-
-**Stable releases:** Tag `v1.0.0` (must match `src/spot_check/_version.py`) → GitHub Release has the same distribution zip.
-
-Manual stable build without a tag: Actions → *Release Windows* → *Run workflow*.
+| **CI** | Push / PR to `main` / `master` | Ruff, byte-compile, pytest |
+| **CI → Windows exe (beta)** | Push (non-tag) | Beta zip artifact |
+| **Release Windows** | Tag `v*` or manual | Release zip |
+| **Regression** | Weekly + manual | `pytest -m slow`; optional T0G10 tests if `test_data/` present |
 
 ## Layout
 
 ```
 spot-check/
 ├── pyproject.toml
-├── packaging/spot-check.spec
-├── scripts/build-windows.sh
+├── packaging/          # PyInstaller spec, trim script
+├── scripts/            # setup, build-windows, bump-version, validate_auto_t0g10
 ├── src/spot_check/
-│   ├── analysis/     # plan vs acquisition (public API)
-│   ├── plan/         # DICOM plan loading
-│   ├── geometry/     # Z axis / cube-axes helpers
-│   ├── gui/          # PySide6 app (state, pipeline, app)
-│   ├── models.py
-│   └── ...
+│   ├── analysis/       # measured, episodes, auto_columns, viz, plan QA
+│   ├── plan/           # DICOM
+│   ├── geometry/       # Z axis, cube axes
+│   └── gui/            # PySide6 app
 └── tests/
 ```
 

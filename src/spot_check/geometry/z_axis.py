@@ -15,12 +15,8 @@ from spot_check.constants import (
     PROTON_WATER_CSDA_RANGE_MM_COEFF,
     PROTON_WATER_CSDA_RANGE_MM_POW,
 )
+from spot_check.geometry.cube_axes_style import apply_pyvista_cube_axes_style
 from spot_check.models import CubeZAxisSpec
-
-# PyVista cube axes: closest triad shows Z numeric ticks; outer hides them on many VTK builds.
-PYVISTA_CUBE_AXES_LOCATION: str = "closest"
-PYVISTA_CUBE_AXES_TICKS: str = "outside"
-PYVISTA_CUBE_AXES_GRID: str = "back"
 
 
 def proton_cda_water_range_mm(energy_mev: np.ndarray | float) -> np.ndarray:
@@ -139,10 +135,7 @@ def apply_pyvista_cube_z_axis(
     values are still deep→shallow along scene zmin→zmax via ``SetAxisLabels``. Do not call
     ``SetRebuildAxes`` afterward (it regenerates labels and hides Z ticks).
     """
-    actor.SetFlyModeToClosestTriad()
-    grid_loc = getattr(actor, "VTK_GRID_LINES_FURTHEST", None)
-    if grid_loc is not None and hasattr(actor, "SetGridLineLocation"):
-        actor.SetGridLineLocation(grid_loc)
+    apply_pyvista_cube_axes_style(actor)
     actor.SetBounds(
         float(x_min),
         float(x_max),
@@ -164,9 +157,6 @@ def apply_pyvista_cube_z_axis(
     actor._z_label_visibility = True
     actor.SetZAxisVisibility(True)
     actor.SetZAxisTickVisibility(True)
-    actor.SetDrawXGridlines(True)
-    actor.SetDrawYGridlines(True)
-    actor.SetDrawZGridlines(True)
     try:
         actor.SetUseTextActor3D(False)
     except Exception:

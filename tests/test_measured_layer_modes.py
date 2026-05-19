@@ -52,14 +52,14 @@ def _names_imported_from_spatial(module_path: Path) -> set[str]:
     ("layer_mode", "needs_plan"),
     [
         ("gate_counter", True),
-        ("unified", True),
+        ("auto", True),
         ("plan_viterbi", True),
         ("time_gap", False),
         ("time_gap", True),
     ],
     ids=[
         "gate_counter",
-        "unified",
+        "auto",
         "plan_viterbi",
         "time_gap_no_plan",
         "time_gap_with_plan",

@@ -26,6 +26,26 @@ def parse_refill_xy_tol_mm(raw: str) -> float | None:
     return None
 
 
+def parse_auto_min_on_spot_weight_na(raw: str) -> float | None:
+    try:
+        v = float(str(raw).strip())
+        if 0.0 <= v <= 1.0e15:
+            return v
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+def parse_auto_min_episode_rows(raw: str) -> int | None:
+    try:
+        v = int(float(str(raw).strip()))
+        if 1 <= v <= 10_000:
+            return v
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
 def parse_viterbi_penalty_mm2(raw: str) -> float | None:
     try:
         v = float(str(raw).strip())

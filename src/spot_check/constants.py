@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Final
 
-# --- Timing / layer-step heuristics (unified & time-gap modes) -----------------
+# --- Timing / layer-step heuristics (time-gap & auto episode gaps) -------------
 TIME_LAYER_GAP_S_DEFAULT: Final[float] = 0.2
 
 # After a long Δt: same-spot synchrotron refill only if post-gap XY is this close (mm, plan frame).
@@ -23,10 +23,15 @@ REFILL_REJECT_EXTRA_MM: Final[float] = 5.0
 REFILL_REJECT_RATIO: Final[float] = 1.4
 REFILL_TRUST_TIME_GAP_STAY_DIST_MM: Final[float] = 35.0
 
-# --- Viterbi / unified geometry costs (mm²) ------------------------------------
+# --- Viterbi layer assignment (plan_viterbi / auto centroids) -------------------
 VITERBI_LAYER_ADVANCE_PENALTY_MM2_DEFAULT: Final[float] = 400.0
-UNIFIED_SHORT_DT_EXTRA_MM2: Final[float] = 3500.0
-UNIFIED_SAME_SPOT_REFILL_BLOCK_MM2: Final[float] = 1.0e7
+
+# --- Auto layer mode (signal episodes + plan-assisted spot count) -------------
+AUTO_MIN_ON_SPOT_WEIGHT_NA_DEFAULT: Final[float] = 1e-9
+AUTO_SPOT_XY_JUMP_MM_DEFAULT: Final[float] = 3.0
+AUTO_MIN_EPISODE_ROWS_DEFAULT: Final[int] = 1
+# Episode merge scoring: centroid XY delta² (mm²) + coeff × (Δt s)² when aligning M→N_plan.
+AUTO_EPISODE_MERGE_DT_MM2_PER_S: Final[float] = 50.0
 
 # --- Nominal energy → water-equivalent depth (display / approximate QA only) -----
 # Mono-energetic proton CSDA range in water: empirical power law, ~10 % of PSTAR in 30–230 MeV.

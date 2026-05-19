@@ -756,7 +756,7 @@ def show_comparison_3d_pyvista(
             f"n_plan={plan_pts.shape[0]}, n_meas={n_m}, MeV [{prep.e_lo:.1f}, {prep.e_hi:.1f}]. "
             f"Layers: Viterbi vs plan, advance penalty {_vp:g} mm^2."
         )
-    elif _lm == "unified":
+    elif _lm == "auto":
         _vp = (
             VITERBI_LAYER_ADVANCE_PENALTY_MM2_DEFAULT
             if viterbi_advance_penalty_mm2 is None
@@ -770,8 +770,8 @@ def show_comparison_3d_pyvista(
         )
         caption = (
             f"n_plan={plan_pts.shape[0]}, n_meas={n_m}, MeV [{prep.e_lo:.1f}, {prep.e_hi:.1f}]. "
-            f"Layers: unified Viterbi + dt>={_gap:g} s / same-spot<={_xytol:g} mm gates, "
-            f"base {_vp:g} mm^2."
+            f"Layers: auto episodes (Δt≥{_gap:g} s or XY step>{_xytol:g} mm starts new episode); "
+            f"Viterbi advance {_vp:g} mm^2."
         )
     elif _lm == "gate_counter":
         caption = (
@@ -801,7 +801,7 @@ def show_comparison_3d_pyvista(
             caption += (
                 f" Gold: {n_gold} one-axis row(s); missing fit axis from plan at nominal layer."
             )
-    if aggregate_spots:
+    if aggregate_spots and _lm != "auto":
         _sw = measured_spot_weight_caption(spot_weight_mode)
         caption += (
             f" Measured spots aggregated: {_sw}-weighted mean XY + σ per odd "
@@ -895,9 +895,6 @@ def show_comparison_3d_pyvista(
     _cube_axes["actor"] = pl.show_bounds(
         bounds=bounds_axes,
         axes_ranges=axes_ranges_scene,
-        grid=PYVISTA_CUBE_AXES_GRID,
-        ticks=PYVISTA_CUBE_AXES_TICKS,
-        location=PYVISTA_CUBE_AXES_LOCATION,
         all_edges=False,
         color="#8b949e",
         xtitle=prep.xlab,
@@ -912,8 +909,8 @@ def show_comparison_3d_pyvista(
         show_xlabels=True,
         show_ylabels=True,
         show_zlabels=True,
-        padding=0.06,
         fmt="%.4g",
+        **pyvista_show_bounds_kwargs(),
     )
     try:
         _apply_cube_z_axis(_cube_axes["actor"], z_spec_init)

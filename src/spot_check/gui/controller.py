@@ -44,15 +44,13 @@ except ImportError as e:  # pragma: no cover
 from spot_check import analysis
 from spot_check import constants as sc_const
 from spot_check._version import __version__
+from spot_check.analysis.csv_io import acquisition_csv_stem
 from spot_check.constants import project_root
 from spot_check.export import build_combined_export_rows, write_combined_export_csv
 from spot_check.gui.parsers import (
     parse_aggregate_even_tail_n,
     parse_bounds_xy_tick_mm,
-    parse_layer_gap_s,
     parse_plan_qa_thresholds,
-    parse_refill_xy_tol_mm,
-    parse_viterbi_penalty_mm2,
     plan_qa_thresholds_input_in_progress,
     spot_weight_mode_from_saved,
 )
@@ -63,10 +61,12 @@ from spot_check.gui.pipeline import (
     pipeline_load_job,
 )
 from spot_check.gui.state import (
-    apply_saved_geometry,
+    apply_saved_window_layout,
+    finish_saved_window_layout,
     geom_from_win,
     load_gui_state,
     save_gui_state,
+    win_is_maximized,
 )
 from spot_check.gui.theme import MUTED_BODY, MUTED_HELP, MUTED_HINT
 from spot_check.gui.workers import PipelineLoaderSignals, PipelineLoadRunnable
@@ -98,7 +98,11 @@ class SpotCheckController:
         win = QMainWindow()
         win.setWindowTitle(f"SpotCheck v{__version__} — Plan vs acquisition")
         win.setMinimumSize(1040, 640)
-        apply_saved_geometry(win, saved.get("window_geometry"))
+        restore_maximized = apply_saved_window_layout(
+            win,
+            saved.get("window_geometry"),
+            maximized=saved.get("window_maximized"),
+        )
 
         central = QWidget()
         win.setCentralWidget(central)
@@ -135,45 +139,21 @@ class SpotCheckController:
             hint.setMaximumWidth(800)
             return hint
 
-        raw_gap = saved.get("layer_gap_s", sc_const.TIME_LAYER_GAP_S_DEFAULT)
-        try:
-            gap0 = float(raw_gap)
-            if gap0 <= 0:
-                gap0 = sc_const.TIME_LAYER_GAP_S_DEFAULT
-        except (TypeError, ValueError):
-            gap0 = sc_const.TIME_LAYER_GAP_S_DEFAULT
-        raw_xy = saved.get("refill_same_spot_xy_tol_mm", sc_const.REFILL_SAME_SPOT_XY_TOLERANCE_MM)
-        try:
-            xy0 = float(raw_xy)
-            if xy0 <= 0:
-                xy0 = sc_const.REFILL_SAME_SPOT_XY_TOLERANCE_MM
-        except (TypeError, ValueError):
-            xy0 = sc_const.REFILL_SAME_SPOT_XY_TOLERANCE_MM
         mode0 = (
             str(saved.get("layer_assign_mode") or "gate_counter")
             .strip()
             .lower()
             .replace("-", "_")
         )
+        if mode0 == "unified":
+            mode0 = "auto"
         if mode0 in ("time_gap", "plan_viterbi"):
             mode0 = "gate_counter"
-        if mode0 not in ("unified", "gate_counter"):
+        if mode0 not in ("auto", "gate_counter"):
             mode0 = "gate_counter"
-        raw_vp = saved.get(
-            "viterbi_advance_penalty_mm2", sc_const.VITERBI_LAYER_ADVANCE_PENALTY_MM2_DEFAULT
-        )
-        try:
-            vp0 = float(raw_vp)
-            if vp0 < 0:
-                vp0 = sc_const.VITERBI_LAYER_ADVANCE_PENALTY_MM2_DEFAULT
-        except (TypeError, ValueError):
-            vp0 = sc_const.VITERBI_LAYER_ADVANCE_PENALTY_MM2_DEFAULT
 
         e_dcm = QLineEdit(str(saved.get("dcm_path") or ""))
         e_csv = QLineEdit(str(saved.get("csv_path") or ""))
-        e_gap = QLineEdit(f"{gap0:g}")
-        e_refill = QLineEdit(f"{xy0:g}")
-        e_vit = QLineEdit(f"{vp0:g}")
         e_agg_even = QLineEdit(
             str(
                 int(
@@ -274,17 +254,15 @@ class SpotCheckController:
         cb_view_proj.setChecked(_bool_saved("view_projection_perspective", True))
         cb_view_proj.setToolTip("On: perspective (default). Off: orthogonal / parallel projection.")
 
-        rb_unified = QRadioButton("Unified (Viterbi + timing / refill)")
+        rb_auto = QRadioButton("Auto (signal episodes + plan spot count)")
         rb_gate = QRadioButton("Gate counter (odd=spot, even=deadtime)")
         layer_grp = QButtonGroup(win)
-        layer_grp.addButton(rb_unified)
+        layer_grp.addButton(rb_auto)
         layer_grp.addButton(rb_gate)
-        if mode0 == "unified":
-            rb_unified.setChecked(True)
+        if mode0 == "auto":
+            rb_auto.setChecked(True)
         else:
             rb_gate.setChecked(True)
-
-        unified_entries = (e_vit, e_gap, e_refill)
 
         help_lbl = QLabel()
         help_lbl.setWordWrap(True)
@@ -360,19 +338,7 @@ class SpotCheckController:
             _sync_qa_lines()
 
         def persist() -> None:
-            gap = parse_layer_gap_s(e_gap.text())
-            if gap is None:
-                gap = sc_const.TIME_LAYER_GAP_S_DEFAULT
-                e_gap.setText(f"{gap:g}")
-            xy_tol = parse_refill_xy_tol_mm(e_refill.text())
-            if xy_tol is None:
-                xy_tol = sc_const.REFILL_SAME_SPOT_XY_TOLERANCE_MM
-                e_refill.setText(f"{xy_tol:g}")
-            mode = "unified" if rb_unified.isChecked() else "gate_counter"
-            vp = parse_viterbi_penalty_mm2(e_vit.text())
-            if vp is None:
-                vp = sc_const.VITERBI_LAYER_ADVANCE_PENALTY_MM2_DEFAULT
-                e_vit.setText(f"{vp:g}")
+            mode = "auto" if rb_auto.isChecked() else "gate_counter"
             xy_tick_save = parse_bounds_xy_tick_mm(e_bxy.text())
             if xy_tick_save is None:
                 xy_tick_save = float(sc_const.BOUNDS_XY_TICK_MM_DEFAULT)
@@ -412,10 +378,8 @@ class SpotCheckController:
                 dcm_path=e_dcm.text().strip(),
                 csv_path=e_csv.text().strip(),
                 window_geometry=geom_from_win(win),
+                window_maximized=win_is_maximized(win),
                 layer_assign_mode=mode,
-                layer_gap_s=gap,
-                refill_same_spot_xy_tol_mm=xy_tol,
-                viterbi_advance_penalty_mm2=vp,
                 weight_measured_by_channel_sum=cb_weight_ch.isChecked(),
                 spot_weight_mode=sw_mode_norm,
                 aggregate_spots_by_gate=cb_agg.isChecked(),
@@ -456,7 +420,7 @@ class SpotCheckController:
                 win,
                 "CSV",
                 init if Path(init).is_dir() else str(FOLDER),
-                "CSV (*.csv);;All files (*.*)",
+                "CSV (*.csv *.csv.gz);;All files (*.*)",
             )
             if p:
                 e_csv.setText(p)
@@ -474,24 +438,26 @@ class SpotCheckController:
             cb_qa_hide.setEnabled(en)
 
         def _sync_agg_even() -> None:
-            e_agg_even.setEnabled(cb_agg.isChecked())
+            gate_only = not rb_auto.isChecked()
+            e_agg_even.setEnabled(gate_only and cb_agg.isChecked())
 
-        def _sync_unified_entries() -> None:
-            u = rb_unified.isChecked()
-            for w in unified_entries:
-                w.setEnabled(u)
+        def _sync_layer_mode_ui() -> None:
+            cb_agg.setEnabled(not rb_auto.isChecked())
+            _sync_agg_even()
 
         def _update_help() -> None:
-            lm = "unified" if rb_unified.isChecked() else "gate_counter"
-            _sync_unified_entries()
-            if lm == "unified":
+            lm = "auto" if rb_auto.isChecked() else "gate_counter"
+            _sync_layer_mode_ui()
+            if lm == "auto":
                 help_lbl.setText(
-                    "Unified: Viterbi stay or +1 layer vs plan; short Δt adds advance cost; "
-                    "long-gap same-spot XY blocks advance. B→X, A→Y."
+                    "Auto: signal episodes from timing, weight, and XY (Gate Counter ignored). "
+                    "Thresholds are inferred and episodes aligned to the plan spot count."
+                )
+                lbl_auto_tuning.setText(
+                    "Tuning: inferred per load — see status line after refresh."
                 )
                 agg_intro_lbl.setText(
-                    "If CSV has Gate Counter: optional merge per odd phase "
-                    "(weight = Display → Weight)."
+                    "Gate-counter aggregation applies only in Gate counter mode (ignored for Auto)."
                 )
             else:
                 help_lbl.setText(
@@ -531,30 +497,14 @@ class SpotCheckController:
 
         gb_layer = QGroupBox("Layer assignment")
         vl_layer = QVBoxLayout(gb_layer)
-        vl_layer.addWidget(rb_unified)
+        vl_layer.addWidget(rb_auto)
         vl_layer.addWidget(rb_gate)
-        uni = QVBoxLayout()
-        r1 = QHBoxLayout()
-        r1.addWidget(QLabel("Advance (mm²)"))
-        r1.addWidget(e_vit)
-        r1.addWidget(_add_hint_lbl("↑ → fewer layer steps"), 1)
-        uni.addLayout(r1)
-        r2 = QHBoxLayout()
-        r2.addWidget(QLabel("Min Δt (s)"))
-        r2.addWidget(e_gap)
-        r2.addWidget(_add_hint_lbl("~0.2 typical; short Δt adds cost"), 1)
-        uni.addLayout(r2)
-        r3 = QHBoxLayout()
-        r3.addWidget(QLabel("Refill XY (mm)"))
-        r3.addWidget(e_refill)
-        r3.addWidget(
-            _add_hint_lbl("Long gap + dXY ≤ this → refill block"),
-            1,
+        lbl_auto_tuning = QLabel(
+            "Tuning: inferred from plan + CSV when Auto is selected."
         )
-        uni.addLayout(r3)
-        w_uni = QWidget()
-        w_uni.setLayout(uni)
-        vl_layer.addWidget(w_uni)
+        lbl_auto_tuning.setWordWrap(True)
+        lbl_auto_tuning.setStyleSheet(f"color: {MUTED_HINT}; font-size: 9pt;")
+        vl_layer.addWidget(lbl_auto_tuning)
         vl_layer.addWidget(help_lbl)
 
         gb_disp = QGroupBox("Display")
@@ -694,10 +644,6 @@ class SpotCheckController:
         drawer_layout.addWidget(gb_view3d)
         drawer_layout.addWidget(gb_agg)
 
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        drawer_layout.addWidget(line)
-
         auto_hint = QLabel(
             "3D refreshes when inputs validate. Numbers debounce briefly after typing."
         )
@@ -706,38 +652,6 @@ class SpotCheckController:
         auto_hint.setMinimumWidth(0)
         auto_hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         drawer_layout.addWidget(auto_hint)
-
-        load_panel = QFrame()
-        load_panel.setObjectName("loadPanel")
-        load_panel.setStyleSheet(
-            "#loadPanel { background-color: #161b22; border: 1px solid #30363d; "
-            "border-radius: 6px; }"
-        )
-        load_panel_lay = QVBoxLayout(load_panel)
-        load_panel_lay.setContentsMargins(10, 8, 10, 8)
-        load_panel_lay.setSpacing(6)
-        load_head = QHBoxLayout()
-        load_spinner_lbl = QLabel(_LOAD_SPINNER_FRAMES[0])
-        load_spinner_lbl.setStyleSheet("color: #58a6ff; font-size: 14pt;")
-        load_spinner_lbl.setFixedWidth(22)
-        load_msg_lbl = QLabel("Loading plan/CSV…")
-        load_msg_lbl.setWordWrap(True)
-        load_msg_lbl.setStyleSheet("color: #c9d1d9; font-weight: 600;")
-        load_msg_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        load_head.addWidget(load_spinner_lbl)
-        load_head.addWidget(load_msg_lbl, 1)
-        load_panel_lay.addLayout(load_head)
-        load_bar = QProgressBar()
-        load_bar.setRange(0, 0)
-        load_bar.setFixedHeight(5)
-        load_bar.setTextVisible(False)
-        load_bar.setStyleSheet(
-            "QProgressBar { background-color: #21262d; border: none; border-radius: 2px; }"
-            "QProgressBar::chunk { background-color: #58a6ff; border-radius: 2px; }"
-        )
-        load_panel_lay.addWidget(load_bar)
-        load_panel.hide()
-        drawer_layout.addWidget(load_panel)
 
         drawer_layout.addWidget(status_lbl)
         foot = QLabel("pydicom · PyVista · PySide6. Engineering use only.")
@@ -758,7 +672,6 @@ class SpotCheckController:
         splitter.setSizes([1000, 480])
 
         _sync_qa_lines()
-        _sync_agg_even()
         _update_help()
 
         _debounce = QTimer(win)
@@ -872,9 +785,7 @@ class SpotCheckController:
         def _tick_load_spinner() -> None:
             nonlocal _spinner_frame
             _spinner_frame = (_spinner_frame + 1) % len(_LOAD_SPINNER_FRAMES)
-            ch = _LOAD_SPINNER_FRAMES[_spinner_frame]
-            load_spinner_lbl.setText(ch)
-            load_overlay_spinner.setText(ch)
+            load_overlay_spinner.setText(_LOAD_SPINNER_FRAMES[_spinner_frame])
 
         _load_spinner_timer.timeout.connect(_tick_load_spinner)
 
@@ -882,12 +793,8 @@ class SpotCheckController:
             nonlocal _loading_gen, _spinner_frame
             _loading_gen = int(generation)
             _spinner_frame = 0
-            ch = _LOAD_SPINNER_FRAMES[0]
-            load_spinner_lbl.setText(ch)
-            load_overlay_spinner.setText(ch)
-            load_msg_lbl.setText(message)
+            load_overlay_spinner.setText(_LOAD_SPINNER_FRAMES[0])
             load_overlay_msg.setText(message)
-            load_panel.show()
             _sync_load_overlay_geometry()
             load_overlay.show()
             load_overlay.raise_()
@@ -901,7 +808,6 @@ class SpotCheckController:
                 return
             _loading_gen = None
             _load_spinner_timer.stop()
-            load_panel.hide()
             load_overlay.hide()
 
         def _vtk_placeholder_message(text: str, *, error: bool = False) -> None:
@@ -987,6 +893,16 @@ class SpotCheckController:
                 pass
             slice_band_init = {"slice_on": _si_on, "center_i": _si_ci}
 
+            auto_gap: float | None = None
+            auto_xy: float | None = None
+            auto_vp: float | None = None
+            if ctx.layer_mode == "auto":
+                auto_p = analysis.last_auto_layer_params()
+                if auto_p is not None:
+                    auto_gap = auto_p.episode_gap_s
+                    auto_xy = auto_p.spot_xy_jump_mm
+                    auto_vp = auto_p.viterbi_advance_penalty_mm2
+
             reuse_pl = _plot_cache.get("plotter")
             preserve_cam = (
                 reuse_pl is not None
@@ -1000,10 +916,9 @@ class SpotCheckController:
                 title=f"{label} — plan vs {csv_display_name}",
                 a_is_x=False,
                 layer_mode=ctx.layer_mode,
-                layer_gap_s=ctx.gap,
-                refill_same_spot_xy_tol_mm=ctx.xy_tol,
-                refill_trust_time_gap_stay_dist_mm=ctx.trust_stay,
-                viterbi_advance_penalty_mm2=ctx.vp_f,
+                layer_gap_s=auto_gap,
+                refill_same_spot_xy_tol_mm=auto_xy,
+                viterbi_advance_penalty_mm2=auto_vp,
                 weight_measured_by_channel=cb_weight_ch.isChecked(),
                 aggregate_spots=ctx.aggregate_spots,
                 aggregate_even_rows_after_odd=int(ctx.agg_even_n),
@@ -1059,7 +974,29 @@ class SpotCheckController:
                 plan_line += f"; {n_plan_raw} raw slots in CP maps before that filter"
             plan_line += ")"
             meas_line = f"Measured points: {n_meas} built and plotted"
-            if ctx.aggregate_spots:
+            if ctx.layer_mode == "auto":
+                auto_p = analysis.last_auto_layer_params()
+                if auto_p is not None:
+                    meas_line += (
+                        f" — auto Δt≥{auto_p.episode_gap_s:g} s, XY>{auto_p.spot_xy_jump_mm:g} mm, "
+                        f"Viterbi {auto_p.viterbi_advance_penalty_mm2:g} mm²"
+                    )
+                    lbl_auto_tuning.setText(
+                        "Inferred: "
+                        f"Δt {auto_p.episode_gap_s:g} s · XY {auto_p.spot_xy_jump_mm:g} mm · "
+                        f"weight ≥{auto_p.min_on_spot_weight_na:.3g} nA · "
+                        f"≥{auto_p.min_episode_rows} row(s)/episode · "
+                        f"Viterbi {auto_p.viterbi_advance_penalty_mm2:g} mm²"
+                    )
+                diag_auto = analysis.last_auto_episode_diagnostics()
+                if diag_auto is not None:
+                    meas_line += (
+                        f" — episodes raw={diag_auto.n_raw_episodes}, "
+                        f"aligned={diag_auto.n_after_align}/{diag_auto.n_plan}"
+                    )
+                    if not diag_auto.count_align_ok:
+                        meas_line += " (spot-count align incomplete)"
+            if ctx.aggregate_spots and ctx.layer_mode != "auto":
                 _cap = p.measured_spot_weight_caption(ctx.spot_weight_mode_run)
                 meas_line += f" (one {_cap}-weighted mean per odd gate spot)"
                 if ctx.agg_even_n > 0 and ctx.layer_mode == "gate_counter":
@@ -1126,7 +1063,6 @@ class SpotCheckController:
             _plot_cache["label"] = ld.label
             _plot_cache["csv_display_name"] = ld.csv_display_name
             build_note = f"Building 3D view — {ld.csv_display_name}…"
-            load_msg_lbl.setText(build_note)
             load_overlay_msg.setText(build_note)
             status_lbl.setText(build_note)
             try:
@@ -1181,27 +1117,7 @@ class SpotCheckController:
                 status_lbl.setText(f"Export: CSV not found: {csv_path}")
                 return
 
-            layer_mode = "unified" if rb_unified.isChecked() else "gate_counter"
-            trust_stay = float(sc_const.REFILL_TRUST_TIME_GAP_STAY_DIST_MM)
-            if layer_mode == "unified":
-                gap = parse_layer_gap_s(e_gap.text())
-                if gap is None:
-                    status_lbl.setText("Export: fix min Δt (s) before exporting.")
-                    return
-                xy_tol = parse_refill_xy_tol_mm(e_refill.text())
-                if xy_tol is None:
-                    status_lbl.setText("Export: fix refill XY (mm) before exporting.")
-                    return
-                vp_f = parse_viterbi_penalty_mm2(e_vit.text())
-                if vp_f is None:
-                    status_lbl.setText("Export: fix advance penalty (mm²) before exporting.")
-                    return
-            else:
-                gap = float(sc_const.TIME_LAYER_GAP_S_DEFAULT)
-                xy_tol = float(sc_const.REFILL_SAME_SPOT_XY_TOLERANCE_MM)
-                vp_f = parse_viterbi_penalty_mm2(e_vit.text())
-                if vp_f is None:
-                    vp_f = float(sc_const.VITERBI_LAYER_ADVANCE_PENALTY_MM2_DEFAULT)
+            layer_mode = "auto" if rb_auto.isChecked() else "gate_counter"
 
             agg_even_n = parse_aggregate_even_tail_n(e_agg_even.text())
             if agg_even_n is None:
@@ -1231,13 +1147,10 @@ class SpotCheckController:
                     planned_xyz=planned,
                     a_is_x=False,
                     layer_mode=layer_mode,
-                    layer_gap_s=float(gap),
-                    refill_same_spot_xy_tol_mm=float(xy_tol),
-                    refill_trust_time_gap_stay_dist_mm=trust_stay,
-                    viterbi_advance_penalty_mm2=float(vp_f),
                     aggregate_spots=aggregate_spots,
                     aggregate_even_rows_after_odd=int(agg_even_n),
                     spot_weight_mode=spot_weight_mode_run,
+                    auto_infer_params=(layer_mode == "auto"),
                 )
                 if not measured:
                     status_lbl.setText("Export: no measured rows.")
@@ -1250,7 +1163,7 @@ class SpotCheckController:
                         a_is_x=False,
                     )
                 suffix = "-spots-agg.csv" if aggregate_spots else "-spots.csv"
-                default_out = csv_path.with_name(csv_path.stem + suffix)
+                default_out = csv_path.with_name(acquisition_csv_stem(csv_path) + suffix)
                 out_path, _ = QFileDialog.getSaveFileName(
                     win,
                     "Export combined CSV",
@@ -1353,45 +1266,7 @@ class SpotCheckController:
                 else:
                     qa_pass_f, qa_warn_f = qa_pair
                     _qa_thr_by_mode[qa_mode_run] = (float(qa_pass_f), float(qa_warn_f))
-            layer_mode = "unified" if rb_unified.isChecked() else "gate_counter"
-            trust_stay = float(sc_const.REFILL_TRUST_TIME_GAP_STAY_DIST_MM)
-            if layer_mode == "unified":
-                gap = parse_layer_gap_s(e_gap.text())
-                if gap is None:
-                    _bump_load_generation_invalidate_async()
-                    analysis.idle_slice_band_controls_qt(slice_qt_bindings)
-                    _vtk_placeholder_message(
-                        "Unified: enter min Δt (s), e.g. 0.2.",
-                        error=True,
-                    )
-                    status_lbl.setText("Fix min Δt (s).")
-                    return
-                xy_tol = parse_refill_xy_tol_mm(e_refill.text())
-                if xy_tol is None:
-                    _bump_load_generation_invalidate_async()
-                    analysis.idle_slice_band_controls_qt(slice_qt_bindings)
-                    _vtk_placeholder_message(
-                        "Refill XY: positive mm (≤999).",
-                        error=True,
-                    )
-                    status_lbl.setText("Fix refill XY (mm).")
-                    return
-                vp_en = parse_viterbi_penalty_mm2(e_vit.text())
-                if vp_en is None:
-                    _bump_load_generation_invalidate_async()
-                    analysis.idle_slice_band_controls_qt(slice_qt_bindings)
-                    _vtk_placeholder_message(
-                        "Advance penalty: mm², ≥0 (e.g. 400).",
-                        error=True,
-                    )
-                    status_lbl.setText("Fix advance penalty (mm²).")
-                    return
-            else:
-                gap = float(sc_const.TIME_LAYER_GAP_S_DEFAULT)
-                xy_tol = float(sc_const.REFILL_SAME_SPOT_XY_TOLERANCE_MM)
-            vp_f = parse_viterbi_penalty_mm2(e_vit.text())
-            if vp_f is None:
-                vp_f = float(sc_const.VITERBI_LAYER_ADVANCE_PENALTY_MM2_DEFAULT)
+            layer_mode = "auto" if rb_auto.isChecked() else "gate_counter"
             agg_even_n = parse_aggregate_even_tail_n(e_agg_even.text())
             if agg_even_n is None:
                 _bump_load_generation_invalidate_async()
@@ -1415,9 +1290,6 @@ class SpotCheckController:
                     str(csv_path.resolve()),
                     file_mtime(csv_path),
                     layer_mode,
-                    float(gap),
-                    float(xy_tol),
-                    float(vp_f),
                     bool(cb_agg.isChecked()),
                     int(agg_even_n),
                     spot_weight_mode_run,
@@ -1430,10 +1302,6 @@ class SpotCheckController:
                     qa_pass_f=qa_pass_f,
                     qa_warn_f=qa_warn_f,
                     layer_mode=layer_mode,
-                    gap=float(gap),
-                    xy_tol=float(xy_tol),
-                    trust_stay=trust_stay,
-                    vp_f=float(vp_f),
                     aggregate_spots=bool(cb_agg.isChecked()),
                     agg_even_n=int(agg_even_n),
                     spot_weight_mode_run=spot_weight_mode_run,
@@ -1460,10 +1328,6 @@ class SpotCheckController:
                             ctx.dcm,
                             ctx.csv_path,
                             layer_mode=ctx.layer_mode,
-                            gap=ctx.gap,
-                            xy_tol=ctx.xy_tol,
-                            trust_stay=ctx.trust_stay,
-                            vp_f=ctx.vp_f,
                             aggregate_spots=ctx.aggregate_spots,
                             aggregate_even_rows_after_odd=ctx.agg_even_n,
                             spot_weight_mode=ctx.spot_weight_mode_run,
@@ -1521,9 +1385,6 @@ class SpotCheckController:
         for w in (
             e_dcm,
             e_csv,
-            e_gap,
-            e_refill,
-            e_vit,
             e_bxy,
             e_agg_even,
         ):
@@ -1539,7 +1400,7 @@ class SpotCheckController:
         cb_meas_sigma.toggled.connect(_do_refresh)
         cb_z_water.toggled.connect(_do_refresh)
         cb_align.toggled.connect(_do_refresh)
-        cb_agg.toggled.connect(lambda _c: (_sync_agg_even(), _do_refresh()))
+        cb_agg.toggled.connect(lambda _c: (_sync_layer_mode_ui(), _do_refresh()))
         cb_pqa.toggled.connect(lambda _c: (_sync_qa_lines(), _do_refresh()))
 
         def _on_qa_mode_changed() -> None:
@@ -1555,7 +1416,7 @@ class SpotCheckController:
         btn_view_top.clicked.connect(lambda: _apply_quick_view("top"))
         btn_view_left.clicked.connect(lambda: _apply_quick_view("left"))
         btn_view_right.clicked.connect(lambda: _apply_quick_view("right"))
-        rb_unified.toggled.connect(lambda _c: (_update_help(), _do_refresh()))
+        rb_auto.toggled.connect(lambda _c: (_update_help(), _do_refresh()))
         rb_gate.toggled.connect(lambda _c: (_update_help(), _do_refresh()))
         slice_chk.toggled.connect(lambda _c: persist())
         slice_sli.sliderReleased.connect(persist)
@@ -1563,5 +1424,6 @@ class SpotCheckController:
         app.aboutToQuit.connect(persist)
 
         win.show()
+        finish_saved_window_layout(win, maximized=restore_maximized)
         QTimer.singleShot(0, _do_refresh)
         sys.exit(app.exec())

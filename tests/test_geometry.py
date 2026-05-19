@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from spot_check.geometry import (
     apply_pyvista_cube_z_axis,
@@ -26,8 +27,7 @@ def test_pyvista_bounds_property_resets_z_labels() -> None:
     import os
 
     os.environ.setdefault("PYVISTA_OFF_SCREEN", "true")
-    import pyvista as pv
-
+    pv = pytest.importorskip("pyvista")
     pv.OFF_SCREEN = True
     e = np.linspace(100.0, 160.0, 12)
     z = nominal_mev_to_plot_z(e, use_proton_water_depth_mm=True)
@@ -40,7 +40,8 @@ def test_pyvista_bounds_property_resets_z_labels() -> None:
         bounds=bounds,
         axes_ranges=axes,
         grid="back",
-        location="closest",
+        location="outer",
+        ticks="inside",
         n_zlabels=spec.n_zlabels,
         fmt="%.4g",
     )
@@ -64,3 +65,15 @@ def test_plot_z_shallow_toward_top_and_depth_labels() -> None:
     assert spec.z_label_at_min > spec.z_label_at_max  # deep mm at zmin, shallow at zmax
     assert spec.zmin_scene < spec.zmax_scene
     assert spec.z_label_at_min > 0 and spec.z_label_at_max > 0
+
+
+def test_cube_z_axis_spec_empty_scene_z() -> None:
+    spec = cube_z_axis_spec(np.array([]), use_proton_water_depth_mm=True, tick_mm=5.0)
+    assert spec.zmin_scene < spec.zmax_scene
+    assert spec.z_label_at_min > spec.z_label_at_max
+    assert spec.n_zlabels >= 5
+
+
+def test_n_cube_axis_labels_invalid_step() -> None:
+    assert n_cube_axis_labels_for_mm_step(0.0, 100.0, 0.0) == 5
+    assert n_cube_axis_labels_for_mm_step(0.0, 100.0, float("nan")) == 5

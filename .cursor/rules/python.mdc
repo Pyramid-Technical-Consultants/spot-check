@@ -41,6 +41,7 @@ Requires **Python 3.10+**. Match existing modules: naming, imports, typing level
 - Use `from __future__ import annotations` where the codebase already does.
 - GUI / VTK / PyVista: follow `spot_check.analysis.pyvista_backend` and existing viz modules; do not duplicate backend setup.
 - Frozen Windows build: changes under `packaging/` may need a smoke check (`SPOT_CHECK_SMOKE=1`); see `scripts/build-windows.sh`.
+- **Layer modes:** `layer_mode='auto'` must **never** read or branch on CSV ``Gate Counter`` — signal episodes only. Use `gate_counter` when that column should drive spot grouping. Gate-counter fixtures under `test_data/` exist to **validate** auto against gate_counter, not to feed auto.
 
 ## Before you finish
 

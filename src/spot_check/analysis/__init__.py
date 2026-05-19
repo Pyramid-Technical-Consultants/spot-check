@@ -14,14 +14,16 @@ Layer assignment (nominal energy index per row):
 - **time_gap** — ``TIME_LAYER_GAP_S_DEFAULT`` plus refill heuristics (constants below).
   ``Gate Counter`` is ignored unless ``aggregate_spots=True``.
 
+- **auto** — one delivered spot per episode from **signal** segmentation (timing, weight, XY).
+  **Never reads ``Gate Counter``** — use **gate_counter** when that column is available. Episodes
+  are inferred (:func:`infer_auto_layer_params`) and aligned to the plan spot count, then
+  **monotone Viterbi** (or delivery-order layers when the count aligns). ``aggregate_spots``
+  is ignored in **auto** mode. Gate-counter exports in ``test_data/`` are for **validation**
+  (compare auto vs gate_counter); auto must not consume that column.
+
 - **plan_viterbi** — global decode: each row keeps measured A/B; layer index comes from
   a monotone path (stay or +1 layer) minimizing distance-to-plan, plus a penalty for
   advancing. No invented coordinates; works when the machine changes energy with no timing gap.
-
-- **unified** — same Viterbi objective, but the advance penalty is **per row**: base geometry
-  penalty plus extras when ``Δt < layer_gap_s`` (discourage stepping without a timing “slot”)
-  and when a long gap still has **same-spot XY** (refill; strongly block stepping). Tunes
-  together with ``viterbi_advance_penalty_mm2``, ``layer_gap_s``, and refill mm settings.
 
 - **gate_counter** — uses CSV ``Gate Counter``: **odd** values mark a **spot** phase (many
   consecutive rows may share the same count — one spot); **even** marks **deadtime** (also

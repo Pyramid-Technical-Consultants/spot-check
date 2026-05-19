@@ -48,10 +48,8 @@ def save_gui_state(
     dcm_path: str,
     csv_path: str,
     window_geometry: str,
+    window_maximized: bool,
     layer_assign_mode: str,
-    layer_gap_s: float,
-    refill_same_spot_xy_tol_mm: float,
-    viterbi_advance_penalty_mm2: float,
     weight_measured_by_channel_sum: bool,
     spot_weight_mode: str,
     aggregate_spots_by_gate: bool,
@@ -81,10 +79,8 @@ def save_gui_state(
                     "dcm_path": dcm_path,
                     "csv_path": csv_path,
                     "window_geometry": window_geometry,
+                    "window_maximized": window_maximized,
                     "layer_assign_mode": layer_assign_mode,
-                    "layer_gap_s": layer_gap_s,
-                    "refill_same_spot_xy_tol_mm": refill_same_spot_xy_tol_mm,
-                    "viterbi_advance_penalty_mm2": viterbi_advance_penalty_mm2,
                     "weight_measured_by_channel_sum": weight_measured_by_channel_sum,
                     "spot_weight_mode": spot_weight_mode,
                     "aggregate_spots_by_gate": aggregate_spots_by_gate,
@@ -132,6 +128,14 @@ def sanitize_geometry(raw: object, *, default: str = "1400x900") -> str:
     return s
 
 
+def bool_from_saved(raw: object, *, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in ("1", "true", "yes")
+
+
 def apply_saved_geometry(win: QMainWindow, raw: object) -> None:
     s = sanitize_geometry(raw, default="1400x900")
     try:
@@ -145,6 +149,29 @@ def apply_saved_geometry(win: QMainWindow, raw: object) -> None:
         win.resize(1400, 900)
 
 
+def apply_saved_window_layout(
+    win: QMainWindow,
+    raw_geometry: object,
+    *,
+    maximized: object = False,
+) -> bool:
+    """Restore normal size/position; returns whether to maximize after ``show``."""
+    apply_saved_geometry(win, raw_geometry)
+    return bool_from_saved(maximized, default=False)
+
+
+def finish_saved_window_layout(win: QMainWindow, *, maximized: bool) -> None:
+    """Apply maximized vs normal after the main window is shown."""
+    if maximized:
+        win.showMaximized()
+    else:
+        win.showNormal()
+
+
 def geom_from_win(win: QMainWindow) -> str:
-    g = win.geometry()
+    g = win.normalGeometry() if win.isMaximized() else win.geometry()
     return f"{g.width()}x{g.height()}+{g.x()}+{g.y()}"
+
+
+def win_is_maximized(win: QMainWindow) -> bool:
+    return bool(win.isMaximized())

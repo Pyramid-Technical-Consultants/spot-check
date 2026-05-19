@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from spot_check.analysis._imports import *  # noqa: F403
+from spot_check.analysis.csv_io import open_acquisition_csv
 from spot_check.analysis.layers import (
     _impute_plan_axis_fast,
     _layer_advance_plausible_vs_refill,
     _opt_float_cell,
     _plan_impute_lookups_per_layer,
     _PlanImputeLookup,
-    build_unified_advance_penalty_mm2,
+    delivery_layer_indices,
     viterbi_monotone_layer_assign,
 )
 from spot_check.analysis.spatial import (
@@ -135,7 +136,7 @@ def _probe_csv_columns_for_measured_weights(
     spot_weight_mode: str,
 ) -> None:
     swm = normalize_measured_spot_weight_mode(spot_weight_mode)
-    with csv_path.open(newline="", encoding="utf-8-sig") as f:
+    with open_acquisition_csv(csv_path) as f:
         pr = csv.DictReader(f)
         fn = pr.fieldnames
         if not fn:
@@ -216,6 +217,112 @@ def _finalize_spot_channel_weighted(
     ch_mean = _weighted_mean_masked(ch_vals, ws, ch_ok)
     return (a_mean, b_mean, lay_mean, sw, pcd_out, sig_a_mean, sig_b_mean, ch_mean)
 
+
+_GateSpotBufRow = tuple[float, float, float, float, int, float | None, float | None]
+
+
+def gate_counter_aggregated_layer_indices_from_csv(
+    csv_path: Path,
+    spots_per_layer: Sequence[int],
+    *,
+    max_layer: int,
+    a_is_x: bool,
+    spot_weight_mode: str,
+    max_points: int | None = None,
+    aggregate_even_rows_after_odd: int = 0,
+) -> np.ndarray:
+    """Nominal layer index per gate_counter spot (``aggregate_spots=True`` semantics).
+
+    Matches :func:`measured_spot_abc_from_csv` gate_counter aggregation (weighted mean of
+    per-row ``eff_li`` in each spot buffer) without plan imputation or A/B output.
+    """
+    cumul: list[int] = [0]
+    for c in spots_per_layer:
+        cumul.append(cumul[-1] + int(c))
+    hi = int(max_layer)
+    even_tail_max = int(aggregate_even_rows_after_odd)
+    swm = normalize_measured_spot_weight_mode(spot_weight_mode)
+    layers: list[int] = []
+    spot_buf: list[_GateSpotBufRow] = []
+    prev_gate: int | None = None
+    pending_even_tail = 0
+    i_spot = 0
+    eff_li = 0
+    n_raw = 0
+    fa_key = FIT_AMPLITUDE_A_KEY
+    a_key = "Fit Mean Position A (mm)"
+    b_key = "Fit Mean Position B (mm)"
+    gc_key = GATE_COUNTER_KEY
+
+    def flush_layer() -> None:
+        if spot_buf:
+            layers.append(int(_finalize_spot_channel_weighted(spot_buf)[2]))
+            spot_buf.clear()
+
+    with open_acquisition_csv(csv_path) as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames or gc_key not in reader.fieldnames:
+            return np.zeros(0, dtype=np.int64)
+        for row in reader:
+            g_raw = (row.get(gc_key) or "").strip()
+            if not g_raw:
+                continue
+            try:
+                g = int(float(g_raw))
+            except ValueError:
+                continue
+            if g != prev_gate:
+                if even_tail_max > 0:
+                    if g % 2 == 1:
+                        if spot_buf:
+                            flush_layer()
+                        pending_even_tail = 0
+                        eff_li = max(0, min(bisect.bisect_right(cumul, i_spot) - 1, hi))
+                        i_spot += 1
+                    elif prev_gate is not None and prev_gate % 2 == 1 and g % 2 == 0:
+                        pending_even_tail = even_tail_max
+                    else:
+                        if spot_buf:
+                            flush_layer()
+                        pending_even_tail = 0
+                        if g % 2 == 1:
+                            eff_li = max(0, min(bisect.bisect_right(cumul, i_spot) - 1, hi))
+                            i_spot += 1
+                else:
+                    if prev_gate is not None and prev_gate % 2 == 1 and spot_buf:
+                        flush_layer()
+                    pending_even_tail = 0
+                    if g % 2 == 1:
+                        eff_li = max(0, min(bisect.bisect_right(cumul, i_spot) - 1, hi))
+                        i_spot += 1
+                prev_gate = g
+            allow_even_slurp = even_tail_max > 0 and g % 2 == 0 and pending_even_tail > 0
+            if g % 2 == 0 and not allow_even_slurp:
+                continue
+            if not (row.get(fa_key) or "").strip():
+                continue
+            a_opt = _opt_float_cell(row, a_key)
+            b_opt = _opt_float_cell(row, b_key)
+            _, _, pcd = _plan_xy_from_optional_ab(a_opt, b_opt, a_is_x=a_is_x)
+            if pcd < 0:
+                continue
+            w_ch = measured_spot_weight_from_row(row, swm)
+            ch_n = _channel_sum_na_from_row(row)
+            spot_buf.append((0.0, 0.0, float(eff_li), w_ch, 0, None, None, ch_n))
+            n_raw += 1
+            if allow_even_slurp:
+                pending_even_tail -= 1
+                if pending_even_tail == 0 and spot_buf:
+                    flush_layer()
+            if max_points is not None and n_raw >= max_points:
+                if spot_buf:
+                    flush_layer()
+                break
+    if spot_buf:
+        flush_layer()
+    return np.asarray(layers, dtype=np.int64)
+
+
 def _apply_gate_spot_aggregation(
     rows: list[tuple[float, float, float, float, int]],
     gates: list[int],
@@ -283,6 +390,11 @@ def measured_spot_abc_from_csv(
     aggregate_spots: bool = False,
     aggregate_even_rows_after_odd: int = AGGREGATE_EVEN_ROWS_AFTER_ODD_DEFAULT,
     spot_weight_mode: str = SPOT_WEIGHT_MODE_DEFAULT,
+    auto_episode_gap_s: float = TIME_LAYER_GAP_S_DEFAULT,
+    auto_min_on_spot_weight_na: float = AUTO_MIN_ON_SPOT_WEIGHT_NA_DEFAULT,
+    auto_spot_xy_jump_mm: float = AUTO_SPOT_XY_JUMP_MM_DEFAULT,
+    auto_min_episode_rows: int = AUTO_MIN_EPISODE_ROWS_DEFAULT,
+    auto_infer_params: bool = True,
 ) -> list[tuple[float, ...]]:
     """Measured rows as (A mm, B mm, layer index, spot weight, partial code).
 
@@ -291,6 +403,17 @@ def measured_spot_abc_from_csv(
 
     Returns 8-tuples ``(A, B, layer, weight, partial, σ_A, σ_B, channel_sum_nA)`` (σ may be NaN).
 
+    **auto** segments acquisition rows into signal-based episodes and **never reads**
+    ``Gate Counter`` (use **gate_counter** mode when that column is available). Episodes are
+    aligned to the plan spot count when possible, then nominal layers use delivery order or
+    monotone Viterbi on episode centroids.
+    ``aggregate_spots`` and ``aggregate_even_rows_after_odd`` are ignored in **auto** mode.
+
+    When ``auto_infer_params`` is True (default), episode gap, XY jump, on-spot weight floor,
+    min episode rows, and Viterbi advance penalty are derived from the CSV timing/weights and
+    plan geometry (:func:`infer_auto_layer_params`); explicit ``auto_*`` / ``viterbi_*`` kwargs
+    are ignored. Set ``auto_infer_params=False`` to use the keyword values (tests, scripts).
+
     If ``aggregate_spots`` is True, requires ``Gate Counter`` on the CSV; each contiguous run of
     rows with the same **odd** gate value is one spot (even gate closes a spot), optionally extended
     in **gate_counter** mode by up to ``aggregate_even_rows_after_odd`` **even-phase** rows with
@@ -298,9 +421,9 @@ def measured_spot_abc_from_csv(
     Aggregated rows use weighted means of position, layer, and σ.
     """
     mode = layer_mode.strip().lower().replace("-", "_")
-    if mode not in ("time_gap", "plan_viterbi", "unified", "gate_counter"):
+    if mode not in ("time_gap", "plan_viterbi", "auto", "gate_counter"):
         raise ValueError(
-            "layer_mode must be 'time_gap', 'plan_viterbi', 'unified', or 'gate_counter'"
+            "layer_mode must be 'time_gap', 'plan_viterbi', 'auto', or 'gate_counter'"
         )
 
     swm = normalize_measured_spot_weight_mode(spot_weight_mode)
@@ -314,7 +437,9 @@ def measured_spot_abc_from_csv(
             )
 
     _probe_csv_columns_for_measured_weights(
-        csv_path, aggregate_spots=aggregate_spots, spot_weight_mode=swm
+        csv_path,
+        aggregate_spots=aggregate_spots and mode != "auto",
+        spot_weight_mode=swm,
     )
     if mode == "time_gap":
         if layer_gap_s <= 0:
@@ -328,15 +453,19 @@ def measured_spot_abc_from_csv(
             raise ValueError("viterbi_advance_penalty_mm2 must be >= 0")
         if not planned_xyz:
             raise ValueError("plan_viterbi requires planned_xyz from the RT plan")
-    elif mode == "unified":
-        if layer_gap_s <= 0:
-            raise ValueError("layer_gap_s must be > 0")
-        if refill_same_spot_xy_tol_mm <= 0:
-            raise ValueError("refill_same_spot_xy_tol_mm must be > 0")
+    elif mode == "auto":
+        if auto_episode_gap_s <= 0:
+            raise ValueError("auto_episode_gap_s must be > 0")
+        if auto_spot_xy_jump_mm <= 0:
+            raise ValueError("auto_spot_xy_jump_mm must be > 0")
+        if auto_min_on_spot_weight_na < 0:
+            raise ValueError("auto_min_on_spot_weight_na must be >= 0")
+        if int(auto_min_episode_rows) < 1:
+            raise ValueError("auto_min_episode_rows must be >= 1")
         if viterbi_advance_penalty_mm2 < 0:
             raise ValueError("viterbi_advance_penalty_mm2 must be >= 0")
         if not planned_xyz:
-            raise ValueError("unified requires planned_xyz from the RT plan")
+            raise ValueError("auto requires planned_xyz from the RT plan")
     else:  # gate_counter
         if not planned_xyz:
             raise ValueError("gate_counter requires planned_xyz from the RT plan")
@@ -348,7 +477,7 @@ def measured_spot_abc_from_csv(
         if layer_energies:
             max_layer = len(layer_energies) - 1
 
-    if mode in ("plan_viterbi", "unified"):
+    if mode == "plan_viterbi":
         if not layer_energies or max_layer is None:
             raise ValueError(
                 "plan-based layer modes require a plan with at least one nominal energy layer"
@@ -364,7 +493,6 @@ def measured_spot_abc_from_csv(
         layer_lks = _plan_impute_lookups_per_layer(layer_xy)
         ab_buf: list[tuple[float, float]] = []
         xy_buf: list[list[float]] = []
-        t_buf: list[float] = []
         w_buf: list[float] = []
         ch_buf: list[float] = []
         partial_plan_xy: list[tuple[float | None, float | None]] = []
@@ -374,7 +502,7 @@ def measured_spot_abc_from_csv(
         fa_key = "Fit Amplitude A (nA)"
         a_key = "Fit Mean Position A (mm)"
         b_key = "Fit Mean Position B (mm)"
-        with csv_path.open(newline="", encoding="utf-8-sig") as f:
+        with open_acquisition_csv(csv_path) as f:
             reader = csv.DictReader(f)
             if not reader.fieldnames:
                 return []
@@ -395,7 +523,6 @@ def measured_spot_abc_from_csv(
                 a_fin, b_fin = _ab_from_plan_xy(mx_i, my_i, a_is_x=a_is_x)
                 ab_buf.append((a_fin, b_fin))
                 xy_buf.append([mx_i, my_i])
-                t_buf.append(t)
                 w_buf.append(measured_spot_weight_from_row(row, swm))
                 ch_buf.append(_channel_sum_na_from_row(row))
                 partial_plan_xy.append((mx_p, my_p))
@@ -416,17 +543,7 @@ def measured_spot_abc_from_csv(
             return []
         meas_xy = np.asarray(xy_buf, dtype=np.float64)
         emit = _emit_sqdist_to_layers_mm2(meas_xy, layer_xy)
-        if mode == "plan_viterbi":
-            pen = viterbi_advance_penalty_mm2
-        else:
-            pen = build_unified_advance_penalty_mm2(
-                np.asarray(t_buf, dtype=np.float64),
-                meas_xy,
-                base_penalty_mm2=viterbi_advance_penalty_mm2,
-                layer_gap_s=layer_gap_s,
-                refill_same_spot_xy_tol_mm=refill_same_spot_xy_tol_mm,
-            )
-        layers_idx = viterbi_monotone_layer_assign(emit, pen)
+        layers_idx = viterbi_monotone_layer_assign(emit, viterbi_advance_penalty_mm2)
         hi = max_layer
         for i, (mx_p, my_p) in enumerate(partial_plan_xy):
             if partial_codes[i] == 0:
@@ -445,7 +562,7 @@ def measured_spot_abc_from_csv(
 
         out: list[tuple[float, ...]] = []
         for i, ((a, b), ell, wch, ch_n, pcd) in enumerate(
-            zip(ab_buf, layers_idx.tolist(), w_buf, ch_buf, partial_codes)
+            zip(ab_buf, layers_idx, w_buf, ch_buf, partial_codes)
         ):
             efi = int(ell)
             if efi < 0:
@@ -461,6 +578,116 @@ def measured_spot_abc_from_csv(
         if aggregate_spots:
             return _apply_gate_spot_aggregation(out, gates_acc, sig_acc)
         return out
+
+    if mode == "auto":
+        from spot_check.analysis.auto_columns import load_auto_fit_columns_from_csv
+        from spot_check.analysis.episodes import (
+            aggregate_spans_batch,
+            segment_align_auto_columns,
+        )
+        if not layer_energies or max_layer is None:
+            raise ValueError(
+                "plan-based layer modes require a plan with at least one nominal energy layer"
+            )
+        layer_xy = _plan_xy_by_energy_layer(planned_xyz, layer_energies)  # type: ignore[arg-type]
+        plan_xy2 = np.asarray(
+            [(float(px), float(py)) for px, py, _ in planned_xyz],  # type: ignore[misc]
+            dtype=np.float64,
+        )
+        global_lk = _PlanImputeLookup.from_xy(plan_xy2)
+        if global_lk is None:
+            raise ValueError("plan has no scan spots for imputation / Viterbi")
+        layer_lks = _plan_impute_lookups_per_layer(layer_xy)
+
+        cols = load_auto_fit_columns_from_csv(
+            csv_path,
+            global_lk=global_lk,
+            a_is_x=a_is_x,
+            spot_weight_mode=swm,
+            max_points=max_points,
+        )
+        if len(cols) == 0:
+            return []
+
+        n_plan_spots = len(planned_xyz)  # type: ignore[arg-type]
+        spots_per_layer = [
+            int(np.asarray(arr, dtype=np.float64).reshape(-1, 2).shape[0])
+            for arr in layer_xy
+        ]
+
+        if auto_infer_params:
+            from spot_check.analysis.auto_params import infer_auto_layer_params
+
+            auto_p = infer_auto_layer_params(cols, planned_xyz)  # type: ignore[arg-type]
+            gap_s = auto_p.episode_gap_s
+            xy_jump = auto_p.spot_xy_jump_mm
+            min_w = auto_p.min_on_spot_weight_na
+            min_rows = auto_p.min_episode_rows
+            vit_pen = auto_p.viterbi_advance_penalty_mm2
+        else:
+            gap_s = float(auto_episode_gap_s)
+            xy_jump = float(auto_spot_xy_jump_mm)
+            min_w = float(auto_min_on_spot_weight_na)
+            min_rows = int(auto_min_episode_rows)
+            vit_pen = float(viterbi_advance_penalty_mm2)
+
+        aligned_groups, _diag = segment_align_auto_columns(
+            cols,
+            n_plan_spots=n_plan_spots,
+            episode_gap_s=gap_s,
+            min_on_spot_weight_na=min_w,
+            spot_xy_jump_mm=xy_jump,
+            min_episode_rows=min_rows,
+        )
+        assign_by_delivery = _diag.count_align_ok and len(aligned_groups) == n_plan_spots
+
+        aggs = aggregate_spans_batch(cols, aligned_groups)
+        ab_buf_auto = [(a.a, a.b) for a in aggs]
+        xy_buf_auto = [[a.mx, a.my] for a in aggs]
+        w_buf_auto = [a.weight for a in aggs]
+        ch_buf_auto = [a.ch_n for a in aggs]
+        partial_codes_auto = [a.pcd for a in aggs]
+        partial_plan_xy_auto = [(a.mx_pp, a.my_pp) for a in aggs]
+        sig_acc_auto = [(a.sa, a.sb) for a in aggs]
+
+        if assign_by_delivery:
+            layers_idx_auto = delivery_layer_indices(len(aggs), spots_per_layer)
+        else:
+            meas_xy_auto = np.asarray(xy_buf_auto, dtype=np.float64)
+            emit_auto = _emit_sqdist_to_layers_mm2(meas_xy_auto, layer_xy)
+            layers_idx_auto = viterbi_monotone_layer_assign(emit_auto, vit_pen)
+        hi_auto = max_layer
+        for i, (mx_pp2, my_pp2) in enumerate(partial_plan_xy_auto):
+            if partial_codes_auto[i] == 0:
+                continue
+            efi = int(layers_idx_auto[i])
+            if efi < 0:
+                efi = 0
+            elif efi > hi_auto:
+                efi = hi_auto
+            lk_ref = layer_lks[efi]
+            if lk_ref is None:
+                lk_ref = global_lk
+            mx_f, my_f = _impute_plan_axis_fast(lk_ref, mx_pp2, my_pp2)
+            a_fin2, b_fin2 = _ab_from_plan_xy(mx_f, my_f, a_is_x=a_is_x)
+            ab_buf_auto[i] = (a_fin2, b_fin2)
+
+        out_auto: list[tuple[float, ...]] = []
+        for i, ((a, b), ell, wch, ch_n, pcd) in enumerate(
+            zip(ab_buf_auto, layers_idx_auto, w_buf_auto, ch_buf_auto, partial_codes_auto)
+        ):
+            efi = int(ell)
+            if efi < 0:
+                efi = 0
+            elif efi > hi_auto:
+                efi = hi_auto
+            sa, sb = sig_acc_auto[i]
+            out_auto.append(
+                _measured_row_with_sigma(
+                    a, b, float(efi), wch, pcd, sa, sb, channel_sum_na=ch_n
+                )
+            )
+        return out_auto
 
     if mode == "gate_counter":
         if not layer_energies or max_layer is None:
@@ -494,7 +721,7 @@ def measured_spot_abc_from_csv(
         fa_key = "Fit Amplitude A (nA)"
         a_key = "Fit Mean Position A (mm)"
         b_key = "Fit Mean Position B (mm)"
-        with csv_path.open(newline="", encoding="utf-8-sig") as f:
+        with open_acquisition_csv(csv_path) as f:
             reader = csv.DictReader(f)
             if not reader.fieldnames:
                 return []
@@ -624,7 +851,7 @@ def measured_spot_abc_from_csv(
     a_key = "Fit Mean Position A (mm)"
     b_key = "Fit Mean Position B (mm)"
 
-    with csv_path.open(newline="", encoding="utf-8-sig") as f:
+    with open_acquisition_csv(csv_path) as f:
         reader = csv.DictReader(f)
         if not reader.fieldnames:
             return []
