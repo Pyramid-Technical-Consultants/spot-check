@@ -582,30 +582,22 @@ def show_comparison_3d_pyvista(
             layer_energies_plan, int(slice_cfg["center_i"]), half_width=2
         )
 
-    def _energies_for_cube_axis_labels(pm: np.ndarray, mm: np.ndarray) -> np.ndarray:
-        """Nominal MeV for cube Z tick labels (always energy, not scene Z / depth)."""
-        parts: list[np.ndarray] = []
-        if np.any(pm):
-            parts.append(np.asarray(plan_e_mev[pm], dtype=np.float64).reshape(-1))
-        if meas_e_final.size > 0 and np.any(mm):
-            parts.append(np.asarray(meas_e_final[mm], dtype=np.float64).reshape(-1))
-        if parts:
-            return np.concatenate(parts)
-        return np.asarray(plan_e_mev, dtype=np.float64).reshape(-1)
+    def _all_energies_mev_for_cube_axis_labels() -> np.ndarray:
+        """Full-plan nominal MeV for Z ticks (not narrowed by the 5-layer slice)."""
+        parts: list[np.ndarray] = [np.asarray(plan_e_mev, dtype=np.float64).reshape(-1)]
+        if meas_e_final.size > 0:
+            parts.append(np.asarray(meas_e_final, dtype=np.float64).reshape(-1))
+        return np.concatenate(parts)
 
-    def _scene_z_for_cube_axes(
-        pm: np.ndarray,
-        mm: np.ndarray,
-    ) -> np.ndarray:
-        if bool(slice_cfg["slice_on"]):
-            z_parts: list[np.ndarray] = []
-            if np.any(pm):
-                z_parts.append(np.asarray(plan_pts[pm, 2], dtype=np.float64))
-            if np.any(mm):
-                z_parts.append(np.asarray(meas_pts_final[mm, 2], dtype=np.float64))
-            if z_parts:
-                return np.concatenate(z_parts)
-        return np.r_[plan_pts[:, 2], meas_pts[:, 2]]
+    def _all_scene_z_for_cube_axis_spec() -> np.ndarray:
+        """Scene Z extent for cube bounds/ticks (full plan + measured, not slice-masked)."""
+        if plan_pts.shape[0] and meas_pts_final.shape[0]:
+            return np.r_[plan_pts[:, 2], meas_pts_final[:, 2]]
+        if plan_pts.shape[0]:
+            return np.asarray(plan_pts[:, 2], dtype=np.float64).reshape(-1)
+        if meas_pts_final.shape[0]:
+            return np.asarray(meas_pts_final[:, 2], dtype=np.float64).reshape(-1)
+        return np.zeros(0, dtype=np.float64)
 
     def _apply_cube_z_axis(actor: Any, z_spec: _CubeZAxisSpec) -> None:
         apply_pyvista_cube_z_axis(
@@ -634,10 +626,10 @@ def show_comparison_3d_pyvista(
                 else np.zeros(0, dtype=bool)
             )
         z_spec = _cube_z_axis_spec(
-            _scene_z_for_cube_axes(pm, mm),
+            _all_scene_z_for_cube_axis_spec(),
             use_proton_water_depth_mm=use_depth_z,
             tick_mm=eff_tick,
-            nominal_energy_mev=_energies_for_cube_axis_labels(pm, mm) if use_depth_z else None,
+            nominal_energy_mev=_all_energies_mev_for_cube_axis_labels(),
             upstream_wet_mm=wet_mm,
             z_depth_metric=depth_metric,
         )
@@ -927,19 +919,11 @@ def show_comparison_3d_pyvista(
 
     # Scene Z: negative depth/mm or −E×view_scale (shallow toward top); see nominal_mev_to_plot_z.
     # ``axes_ranges`` maps bounding-box corners to tick labels (mm or MeV).
-    lo_m0, hi_m0 = _slice_lo_hi_mev()
-    pm0 = _energy_slice_mask(plan_e_mev, lo_m0, hi_m0)
-    mm0 = (
-        _energy_slice_mask(meas_e_final, lo_m0, hi_m0)
-        if meas_e_final.size > 0
-        else np.zeros(0, dtype=bool)
-    )
-    z_all = _scene_z_for_cube_axes(pm0, mm0)
     z_spec_init = _cube_z_axis_spec(
-        z_all,
+        _all_scene_z_for_cube_axis_spec(),
         use_proton_water_depth_mm=use_depth_z,
         tick_mm=eff_tick,
-        nominal_energy_mev=_energies_for_cube_axis_labels(pm0, mm0) if use_depth_z else None,
+        nominal_energy_mev=_all_energies_mev_for_cube_axis_labels(),
         upstream_wet_mm=wet_mm,
         z_depth_metric=depth_metric,
     )

@@ -123,16 +123,25 @@ def cube_z_axis_spec(
     z_pad = max(z_span * 0.06, min_pad)
     zmin_p = zmin_b - z_pad * 0.5
     zmax_p = zmax_b + z_pad * 0.5
-    e_at_zmin = -zmin_p / s_view
-    e_at_zmax = -zmax_p / s_view
-    n_z = n_cube_axis_labels_for_mm_step(e_at_zmin, e_at_zmax, float(tick_mev))
-    return CubeZAxisSpec(zmin_p, zmax_p, e_at_zmin, e_at_zmax, n_z, "Z (MeV)")
+    if nominal_energy_mev is not None:
+        e_lbl = np.asarray(nominal_energy_mev, dtype=np.float64).reshape(-1)
+    else:
+        e_lbl = np.array([], dtype=np.float64)
+    if e_lbl.size > 0:
+        z_lbl_min = float(np.max(e_lbl))
+        z_lbl_max = float(np.min(e_lbl))
+    else:
+        z_lbl_min = -zmin_p / s_view
+        z_lbl_max = -zmax_p / s_view
+    n_z = n_cube_axis_labels_for_mm_step(z_lbl_min, z_lbl_max, float(tick_mev))
+    return CubeZAxisSpec(zmin_p, zmax_p, z_lbl_min, z_lbl_max, n_z, "Z (MeV)")
 
 
-def _cube_z_depth_label_endpoints(z_spec: CubeZAxisSpec) -> tuple[float, float]:
-    """Positive depth (mm) at scene zmin (deep) and zmax (shallow).
+def _cube_z_axis_label_endpoints(z_spec: CubeZAxisSpec) -> tuple[float, float]:
+    """Tick value at scene zmin (index 0) and zmax (last).
 
-    ``z_label_at_min`` is depth at the most-negative scene Z (deepest); it is the larger mm value.
+    For water depth that is deep/shallow mm; for MeV, high/low energy. ``z_label_at_min`` is
+    always the value at the most-negative scene Z (deepest in the stack).
     """
     deep = float(max(z_spec.z_label_at_min, z_spec.z_label_at_max))
     shallow = float(min(z_spec.z_label_at_min, z_spec.z_label_at_max))
@@ -143,7 +152,7 @@ def _vtk_z_tick_labels(z_spec: CubeZAxisSpec, *, fmt: str = "%.4g") -> Any:
     """Build vtkStringArray for Z ticks (deep→shallow along scene zmin→zmax)."""
     from pyvista.plotting.cube_axes_actor import make_axis_labels
 
-    deep, shallow = _cube_z_depth_label_endpoints(z_spec)
+    deep, shallow = _cube_z_axis_label_endpoints(z_spec)
     # VTK maps tick index 0 to z_axis_range[0] at scene zmin (deepest); use descending labels.
     return make_axis_labels(
         vmin=deep,
@@ -186,7 +195,7 @@ def apply_pyvista_cube_z_axis(
     actor.y_axis_range = (float(y_min), float(y_max))
     actor._n_zlabels = int(z_spec.n_zlabels)
     actor.SetZTitle(str(z_spec.ztitle))
-    deep_mm, shallow_mm = _cube_z_depth_label_endpoints(z_spec)
+    deep_mm, shallow_mm = _cube_z_axis_label_endpoints(z_spec)
     actor.SetZAxisRange(shallow_mm, deep_mm)
     actor.SetAxisLabels(2, _vtk_z_tick_labels(z_spec))
     actor._z_label_visibility = True

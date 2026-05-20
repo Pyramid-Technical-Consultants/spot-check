@@ -21,7 +21,7 @@ from spot_check.geometry import (
     nominal_mev_to_plot_z,
 )
 from spot_check.geometry.proton_csda_water import proton_water_depth_mm
-from spot_check.geometry.z_axis import _cube_z_depth_label_endpoints
+from spot_check.geometry.z_axis import _cube_z_axis_label_endpoints
 from spot_check.models import CubeZAxisSpec
 
 _T0G10_DCM = Path("test_data/RN.15186535.T0G10.dcm")
@@ -46,20 +46,23 @@ def _cube_spec_from_energies(
     energies_mev: np.ndarray,
     *,
     tick_mm: float = 5.0,
+    tick_mev: float = 5.0,
+    use_water_depth: bool = True,
     upstream_wet_mm: float = 0.0,
     z_depth_metric: str = "csda",
 ) -> CubeZAxisSpec:
     e = np.asarray(energies_mev, dtype=np.float64).reshape(-1)
     z = nominal_mev_to_plot_z(
         e,
-        use_proton_water_depth_mm=True,
+        use_proton_water_depth_mm=use_water_depth,
         upstream_wet_mm=upstream_wet_mm,
         z_depth_metric=z_depth_metric,
     )
     return cube_z_axis_spec(
         z,
-        use_proton_water_depth_mm=True,
+        use_proton_water_depth_mm=use_water_depth,
         tick_mm=tick_mm,
+        tick_mev=tick_mev,
         nominal_energy_mev=e,
         upstream_wet_mm=upstream_wet_mm,
         z_depth_metric=z_depth_metric,
@@ -72,7 +75,7 @@ def _interpolate_tick_depth_mm(
     tick_depth_mm: Sequence[float],
 ) -> float:
     """Depth (mm) implied by tick strings (deep at index 0, shallow at last)."""
-    deep_lbl, shallow_lbl = _cube_z_depth_label_endpoints(spec)
+    deep_lbl, shallow_lbl = _cube_z_axis_label_endpoints(spec)
     depth = -float(z_scene)
     span = shallow_lbl - deep_lbl
     if span == 0.0:
@@ -92,7 +95,7 @@ def _cube_actor_like_plotter(
 ):
     """``show_bounds`` + ``apply_pyvista_cube_z_axis`` in the same order as ``plotter.py``."""
     pv = _pyvista_off_screen()
-    z_deep, z_shallow = _cube_z_depth_label_endpoints(spec)
+    z_deep, z_shallow = _cube_z_axis_label_endpoints(spec)
     bounds = (
         float(x_min),
         float(x_max),
@@ -135,7 +138,7 @@ def _assert_cube_z_depth_mapping(actor, spec: CubeZAxisSpec) -> None:
     ticks = _tick_depths_mm(actor)
     assert len(ticks) >= 2
     assert ticks[0] > ticks[-1], "deep mm at scene zmin (tick index 0), shallow at zmax"
-    deep, shallow = _cube_z_depth_label_endpoints(spec)
+    deep, shallow = _cube_z_axis_label_endpoints(spec)
     z_lo, z_hi = actor.GetZAxisRange()
     assert z_lo == pytest.approx(shallow)
     assert z_hi == pytest.approx(deep)
@@ -189,7 +192,7 @@ def test_regression_ascending_labels_with_ascending_range_inverts_depth_ticks() 
     energies = np.array([78.5, 134.4])
     z = nominal_mev_to_plot_z(energies, use_proton_water_depth_mm=True)
     spec = _cube_spec_from_energies(energies, tick_mm=5.0)
-    deep, shallow = _cube_z_depth_label_endpoints(spec)
+    deep, shallow = _cube_z_axis_label_endpoints(spec)
     depth_lo = float(proton_water_depth_mm(78.5))
     depth_hi = float(proton_water_depth_mm(134.4))
 
@@ -220,7 +223,7 @@ def test_apply_must_not_assign_z_axis_range_property() -> None:
     """PyVista ``z_axis_range`` setter re-runs ``_update_z_labels`` and drops custom Z ticks."""
     energies = np.array([78.5, 134.4])
     spec = _cube_spec_from_energies(energies, tick_mm=5.0)
-    deep, shallow = _cube_z_depth_label_endpoints(spec)
+    deep, shallow = _cube_z_axis_label_endpoints(spec)
 
     _pl, actor = _cube_actor_like_plotter(spec)
     try:
@@ -230,7 +233,6 @@ def test_apply_must_not_assign_z_axis_range_property() -> None:
 
         actor.SetZAxisRange(shallow, deep)
         actor.z_axis_range = (deep, shallow)
-        n_after_prop = len(_tick_depths_mm(actor))
         apply_pyvista_cube_z_axis(
             actor,
             spec,
@@ -279,8 +281,8 @@ def test_water_depth_labels_from_mev_not_negated_scene_z() -> None:
         nominal_energy_mev=None,
     )
     spec_ok = _cube_spec_from_energies(energies, tick_mm=5.0)
-    deep_ok, shallow_ok = _cube_z_depth_label_endpoints(spec_ok)
-    deep_bad, shallow_bad = _cube_z_depth_label_endpoints(spec_bad)
+    deep_ok, shallow_ok = _cube_z_axis_label_endpoints(spec_ok)
+    deep_bad, shallow_bad = _cube_z_axis_label_endpoints(spec_bad)
     assert shallow_ok == pytest.approx(float(proton_water_depth_mm(78.5)), abs=1.0)
     assert deep_ok == pytest.approx(float(proton_water_depth_mm(134.4)), abs=1.5)
     assert shallow_bad == pytest.approx(78.5, abs=2.5)
@@ -343,12 +345,41 @@ def test_t0g40_deepest_layer_same_as_t0g10_shallowest_differs() -> None:
 
     e_all = np.array([s[2] for s in planned], dtype=np.float64)
     spec = _cube_spec_from_energies(e_all, tick_mm=5.0)
-    deep, shallow = _cube_z_depth_label_endpoints(spec)
+    deep, shallow = _cube_z_axis_label_endpoints(spec)
     e_lo, e_hi = float(min(layer_e)), float(max(layer_e))
     assert deep == pytest.approx(float(proton_water_depth_mm(e_hi)), abs=2.5)
     assert shallow == pytest.approx(float(proton_water_depth_mm(e_lo)), abs=2.5)
     assert deep > 95.0
     assert shallow < 60.0
+
+
+@pytest.mark.skipif(not _T0G10_DCM.is_file(), reason="T0G10 DICOM not under test_data/")
+def test_t0g10_mev_axis_full_plan_range_with_slice_on() -> None:
+    """5-layer slice must not shrink Z ticks to ~105 MeV; axis shows full 78.5–134.4 MeV plan."""
+    from spot_check import analysis
+    from spot_check.plan import planned_spot_xyz_and_counts_from_dicom
+
+    _pyvista_off_screen()
+    planned, *_ = planned_spot_xyz_and_counts_from_dicom(_T0G10_DCM)
+    pl = pytest.importorskip("pyvista").Plotter(off_screen=True)
+    try:
+        analysis.show_comparison_3d_pyvista(
+            list(planned),
+            [],
+            title="T0G10 MeV slice",
+            a_is_x=False,
+            z_axis_use_proton_water_depth_mm=False,
+            slice_band_init={"slice_on": True, "center_i": 20},
+            reuse_plotter=pl,
+            reembed_qt=False,
+        )
+        actor = pl.renderer.cube_axes_actor
+        zl = [float(actor.z_labels[i]) for i in range(len(actor.z_labels))]
+        assert min(zl) == pytest.approx(78.5, abs=3.0)
+        assert max(zl) == pytest.approx(134.4, abs=3.0)
+        assert min(zl) < 95.0
+    finally:
+        pl.close()
 
 
 @pytest.mark.skipif(not _T0G10_DCM.is_file(), reason="T0G10 DICOM not under test_data/")
