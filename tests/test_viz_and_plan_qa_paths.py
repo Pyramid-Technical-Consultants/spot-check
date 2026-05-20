@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
@@ -36,6 +38,19 @@ def test_format_plan_qa_caption_position() -> None:
         n_fail=1,
     )
     assert "Position QA" in cap or "≤" in cap
+
+
+def test_layer_nn_plan_xy_skips_nonfinite_measured_xy() -> None:
+    planned = list(MINIMAL_PLANNED_XYZ)
+    measured = [
+        (1.0, 2.0, 0.0, 1.0, 0, float("nan"), float("nan"), 1.0),
+        (3.0, 4.0, 0.0, 1.0, 0, float("nan"), float("nan"), 1.0),
+    ]
+    dist, _exp = analysis.layer_nn_plan_xy_distances_and_expected_xyz(
+        planned, measured, a_is_x=False
+    )
+    assert dist.shape[0] == 2
+    assert math.isfinite(float(dist[1]))
 
 
 def test_plan_qa_error_line_polylines_builds_with_pyvista(measured_csv_writer) -> None:

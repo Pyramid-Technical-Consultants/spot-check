@@ -2,9 +2,9 @@
 
 Scene Z for the PyVista comparison view uses a **positive** affine map (see
 :func:`nominal_energy_to_scene_z`): deep layers / high nominal MeV sit at low
-scene ``z`` (cube ``zmin``), shallow at high ``z``. Cube tick *labels* are mm
-or MeV via :class:`~spot_check.models.CubeZAxisSpec` and
-:func:`spot_check.geometry.cube_axes_style.cube_axes_ranges`.
+scene ``z`` (cube ``zmin``), shallow at high ``z``. Z tick *labels* use the same
+numeric scale as scene Z but run **high-to-low** along the axis so larger values
+sit near the global origin (:func:`invert_z_cube_axis_tick_labels`).
 """
 
 from __future__ import annotations
@@ -29,8 +29,8 @@ from spot_check.models import CubeZAxisSpec, ZAxisDisplayConfig
 def label_at_scene_z(actor: object, z_scene: float) -> float | None:
     """Interpolate the displayed Z tick value at a scene-Z position.
 
-    VTK places tick index 0 at scene ``zmin`` and the last index at ``zmax``; labels
-    are built from ``z_label_at_min`` to ``z_label_at_max`` along those bounds.
+    Tick index 0 sits at scene ``zmin``; with :func:`invert_z_cube_axis_tick_labels`,
+    ``z_labels[0]`` is the **larger** scene-scale number (high MeV / deep end).
     """
     try:
         zl = [float(actor.z_labels[i]) for i in range(len(actor.z_labels))]  # type: ignore[attr-defined]

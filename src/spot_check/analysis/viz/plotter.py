@@ -613,6 +613,9 @@ def show_comparison_3d_pyvista(
             if actor is None or sb is None:
                 return
             pin_pyvista_cube_bounds(actor, sb)
+            invert_z_cube_axis_tick_labels(
+                actor, z_scene_min=float(sb[4]), z_scene_max=float(sb[5])
+            )
 
         def _guarded_pl_update_bounds_axes() -> None:
             _orig_pl_ub()
@@ -718,11 +721,16 @@ def show_comparison_3d_pyvista(
         )
         actor = pl.renderer.cube_axes_actor
         if actor is not None:
+            normalize_cube_axes_label_counts(actor)
             disable_pyvista_cube_axes_label_lod(actor)
             try:
                 actor.z_label_visibility = True
             except Exception:
                 pass
+            pin_xy_cube_axis_tick_endpoints(actor)
+            invert_z_cube_axis_tick_labels(
+                actor, z_scene_min=float(bounds_axes[4]), z_scene_max=float(bounds_axes[5])
+            )
         _cube_axes["actor"] = actor
         try:
             pl.render()
@@ -752,7 +760,6 @@ def show_comparison_3d_pyvista(
                 mm_full = np.zeros(0, dtype=bool)
         else:
             lo_m, hi_m = _slice_lo_hi_mev()
-            pm = _energy_slice_mask(plan_e_mev, lo_m, hi_m)
             mm_full = (
                 _energy_slice_mask(meas_e_final, lo_m, hi_m)
                 if meas_e_final.size > 0
@@ -760,19 +767,14 @@ def show_comparison_3d_pyvista(
             )
 
             if plan_actor is not None:
+                # Always draw the full plan stack; slice only filters measured spots.
                 if plan_actor_uses_fwhm_glyphs and prep.plan_fwhm_xy_mm is not None:
-                    if not np.any(pm):
-                        _set_actor_polydata(plan_actor, _empty_poly())
-                    else:
-                        _set_actor_polydata(
-                            plan_actor,
-                            _plan_spot_fwhm_glyph_mesh(plan_pts[pm], prep.plan_fwhm_xy_mm[pm]),
-                        )
+                    _set_actor_polydata(
+                        plan_actor,
+                        _plan_spot_fwhm_glyph_mesh(plan_pts, prep.plan_fwhm_xy_mm),
+                    )
                 else:
-                    if not np.any(pm):
-                        _set_actor_polydata(plan_actor, _empty_poly())
-                    else:
-                        _set_actor_polydata(plan_actor, pv.PolyData(plan_pts[pm]))
+                    _set_actor_polydata(plan_actor, plan_cloud)
 
             if meas_actor is not None:
                 if not np.any(mm_full):
@@ -963,7 +965,7 @@ def show_comparison_3d_pyvista(
             caption += (
                 f" Gold: {n_gold} one-axis row(s); missing fit axis from plan at nominal layer."
             )
-    if aggregate_spots and _lm in ("auto", "gate_counter"):
+    if aggregate_spots:
         _sw = measured_spot_weight_caption(spot_weight_mode)
         caption += (
             f" Measured spots aggregated: {_sw}-weighted mean XY + σ per assigned plan spot."
@@ -993,12 +995,14 @@ def show_comparison_3d_pyvista(
             if use_depth_z:
                 caption += (
                     " Z axis ticks: full plan water-depth range (PSTAR);"
-                    f" visible spots ≈ {_slo:.1f}–{_shi:.1f} MeV nominal layers."
+                    f" plan: all {plan_pts.shape[0]} spots; measured band ≈ "
+                    f"{_slo:.1f}–{_shi:.1f} MeV."
                 )
             else:
                 caption += (
                     f" Z axis ticks: full plan {e_rng_lo:.1f}–{e_rng_hi:.1f} MeV"
-                    f" (not the slice band); visible spots ≈ {_slo:.1f}–{_shi:.1f} MeV."
+                    f" (not the slice band); plan: all {plan_pts.shape[0]} spots;"
+                    f" measured band ≈ {_slo:.1f}–{_shi:.1f} MeV."
                     " High energy (deep) toward axis origin."
                 )
         elif not use_depth_z:

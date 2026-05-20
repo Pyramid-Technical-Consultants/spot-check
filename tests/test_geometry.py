@@ -6,6 +6,7 @@ from spot_check.geometry import (
     cube_z_axis_spec,
     n_cube_axis_labels_for_mm_step,
     nominal_energy_to_scene_z,
+    pin_xy_cube_axis_tick_endpoints,
     plan_depth_bounds_mm,
     proton_csda_water_range_mm,
     proton_water_depth_mm,
@@ -99,6 +100,39 @@ def test_cube_axes_10_show_bounds_labels_at_scene_extents() -> None:
     pl.close()
 
 
+def test_pin_xy_cube_axis_tick_endpoints_span_axis_range() -> None:
+    """First/last XY labels match ``x_axis_range`` / ``y_axis_range`` (corner scale)."""
+    import os
+
+    from spot_check.geometry import disable_pyvista_cube_axes_label_lod
+
+    os.environ.setdefault("PYVISTA_OFF_SCREEN", "true")
+    pv = pytest.importorskip("pyvista")
+    pv.OFF_SCREEN = True
+    x0, x1, y0, y1, z0, z1 = -40.0, 40.0, -35.0, 35.0, 0.0, 100.0
+    bounds = (x0, x1, y0, y1, z0, z1)
+    pl = pv.Plotter(off_screen=True)
+    actor = pl.show_bounds(
+        bounds=bounds,
+        axes_ranges=bounds,
+        grid="back",
+        location="outer",
+        ticks="inside",
+        padding=0.0,
+        n_xlabels=6,
+        n_ylabels=6,
+        n_zlabels=5,
+        fmt="%.0f",
+    )
+    disable_pyvista_cube_axes_label_lod(actor)
+    pin_xy_cube_axis_tick_endpoints(actor)
+    assert float(actor.x_labels[0]) == pytest.approx(x0, abs=0.01)
+    assert float(actor.x_labels[-1]) == pytest.approx(x1, abs=0.01)
+    assert float(actor.y_labels[0]) == pytest.approx(y0, abs=0.01)
+    assert float(actor.y_labels[-1]) == pytest.approx(y1, abs=0.01)
+    pl.close()
+
+
 def test_cube_z_axis_spec_labels_match_scene_z_order() -> None:
     """VTK tick index 0 is at scene zmin — labels must follow scene Z, not max/min energy."""
     z = np.linspace(0.0, 10.0, 11)
@@ -160,11 +194,12 @@ def test_refresh_pyvista_cube_axes_after_update_bounds() -> None:
     actor.update_bounds((x_min, x_max, y_min, y_max, -220.0, -180.0))
     refresh_pyvista_cube_axes(actor, bounds, axes)
     assert actor.z_label_visibility is True
-    z_lo, z_hi = actor.GetZAxisRange()
+    z_rng = actor.GetZAxisRange()
+    z_lo, z_hi = float(z_rng[0]), float(z_rng[1])
     lo_scene = min(spec.zmin_scene, spec.zmax_scene)
     hi_scene = max(spec.zmin_scene, spec.zmax_scene)
-    assert z_lo == pytest.approx(lo_scene, rel=0.02, abs=1.0)
-    assert z_hi == pytest.approx(hi_scene, rel=0.02, abs=1.0)
+    assert min(z_lo, z_hi) == pytest.approx(lo_scene, rel=0.02, abs=1.0)
+    assert max(z_lo, z_hi) == pytest.approx(hi_scene, rel=0.02, abs=1.0)
     zl0, zl1 = float(actor.z_labels[0]), float(actor.z_labels[-1])
     assert min(zl0, zl1) >= lo_scene - 5.0
     assert max(zl0, zl1) <= hi_scene + 5.0

@@ -249,11 +249,18 @@ def energies_for_measured_time_layers(
     hi = len(layer_energies) - 1
     out: list[float] = []
     for tup in measured_abc:
-        idx = int(round(float(tup[2])))
-        if idx < 0:
+        try:
+            v = float(tup[2])
+        except (TypeError, ValueError, IndexError):
+            v = float("nan")
+        if not math.isfinite(v):
             idx = 0
-        elif idx > hi:
-            idx = hi
+        else:
+            idx = int(round(v))
+            if idx < 0:
+                idx = 0
+            elif idx > hi:
+                idx = hi
         out.append(layer_energies[idx])
     return out
 

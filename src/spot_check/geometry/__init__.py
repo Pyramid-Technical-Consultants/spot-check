@@ -10,7 +10,10 @@ from .cube_axes_style import (
     apply_pyvista_cube_axes_style,
     cube_axes_ranges,
     disable_pyvista_cube_axes_label_lod,
+    invert_z_cube_axis_tick_labels,
+    normalize_cube_axes_label_counts,
     pin_pyvista_cube_bounds,
+    pin_xy_cube_axis_tick_endpoints,
     pyvista_show_bounds_kwargs,
     refresh_pyvista_cube_axes,
 )
@@ -42,6 +45,7 @@ __all__ = [
     "apply_z_display_to_comparison_clouds",
     "cube_axes_ranges",
     "disable_pyvista_cube_axes_label_lod",
+    "invert_z_cube_axis_tick_labels",
     "cube_z_axis_label_endpoints",
     "cube_z_axis_spec",
     "cube_z_axis_spec_for_display",
@@ -50,6 +54,7 @@ __all__ = [
     "nominal_energy_to_scene_z",
     "nominal_depth_to_scene_z_cube",
     "nominal_mev_to_scene_z_mev_cube",
+    "normalize_cube_axes_label_counts",
     "plan_depth_bounds_mm",
     "plan_depth_bounds_mm_config",
     "normalize_z_depth_metric",
@@ -57,5 +62,6 @@ __all__ = [
     "proton_water_depth_mm",
     "pyvista_show_bounds_kwargs",
     "pin_pyvista_cube_bounds",
+    "pin_xy_cube_axis_tick_endpoints",
     "refresh_pyvista_cube_axes",
 ]

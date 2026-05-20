@@ -39,15 +39,16 @@ class PipelineLoadOK:
     csv_display_name: str
     measured_aligned: list[tuple[float, ...]] | None = None
     align_info: Any | None = None
+    detector_pre_aligned: bool = False
     layer_mode_run: str = "time_gap"
     auto_assign_method: str = "episodes"
     aggregate_run: bool = False
 
 
 def aggregation_applies(*, layer_mode: str, aggregate_spots: bool) -> bool:
-    """True when ``aggregate_spots`` can merge rows per assigned plan spot for ``layer_mode``."""
-    mode = layer_mode.strip().lower().replace("-", "_")
-    return bool(aggregate_spots) and mode in ("auto", "gate_counter")
+    """True when the GUI aggregation toggle is on (post-assignment weighted mean)."""
+    del layer_mode  # kept for call-site stability
+    return bool(aggregate_spots)
 
 
 def resolve_csv_load_layer_mode(
@@ -56,13 +57,13 @@ def resolve_csv_load_layer_mode(
     plan_path: Path | None,
     csv_path: Path,
     aggregate_spots: bool,
+    auto_assign_method: str = "episodes",
 ) -> tuple[str, bool]:
     """Layer mode and spot aggregation for :func:`measured_spot_abc_from_csv`.
 
-    Aggregation merges all CSV rows assigned to the same plan spot into one weighted-mean row.
-    It applies in **auto** (per signal episode or plan-sequential span) and **gate_counter**
-    (per odd ``Gate Counter`` phase; requires that column). Gate-counter mode without it falls
-    back to **time_gap** (per-row; aggregation off).
+    Aggregation is a post-process after layer/spot assignment: rows sharing the same assignment
+    id collapse to one weighted-mean row (``spot_weight_mode`` weights). Assignment mode is
+    unchanged; only the output row count differs.
     """
     mode = layer_mode.strip().lower().replace("-", "_")
     if mode not in ("auto", "gate_counter", "plan_viterbi", "time_gap"):
@@ -73,6 +74,10 @@ def resolve_csv_load_layer_mode(
 
     if plan_path is None and mode in ("auto", "gate_counter", "plan_viterbi"):
         mode = "time_gap"
+
+    assign_m = str(auto_assign_method).strip().lower().replace("-", "_")
+    if assign_m == "sequential":
+        assign_m = "plan_sequential"
 
     agg = aggregation_applies(layer_mode=mode, aggregate_spots=aggregate_spots)
     return mode, agg
@@ -132,6 +137,10 @@ def pipeline_load_job(
             plan_path=plan_path,
             csv_path=csv_path,
             aggregate_spots=aggregate_spots,
+            auto_assign_method=auto_assign_method,
+        )
+        align_before_assign = bool(
+            auto_align and layer_mode_run == "auto" and planned
         )
         measured_unaligned = analysis.measured_spot_abc_from_csv(
             csv_path,
@@ -144,6 +153,7 @@ def pipeline_load_job(
             auto_infer_params=auto_infer and layer_mode_run == "auto",
             auto_assign_method=auto_assign_method,
             heal_partial_fit_axes=heal_partial_fit_axes,
+            align_detector_xy_before_assign=align_before_assign,
         )
         if not measured_unaligned:
             raise ValueError("No measured rows to plot.")
@@ -153,12 +163,19 @@ def pipeline_load_job(
 
     measured_aligned: list[tuple[float, ...]] | None = None
     align_info: Any | None = None
+    detector_pre_aligned = bool(
+        auto_align and layer_mode_run == "auto" and planned and measured_unaligned
+    )
     if auto_align and planned and measured_unaligned:
-        measured_aligned, align_info = analysis.align_measured_to_plan_detector_xy(
-            planned,
-            measured_unaligned,
-            a_is_x=False,
-        )
+        if detector_pre_aligned:
+            align_info = analysis.last_detector_align_info()
+            measured_aligned = list(measured_unaligned)
+        else:
+            measured_aligned, align_info = analysis.align_measured_to_plan_detector_xy(
+                planned,
+                measured_unaligned,
+                a_is_x=False,
+            )
 
     pipeline_key = (
         str(plan_path.resolve()) if plan_path is not None else "",
@@ -182,6 +199,7 @@ def pipeline_load_job(
         csv_display_name=csv_display_name,
         measured_aligned=list(measured_aligned) if measured_aligned is not None else None,
         align_info=align_info,
+        detector_pre_aligned=detector_pre_aligned,
         layer_mode_run=layer_mode_run,
         auto_assign_method=auto_assign_method,
         aggregate_run=bool(aggregate_run),

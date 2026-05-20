@@ -134,9 +134,7 @@ def measured_spot_weight_from_row(row: dict[str, str], mode: str) -> float:
 def _probe_csv_columns_for_measured_weights(
     csv_path: Path,
     *,
-    aggregate_spots: bool,
     spot_weight_mode: str,
-    gate_counter_aggregate: bool = False,
 ) -> None:
     swm = normalize_measured_spot_weight_mode(spot_weight_mode)
     with open_acquisition_csv(csv_path) as f:
@@ -144,8 +142,6 @@ def _probe_csv_columns_for_measured_weights(
         fn = pr.fieldnames
         if not fn:
             return
-        if gate_counter_aggregate and GATE_COUNTER_KEY not in fn:
-            raise ValueError(f"aggregate_spots needs a “{GATE_COUNTER_KEY}” column (found {fn!r})")
         has_ch = CHANNEL_SUM_KEY in fn
         if swm == "channel_sum" and not has_ch:
             raise ValueError(
@@ -303,37 +299,136 @@ def gate_counter_aggregated_layer_indices_from_csv(
     return np.asarray(layers, dtype=np.int64)
 
 
-def _apply_gate_spot_aggregation(
-    rows: list[tuple[float, ...]],
-    gates: list[int],
-    sigmas: list[tuple[float | None, float | None]],
-) -> list[tuple[float, ...]]:
-    """Group consecutive odd Gate Counter phases; even gates flush. Returns 7-tuples (last two =
-    σ)."""
-    if not (len(rows) == len(gates) == len(sigmas)):
-        raise ValueError("rows, gates, sigmas length mismatch for spot aggregation")
-    out: list[tuple[float, ...]] = []
-    buf: list[_GateSpotBufRow] = []
+def _gate_phase_spot_ids_for_rows(gates: Sequence[int]) -> list[int]:
+    """Monotonic spot id per row from Gate Counter (odd=on-spot; even → ``-1``)."""
+    spot_ids: list[int] = []
+    cur = -1
     prev_g: int | None = None
-
-    def flush() -> None:
-        if not buf:
-            return
-        out.append(_finalize_spot_channel_weighted(buf))
-        buf.clear()
-
-    for r, g, (sa, sb) in zip(rows, gates, sigmas):
+    for g in gates:
+        if g < 0:
+            spot_ids.append(-1)
+            continue
         if g % 2 == 0:
-            flush()
+            if prev_g is not None and prev_g % 2 == 1:
+                cur += 1
+            spot_ids.append(-1)
             prev_g = g
             continue
         if prev_g is not None and prev_g % 2 == 1 and g != prev_g:
-            flush()
+            cur += 1
+        elif cur < 0:
+            cur = 0
+        spot_ids.append(cur)
         prev_g = g
-        ch_n = float(r[7]) if len(r) > 7 else float(r[3])
-        buf.append((r[0], r[1], r[2], r[3], r[4], sa, sb, ch_n))
-    flush()
+    return spot_ids
+
+
+def _aggregate_rows_by_spot_id_map(
+    rows: list[tuple[float, ...]],
+    spot_ids: Sequence[int],
+) -> dict[int, tuple[float, ...]]:
+    """Weighted mean per ``spot_id``; keys are spot ids with at least one row."""
+    if len(rows) != len(spot_ids):
+        raise ValueError(
+            f"rows and spot_ids length mismatch ({len(rows)} vs {len(spot_ids)})"
+        )
+    buckets: dict[int, list[_GateSpotBufRow]] = {}
+    for row, sid in zip(rows, spot_ids):
+        if sid < 0:
+            continue
+        buf_row = _measured_tuple_for_spot_weighted_mean(row)
+        if sid not in buckets:
+            buckets[sid] = []
+        buckets[sid].append(buf_row)
+    return {sid: _finalize_spot_channel_weighted(buf) for sid, buf in buckets.items()}
+
+
+def aggregate_measured_rows_by_spot_id(
+    rows: list[tuple[float, ...]],
+    spot_ids: Sequence[int],
+) -> list[tuple[float, ...]]:
+    """Post-assignment weighted mean per ``spot_id``; first-seen group order."""
+    if not rows:
+        return []
+    order: list[int] = []
+    seen: set[int] = set()
+    for sid in spot_ids:
+        if sid < 0 or sid in seen:
+            continue
+        seen.add(sid)
+        order.append(sid)
+    by_id = _aggregate_rows_by_spot_id_map(rows, spot_ids)
+    return [by_id[sid] for sid in order if sid in by_id]
+
+
+def _plan_sequential_aggregated_per_plan_spot(
+    rows: list[tuple[float, ...]],
+    spot_ids: Sequence[int],
+    *,
+    n_plan_spots: int,
+    planned_xyz: list[tuple[float, float, float]],
+    spots_per_layer: Sequence[int],
+    a_is_x: bool,
+) -> list[tuple[float, ...]]:
+    """One output row per plan delivery index (0 … n_plan-1); nominal layer from plan order."""
+    from spot_check.analysis.layers import delivery_layer_indices
+
+    plan_layer = delivery_layer_indices(n_plan_spots, spots_per_layer)
+    by_pi = _aggregate_rows_by_spot_id_map(rows, spot_ids)
+    out: list[tuple[float, ...]] = []
+    for i in range(n_plan_spots):
+        layer_i = float(int(plan_layer[i]))
+        t = by_pi.get(i)
+        if t is None:
+            px, py, _ = planned_xyz[i]
+            a, b = _ab_from_plan_xy(float(px), float(py), a_is_x=a_is_x)
+            out.append(
+                _measured_row_with_sigma(
+                    a,
+                    b,
+                    layer_i,
+                    1e-18,
+                    0,
+                    None,
+                    None,
+                    channel_sum_na=1e-18,
+                )
+            )
+            continue
+        a, b = float(t[0]), float(t[1])
+        if not (math.isfinite(a) and math.isfinite(b)):
+            px, py, _ = planned_xyz[i]
+            a, b = _ab_from_plan_xy(float(px), float(py), a_is_x=a_is_x)
+        lay = float(t[2])
+        if not math.isfinite(lay):
+            lay = layer_i
+        sa = float(t[5]) if len(t) > 5 and math.isfinite(float(t[5])) else None
+        sb = float(t[6]) if len(t) > 6 and math.isfinite(float(t[6])) else None
+        ch = float(t[7]) if len(t) > 7 and math.isfinite(float(t[7])) else float(t[3])
+        out.append(
+            _measured_row_with_sigma(
+                a,
+                b,
+                lay,
+                float(t[3]),
+                int(t[4]),
+                sa,
+                sb,
+                channel_sum_na=ch,
+            )
+        )
     return out
+
+
+def _aggregate_assigned_rows(
+    rows: list[tuple[float, ...]],
+    spot_ids: Sequence[int],
+    *,
+    aggregate_spots: bool,
+) -> list[tuple[float, ...]]:
+    if not aggregate_spots:
+        return rows
+    return aggregate_measured_rows_by_spot_id(rows, spot_ids)
 
 def _measured_tuple_for_spot_weighted_mean(
     t: tuple[float, ...],
@@ -376,6 +471,7 @@ def measured_spot_abc_from_csv(
     auto_infer_params: bool = True,
     auto_assign_method: str = "episodes",
     heal_partial_fit_axes: bool = False,
+    align_detector_xy_before_assign: bool = False,
 ) -> list[tuple[float, ...]]:
     """Measured rows as (A mm, B mm, layer index, spot weight, partial code).
 
@@ -395,17 +491,22 @@ def measured_spot_abc_from_csv(
     rows are assigned in **plan delivery order** (spot 0 = first spot of the highest-energy layer);
     after each deadtime break (no fit on either position axis), assignment advances by exactly one
     plan slot once the current spot has at least one row (no skipped plan indices).
-    Layers then match gate_counter plan-slot indexing. With ``aggregate_spots=True``, each spot
-    span becomes one **weighted-mean** row; when False, every on-spot CSV row is kept.
+    Layers then match gate_counter plan-slot indexing.
 
     When ``auto_infer_params`` is True (default), episode gap, XY jump, on-spot weight floor,
     min episode rows, and Viterbi advance penalty are derived from the CSV timing/weights and
     plan geometry (:func:`infer_auto_layer_params`); explicit ``auto_*`` / ``viterbi_*`` kwargs
     are ignored. Set ``auto_infer_params=False`` to use the keyword values (tests, scripts).
 
-    In **gate_counter** mode with ``aggregate_spots=True``, requires ``Gate Counter`` on the CSV;
-    each contiguous run of rows with the same **odd** gate value is one spot (even gate closes a
-    spot). Aggregated rows use weighted means of position, layer, and σ.
+    **Pre-assignment detector align** (``align_detector_xy_before_assign=True``): rigid 2D map on
+    flattened plan + on-spot measured XY before episode or plan-sequential assignment (``auto``
+    only). Use when the detector frame is misaligned; post-assignment align only moves A/B after
+    indices are fixed.
+
+    **Spot aggregation** (``aggregate_spots=True``) runs after assignment: rows with the same
+    assignment id are collapsed via :func:`aggregate_measured_rows_by_spot_id` (weighted means of
+    A/B, layer, σ, and weight). Ids come from the assignment stage (episode/span index, gate-counter
+    spot phase, time-gap delivery spot, or gate phases when that column is present).
     """
     mode = layer_mode.strip().lower().replace("-", "_")
     if mode not in ("time_gap", "plan_viterbi", "auto", "gate_counter"):
@@ -415,12 +516,7 @@ def measured_spot_abc_from_csv(
 
     swm = normalize_measured_spot_weight_mode(spot_weight_mode)
 
-    _probe_csv_columns_for_measured_weights(
-        csv_path,
-        aggregate_spots=aggregate_spots,
-        spot_weight_mode=swm,
-        gate_counter_aggregate=aggregate_spots and mode == "gate_counter",
-    )
+    _probe_csv_columns_for_measured_weights(csv_path, spot_weight_mode=swm)
     if mode == "time_gap":
         if layer_gap_s <= 0:
             raise ValueError("layer_gap_s must be > 0")
@@ -519,13 +615,8 @@ def measured_spot_abc_from_csv(
                 sig_acc.append(
                     (_opt_float_cell(row, SIGMA_A_KEY), _opt_float_cell(row, SIGMA_B_KEY))
                 )
-                if aggregate_spots:
-                    g_cell = _gate_int_from_row(row, GATE_COUNTER_KEY)
-                    if g_cell is None:
-                        raise ValueError(
-                            f"aggregate_spots: missing/invalid {GATE_COUNTER_KEY!r} on a fit row"
-                        )
-                    gates_acc.append(g_cell)
+                g_cell = _gate_int_from_row(row, GATE_COUNTER_KEY)
+                gates_acc.append(int(g_cell) if g_cell is not None else -1)
                 if max_points is not None and len(ab_buf) >= max_points:
                     break
         if not ab_buf:
@@ -564,14 +655,16 @@ def measured_spot_abc_from_csv(
                     a, b, float(efi), wch, pcd, sa, sb, channel_sum_na=ch_n
                 )
             )
-        if aggregate_spots:
-            return _apply_gate_spot_aggregation(out, gates_acc, sig_acc)
-        return out
+        agg_ids = (
+            _gate_phase_spot_ids_for_rows(gates_acc)
+            if any(g >= 0 for g in gates_acc)
+            else [int(layers_idx[i]) for i in range(len(out))]
+        )
+        return _aggregate_assigned_rows(out, agg_ids, aggregate_spots=aggregate_spots)
 
     if mode == "auto":
         from spot_check.analysis.auto_columns import load_auto_fit_columns_from_csv
         from spot_check.analysis.episodes import (
-            aggregate_spans_batch,
             cols_with_delivery_weights,
             segment_align_auto_columns,
         )
@@ -600,6 +693,15 @@ def measured_spot_abc_from_csv(
         )
         if len(cols) == 0:
             return []
+
+        if align_detector_xy_before_assign:
+            from spot_check.analysis.alignment import align_auto_fit_columns_to_plan_xy
+
+            cols, _pre_align = align_auto_fit_columns_to_plan_xy(
+                cols,
+                planned_xyz,  # type: ignore[arg-type]
+                a_is_x=a_is_x,
+            )
 
         n_plan_spots = len(planned_xyz)  # type: ignore[arg-type]
         spots_per_layer = [
@@ -657,7 +759,7 @@ def measured_spot_abc_from_csv(
             plan_idx = assign_plan_indices_sequential(
                 cols,
                 plan_xy2,
-                min_rows_on_spot=min_rows,
+                min_rows_on_spot=1,
                 cluster_radius_mm2=plan_seq_radius_mm2,
             )
             aligned_groups = sequential_spans_from_plan_indices(plan_idx)
@@ -666,7 +768,6 @@ def measured_spot_abc_from_csv(
             layers_idx_auto = plan_layers[spot_pi]
 
         cols_w = cols_with_delivery_weights(cols)
-        aggs = aggregate_spans_batch(cols_w, aligned_groups)
 
         hi_auto = max_layer
 
@@ -677,77 +778,72 @@ def measured_spot_abc_from_csv(
                 return hi_auto
             return efi
 
-        if not aggregate_spots:
-            out_rows: list[tuple[float, ...]] = []
-            for ei, (s, e) in enumerate(aligned_groups):
-                efi = _clamp_layer(int(layers_idx_auto[ei]))
-                lk_ref = layer_lks[efi] if efi < len(layer_lks) else None
-                if lk_ref is None:
-                    lk_ref = global_lk
-                for ri in range(s, e):
-                    pcd = int(cols.pcd[ri])
-                    mx_pp = float(cols.mx_p[ri])
-                    my_pp = float(cols.my_p[ri])
-                    if pcd == 0:
-                        a_fin, b_fin = float(cols.a[ri]), float(cols.b[ri])
-                    else:
-                        mx_f, my_f = _impute_plan_axis_fast(
-                            lk_ref,
-                            mx_pp if mx_pp == mx_pp else None,
-                            my_pp if my_pp == my_pp else None,
-                        )
-                        a_fin, b_fin = _ab_from_plan_xy(mx_f, my_f, a_is_x=a_is_x)
-                    sa_v = float(cols.sa[ri])
-                    sb_v = float(cols.sb[ri])
-                    sa = sa_v if sa_v == sa_v else None
-                    sb = sb_v if sb_v == sb_v else None
-                    wch = float(cols_w.weight[ri])
-                    ch_n = float(cols_w.ch_n[ri])
-                    out_rows.append(
-                        _measured_row_with_sigma(
-                            a_fin,
-                            b_fin,
-                            float(efi),
-                            wch,
-                            pcd,
-                            sa,
-                            sb,
-                            channel_sum_na=ch_n,
-                        )
-                    )
-                    if max_points is not None and len(out_rows) >= max_points:
-                        return out_rows
-            return out_rows
-
-        ab_buf_auto = [(a.a, a.b) for a in aggs]
-        w_buf_auto = [a.weight for a in aggs]
-        ch_buf_auto = [a.ch_n for a in aggs]
-        partial_codes_auto = [a.pcd for a in aggs]
-        partial_plan_xy_auto = [(a.mx_pp, a.my_pp) for a in aggs]
-        sig_acc_auto = [(a.sa, a.sb) for a in aggs]
-
-        for i, (mx_pp2, my_pp2) in enumerate(partial_plan_xy_auto):
-            if partial_codes_auto[i] == 0:
-                continue
-            efi = _clamp_layer(int(layers_idx_auto[i]))
-            lk_ref = layer_lks[efi]
+        out_rows: list[tuple[float, ...]] = []
+        spot_ids: list[int] = []
+        for ei, (s, e) in enumerate(aligned_groups):
+            efi = _clamp_layer(int(layers_idx_auto[ei]))
+            lk_ref = layer_lks[efi] if efi < len(layer_lks) else None
             if lk_ref is None:
                 lk_ref = global_lk
-            mx_f, my_f = _impute_plan_axis_fast(lk_ref, mx_pp2, my_pp2)
-            ab_buf_auto[i] = _ab_from_plan_xy(mx_f, my_f, a_is_x=a_is_x)
-
-        out_auto: list[tuple[float, ...]] = []
-        for i, ((a, b), ell, wch, ch_n, pcd) in enumerate(
-            zip(ab_buf_auto, layers_idx_auto, w_buf_auto, ch_buf_auto, partial_codes_auto)
-        ):
-            efi = _clamp_layer(int(ell))
-            sa, sb = sig_acc_auto[i]
-            out_auto.append(
-                _measured_row_with_sigma(
-                    a, b, float(efi), wch, pcd, sa, sb, channel_sum_na=ch_n
+            for ri in range(s, e):
+                pcd = int(cols.pcd[ri])
+                mx_pp = float(cols.mx_p[ri])
+                my_pp = float(cols.my_p[ri])
+                if pcd == 0:
+                    a_fin, b_fin = float(cols.a[ri]), float(cols.b[ri])
+                else:
+                    mx_f, my_f = _impute_plan_axis_fast(
+                        lk_ref,
+                        mx_pp if mx_pp == mx_pp else None,
+                        my_pp if my_pp == my_pp else None,
+                    )
+                    a_fin, b_fin = _ab_from_plan_xy(mx_f, my_f, a_is_x=a_is_x)
+                sa_v = float(cols.sa[ri])
+                sb_v = float(cols.sb[ri])
+                sa = sa_v if sa_v == sa_v else None
+                sb = sb_v if sb_v == sb_v else None
+                wch = float(cols_w.weight[ri])
+                ch_n = float(cols_w.ch_n[ri])
+                out_rows.append(
+                    _measured_row_with_sigma(
+                        a_fin,
+                        b_fin,
+                        float(efi),
+                        wch,
+                        pcd,
+                        sa,
+                        sb,
+                        channel_sum_na=ch_n,
+                    )
                 )
+                if assign_m_run == "plan_sequential":
+                    spot_ids.append(int(plan_idx[ri]))
+                else:
+                    spot_ids.append(ei)
+                if max_points is not None and len(out_rows) >= max_points:
+                    if assign_m_run == "plan_sequential" and aggregate_spots:
+                        return _plan_sequential_aggregated_per_plan_spot(
+                            out_rows,
+                            spot_ids,
+                            n_plan_spots=n_plan_spots,
+                            planned_xyz=planned_xyz,  # type: ignore[arg-type]
+                            spots_per_layer=spots_per_layer,
+                            a_is_x=a_is_x,
+                        )
+                    return out_rows
+
+        if assign_m_run == "plan_sequential" and aggregate_spots:
+            return _plan_sequential_aggregated_per_plan_spot(
+                out_rows,
+                spot_ids,
+                n_plan_spots=n_plan_spots,
+                planned_xyz=planned_xyz,  # type: ignore[arg-type]
+                spots_per_layer=spots_per_layer,
+                a_is_x=a_is_x,
             )
-        return out_auto
+        return _aggregate_assigned_rows(
+            out_rows, spot_ids, aggregate_spots=aggregate_spots
+        )
 
     if mode == "gate_counter":
         if not layer_energies or max_layer is None:
@@ -771,11 +867,11 @@ def measured_spot_abc_from_csv(
         layer_lks_gc = _plan_impute_lookups_per_layer(layer_xy_gc)
         hi_gc = max_layer
         out_gc: list[tuple[float, ...]] = []
-        spot_buf_gc: list[tuple[float, float, float, float, int, float | None, float | None]] = []
+        spot_ids_gc: list[int] = []
         prev_gate: int | None = None
+        spot_id_gc = -1
         i_spot = 0
         eff_li = 0
-        n_gc_raw = 0
         fa_key = "Fit Amplitude A (nA)"
         a_key = "Fit Mean Position A (mm)"
         b_key = "Fit Mean Position B (mm)"
@@ -797,17 +893,10 @@ def measured_spot_abc_from_csv(
                 except ValueError:
                     continue
                 if g != prev_gate:
-                    if aggregate_spots:
-                        if prev_gate is not None and prev_gate % 2 == 1 and spot_buf_gc:
-                            out_gc.append(_finalize_spot_channel_weighted(spot_buf_gc))
-                            spot_buf_gc.clear()
-                        if g % 2 == 1:
-                            eff_li = max(0, min(bisect.bisect_right(cumul, i_spot) - 1, hi_gc))
-                            i_spot += 1
-                    else:
-                        if g % 2 == 1:
-                            eff_li = max(0, min(bisect.bisect_right(cumul, i_spot) - 1, hi_gc))
-                            i_spot += 1
+                    if g % 2 == 1:
+                        spot_id_gc += 1
+                        eff_li = max(0, min(bisect.bisect_right(cumul, i_spot) - 1, hi_gc))
+                        i_spot += 1
                     prev_gate = g
                 if g % 2 == 0:
                     continue
@@ -826,37 +915,30 @@ def measured_spot_abc_from_csv(
                 ch_n = _channel_sum_na_from_row(row)
                 sa = _opt_float_cell(row, SIGMA_A_KEY)
                 sb = _opt_float_cell(row, SIGMA_B_KEY)
-                if aggregate_spots:
-                    spot_buf_gc.append((a_fin, b_fin, float(eff_li), w_ch, int(pcd), sa, sb, ch_n))
-                    n_gc_raw += 1
-                    if max_points is not None and n_gc_raw >= max_points:
-                        if spot_buf_gc:
-                            out_gc.append(_finalize_spot_channel_weighted(spot_buf_gc))
-                            spot_buf_gc.clear()
-                        break
-                else:
-                    out_gc.append(
-                        _measured_row_with_sigma(
-                            a_fin,
-                            b_fin,
-                            float(eff_li),
-                            w_ch,
-                            int(pcd),
-                            sa,
-                            sb,
-                            channel_sum_na=ch_n,
-                        )
+                out_gc.append(
+                    _measured_row_with_sigma(
+                        a_fin,
+                        b_fin,
+                        float(eff_li),
+                        w_ch,
+                        int(pcd),
+                        sa,
+                        sb,
+                        channel_sum_na=ch_n,
                     )
-                    if max_points is not None and len(out_gc) >= max_points:
-                        break
-        if aggregate_spots and spot_buf_gc:
-            out_gc.append(_finalize_spot_channel_weighted(spot_buf_gc))
-        return out_gc
+                )
+                spot_ids_gc.append(spot_id_gc)
+                if max_points is not None and len(out_gc) >= max_points:
+                    break
+        return _aggregate_assigned_rows(
+            out_gc, spot_ids_gc, aggregate_spots=aggregate_spots
+        )
 
     out: list[tuple[float, ...]] = []
+    spot_ids_tg: list[int] = []
     gates_tg: list[int] = []
-    sig_tg: list[tuple[float | None, float | None]] = []
     layer = 0
+    timing_spot_id = 0
     prev_t: float | None = None
     prev_mx: float | None = None
     prev_my: float | None = None
@@ -918,6 +1000,7 @@ def measured_spot_abc_from_csv(
                     and float(np.hypot(mx - prev_mx, my - prev_my)) <= refill_same_spot_xy_tol_mm
                 )
                 if not same_spot_refill:
+                    timing_spot_id += 1
                     if max_layer is None:
                         layer += 1
                     elif layer < max_layer and layer_energies and planned_xyz is not None:
@@ -947,19 +1030,18 @@ def measured_spot_abc_from_csv(
                     channel_sum_na=_channel_sum_na_from_row(row),
                 )
             )
-            if aggregate_spots:
-                g_cell = _gate_int_from_row(row, GATE_COUNTER_KEY)
-                if g_cell is None:
-                    raise ValueError(
-                        f"aggregate_spots: missing/invalid {GATE_COUNTER_KEY!r} on a fit row"
-                    )
-                gates_tg.append(g_cell)
-                sig_tg.append((sa, sb))
+            g_cell = _gate_int_from_row(row, GATE_COUNTER_KEY)
+            gates_tg.append(int(g_cell) if g_cell is not None else -1)
+            spot_ids_tg.append(timing_spot_id)
             prev_t = t
             prev_mx, prev_my = mx, my
             if max_points is not None and len(out) >= max_points:
                 break
 
-    if aggregate_spots:
-        return _apply_gate_spot_aggregation(out, gates_tg, sig_tg)
-    return out
+    return _aggregate_assigned_rows(
+        out,
+        _gate_phase_spot_ids_for_rows(gates_tg)
+        if aggregate_spots and any(g >= 0 for g in gates_tg)
+        else spot_ids_tg,
+        aggregate_spots=aggregate_spots,
+    )

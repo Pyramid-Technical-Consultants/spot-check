@@ -111,20 +111,26 @@ def layer_nn_plan_xy_distances_and_expected_xyz(
         arr = np.asarray(layer_xyz[ell], dtype=np.float64).reshape(-1, 3)
         if arr.shape[0] == 0:
             continue
-        q = meas_xy[mask]
+        q = np.asarray(meas_xy[mask], dtype=np.float64).reshape(-1, 2)
+        finite = np.isfinite(q).all(axis=1)
+        if not np.any(finite):
+            continue
+        sub = np.flatnonzero(mask)
+        sub_fin = sub[finite]
+        qf = q[finite]
         tree = trees[ell] if ell < len(trees) else None
         if tree is not None:
-            dist, idx = _kdtree_query_k1(tree, q)
+            dist, idx = _kdtree_query_k1(tree, qf)
             dist = np.asarray(dist, dtype=np.float64).reshape(-1)
             idx = np.asarray(idx, dtype=np.intp).reshape(-1)
-            out_d[mask] = dist
-            out_xyz[mask] = arr[idx]
+            out_d[sub_fin] = dist
+            out_xyz[sub_fin] = arr[idx]
         else:
             xy_layer = arr[:, 0:2]
-            d2 = np.sum((xy_layer[None, :, :] - q[:, None, :]) ** 2, axis=2)
+            d2 = np.sum((xy_layer[None, :, :] - qf[:, None, :]) ** 2, axis=2)
             j = np.argmin(d2, axis=1)
-            out_d[mask] = np.sqrt(d2[np.arange(q.shape[0], dtype=np.intp), j])
-            out_xyz[mask] = arr[j]
+            out_d[sub_fin] = np.sqrt(d2[np.arange(qf.shape[0], dtype=np.intp), j])
+            out_xyz[sub_fin] = arr[j]
     return out_d, out_xyz
 
 def layer_nn_plan_match_for_measured(
@@ -181,17 +187,23 @@ def layer_nn_plan_match_for_measured(
         mu_arr = np.asarray(mu_buckets[ell], dtype=np.float64).reshape(-1)
         if arr.shape[0] == 0 or mu_arr.shape[0] != arr.shape[0]:
             continue
-        q = meas_xy[mask]
+        q = np.asarray(meas_xy[mask], dtype=np.float64).reshape(-1, 2)
+        finite = np.isfinite(q).all(axis=1)
+        if not np.any(finite):
+            continue
+        sub = np.flatnonzero(mask)
+        sub_fin = sub[finite]
+        qf = q[finite]
         tree = trees[ell] if ell < len(trees) else None
         if tree is not None:
-            _dist, idx = _kdtree_query_k1(tree, q)
+            _dist, idx = _kdtree_query_k1(tree, qf)
             idx = np.asarray(idx, dtype=np.intp).reshape(-1)
-            exp_mu[mask] = mu_arr[idx]
+            exp_mu[sub_fin] = mu_arr[idx]
         else:
             xy_layer = arr[:, 0:2]
-            d2 = np.sum((xy_layer[None, :, :] - q[:, None, :]) ** 2, axis=2)
+            d2 = np.sum((xy_layer[None, :, :] - qf[:, None, :]) ** 2, axis=2)
             j = np.argmin(d2, axis=1)
-            exp_mu[mask] = mu_arr[j]
+            exp_mu[sub_fin] = mu_arr[j]
     return dist, exp_xyz, exp_mu
 
 def distances_measured_xy_to_layer_nn_plan_mm(
@@ -344,19 +356,25 @@ def _layer_nn_plan_targets(
         if arr.shape[0] == 0:
             continue
         q = np.asarray(meas_xy[mask], dtype=np.float64).reshape(-1, 2)
+        finite = np.isfinite(q).all(axis=1)
+        if not np.any(finite):
+            continue
+        sub = np.flatnonzero(mask)
+        sub_fin = sub[finite]
+        qf = q[finite]
         tree = trees[int(ell)] if int(ell) < len(trees) else None
         if tree is not None:
-            _, idx = _kdtree_query_k1(tree, q)
+            _, idx = _kdtree_query_k1(tree, qf)
             idx = np.asarray(idx, dtype=np.intp).reshape(-1)
-            m_out[mask] = q
-            p_out[mask] = arr[idx]
-            keep[mask] = True
+            m_out[sub_fin] = qf
+            p_out[sub_fin] = arr[idx]
+            keep[sub_fin] = True
         else:
-            d2 = np.sum((arr[None, :, :] - q[:, None, :]) ** 2, axis=2)
+            d2 = np.sum((arr[None, :, :] - qf[:, None, :]) ** 2, axis=2)
             j = np.argmin(d2, axis=1)
-            m_out[mask] = q
-            p_out[mask] = arr[j]
-            keep[mask] = True
+            m_out[sub_fin] = qf
+            p_out[sub_fin] = arr[j]
+            keep[sub_fin] = True
     if not np.any(keep):
         return np.zeros((0, 2), dtype=np.float64), np.zeros((0, 2), dtype=np.float64)
     return m_out[keep], p_out[keep]

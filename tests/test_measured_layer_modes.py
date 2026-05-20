@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import math
 from pathlib import Path
 
 import pytest
@@ -98,6 +99,19 @@ def test_measured_spot_abc_gate_counter_aggregate(tmp_path: Path) -> None:
         a_is_x=False,
     )
     assert len(rows) >= 1
+
+
+def test_align_measured_single_row() -> None:
+    planned = [(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)]
+    measured = [(1.0, 2.0, 0.0, 1.0, 0, float("nan"), float("nan"), 1.0)]
+    aligned, info = analysis.align_measured_to_plan_detector_xy(
+        planned,
+        measured,
+        a_is_x=False,
+    )
+    assert len(aligned) == 1
+    assert math.isfinite(float(aligned[0][0]))
+    assert info.n_pairs == 1
 
 
 def test_align_measured_to_plan_detector_xy_uses_plan_layers(

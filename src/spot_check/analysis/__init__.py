@@ -15,15 +15,15 @@ Acquisition CSVs may include a ``Gate Signal`` column (e.g. IC256); it is **neve
 Only ``Gate Counter`` is used, and only in **gate_counter** mode / optional aggregation.
 
 - **time_gap** — ``TIME_LAYER_GAP_S_DEFAULT`` plus refill heuristics (constants below).
-  ``Gate Counter`` is ignored unless ``aggregate_spots=True``.
+  ``Gate Counter`` is not used for layer assignment; optional post-assignment aggregation
+  groups by delivery spot (timing) or by gate phase when that column is present.
 
 - **auto** — **deadtime** segmentation from a scale-free delivery metric: geometric mean of
   IX512 channel sum and fit amplitude A versus rolling baselines (works across accelerators),
   plan spot-count alignment with optional **plan XY boundary refinement**, then
   delivery-order layers when spot count matches the plan; otherwise proportional spread
-  by episode order (not XY Viterbi). Never reads ``Gate Counter``.
-  With ``aggregate_spots=True``, each episode is one **weighted-mean** spot; when False, every
-  on-spot CSV row is plotted and shares the episode layer.
+  by episode order (not XY Viterbi). Never reads ``Gate Counter`` for assignment.
+  Optional ``aggregate_spots`` collapses rows per assigned episode/span after layers are set.
 
 - **plan_viterbi** — global decode: each row keeps measured A/B; layer index comes from
   a monotone path (stay or +1 layer) minimizing distance-to-plan, plus a penalty for
@@ -39,20 +39,17 @@ near the **same plan XY** as the last row before the gap (``REFILL_SAME_SPOT_XY_
 otherwise a step may occur when the next slice explains XY better
 (``_layer_advance_plausible_vs_refill``).
 
-**Spot aggregation (optional):** when ``aggregate_spots=True``, each run of consecutive rows with
-the same **odd** ``Gate Counter`` value is one delivered spot (**even** gate ends the spot).
-Rows in that run collapse to one point: **weighted means** of fit mean positions
-(after imputation), nominal layer index, and fit σ_A / σ_B when present. Weights come from
-``spot_weight_mode``: IX512 channel sum and/or Fit Amplitude A/B columns (see
-:func:`measured_spot_weight_from_row`). Each measured row is a 7-tuple
-``(..., σ_A, σ_B)`` (σ may be NaN); aggregation replaces runs with one weighted-mean row.
+**Spot aggregation (optional):** after assignment, :func:`aggregate_measured_rows_by_spot_id`
+merges rows that share the same spot-assignment id into one **weighted-mean** point (A/B, layer,
+σ, weight from ``spot_weight_mode``). Grouping ids come from the active assignment mode (episode
+span, gate-counter spot phase, time-gap delivery spot, etc.), not from a separate CSV pass.
 
-**Detector XY alignment (optional):** :func:`align_measured_to_plan_detector_xy` matches each
-measured row to the nearest plan spot on its assigned nominal layer, then fits a 2D rigid
-transform (rotation + translation) minimizing RMSE to those plan targets and applies it to
-all measured A/B positions in plan coordinates (see :class:`DetectorRigidAlign2D`). Large
-detector rotations (90° and beyond) and A↔B axis swaps are handled via multi-start ICP with
-coarse rotation seeds.
+**Detector XY alignment (optional):** For ``layer_mode='auto'``, enable rigid align in the GUI
+to run **before** assignment on flattened 2D plan + on-spot measured XY
+(:func:`align_auto_fit_columns_to_plan_xy`), then assign spots/layers on the corrected
+positions. Other modes use :func:`align_measured_to_plan_detector_xy` after assignment (per-layer
+NN). Both fit a 2D rigid transform (rotation + translation; see :class:`DetectorRigidAlign2D`)
+via multi-start ICP with coarse rotation seeds (90°+ rotations and A↔B axis swaps).
 
 **Plan QA coloring (optional):** colors each measured point from Euclidean XY distance to the
 nearest plan spot on its assigned layer: green ≤ pass mm (default 1), amber between pass and

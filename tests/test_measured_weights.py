@@ -38,9 +38,7 @@ def test_probe_allows_fit_amp_b_without_b_column_when_channel_sum_present(tmp_pa
                 GATE_COUNTER_KEY: "1",
             }
         )
-    _probe_csv_columns_for_measured_weights(
-        p, aggregate_spots=True, spot_weight_mode="fit_amplitude_b"
-    )
+    _probe_csv_columns_for_measured_weights(p, spot_weight_mode="fit_amplitude_b")
 
 
 def test_probe_rejects_fit_amp_b_without_b_or_channel_sum(tmp_path: Path) -> None:
@@ -50,9 +48,7 @@ def test_probe_rejects_fit_amp_b_without_b_or_channel_sum(tmp_path: Path) -> Non
         w.writeheader()
         w.writerow({FIT_AMPLITUDE_A_KEY: "1", GATE_COUNTER_KEY: "1"})
     with pytest.raises(ValueError, match="Fit Amplitude B"):
-        _probe_csv_columns_for_measured_weights(
-            p, aggregate_spots=False, spot_weight_mode="fit_amplitude_b"
-        )
+        _probe_csv_columns_for_measured_weights(p, spot_weight_mode="fit_amplitude_b")
 
 
 def test_measured_spot_weight_from_row_falls_back_to_channel_sum() -> None:

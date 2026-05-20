@@ -505,17 +505,20 @@ class SpotCheckController:
             if lam == "auto_plan_sequential":
                 help_lbl.setText(
                     "Auto plan-sequential: assign from the first plan spot (highest energy "
-                    "layer). Deadtime = no fit on Fit Mean Position A or B. After each gap, "
-                    "advance exactly one plan slot (never skip). Gate Counter ignored."
+                    "layer). Deadtime = no fit on Fit Mean Position A or B. Spans are aligned "
+                    "to the plan spot count and boundaries refined with plan XY (+1 only). "
+                    "Gate Counter ignored."
                 )
                 lbl_auto_tuning.setText(
-                    "Advance one plan slot per deadtime break after rows on the current spot."
+                    "Position-fit spans merged to plan count; plan XY refines boundaries."
                 )
+                cb_agg.setEnabled(True)
                 agg_intro_lbl.setText(
-                    "Checked: one weighted-mean row per plan spot assigned above. "
-                    "Unchecked: every on-spot CSV row is kept."
+                    "Checked: one weighted-mean row per plan-sequential span (assigned plan spot). "
+                    "Unchecked: every on-spot CSV row in each span is kept."
                 )
             elif lam == "auto":
+                cb_agg.setEnabled(True)
                 help_lbl.setText(
                     "Auto episodes: segment from timing, weight, and XY "
                     "(Gate Counter and Gate Signal ignored). "
@@ -529,6 +532,7 @@ class SpotCheckController:
                     "Unchecked: every on-spot CSV row is kept."
                 )
             else:
+                cb_agg.setEnabled(True)
                 help_lbl.setText(
                     f'Gate: DICOM order; "{sc_const.GATE_COUNTER_KEY}" odd=spot, even=deadtime; '
                     "new odd advances."
@@ -961,24 +965,32 @@ class SpotCheckController:
             align_note = ""
             align_cache_key = (pipeline_key, bool(cb_align.isChecked()))
             if cb_align.isChecked() and planned and measured:
-                cached_aligned = _plot_cache.get("measured_aligned")
-                cached_align_key = _plot_cache.get("align_cache_key")
-                if cached_aligned is not None and cached_align_key == align_cache_key:
-                    measured = list(cached_aligned)
+                if _plot_cache.get("detector_pre_aligned"):
+                    measured = list(measured_unaligned)
                     info0 = _plot_cache.get("align_info")
                     if info0 is not None:
                         detector_align_caption = p.format_detector_align_caption(info0)
                 else:
-                    try:
-                        measured, align_info = p.align_measured_to_plan_detector_xy(
-                            planned, measured, a_is_x=False
-                        )
-                        _plot_cache["measured_aligned"] = measured
-                        _plot_cache["align_info"] = align_info
-                        _plot_cache["align_cache_key"] = align_cache_key
-                        detector_align_caption = p.format_detector_align_caption(align_info)
-                    except ValueError as ex:
-                        align_note = f" Detector alignment skipped: {ex}"
+                    cached_aligned = _plot_cache.get("measured_aligned")
+                    cached_align_key = _plot_cache.get("align_cache_key")
+                    if cached_aligned is not None and cached_align_key == align_cache_key:
+                        measured = list(cached_aligned)
+                        info0 = _plot_cache.get("align_info")
+                        if info0 is not None:
+                            detector_align_caption = p.format_detector_align_caption(info0)
+                    else:
+                        try:
+                            measured, align_info = p.align_measured_to_plan_detector_xy(
+                                planned, measured, a_is_x=False
+                            )
+                            _plot_cache["measured_aligned"] = measured
+                            _plot_cache["align_info"] = align_info
+                            _plot_cache["align_cache_key"] = align_cache_key
+                            detector_align_caption = p.format_detector_align_caption(
+                                align_info
+                            )
+                        except ValueError as ex:
+                            align_note = f" Detector alignment skipped: {ex}"
             else:
                 _plot_cache["align_cache_key"] = align_cache_key
             QApplication.processEvents()
@@ -1117,11 +1129,15 @@ class SpotCheckController:
                 auto_p = analysis.last_auto_layer_params()
                 if auto_p is not None:
                     if assign_plot == "plan_sequential":
-                        meas_line += " — plan-seq: +1 plan slot per deadtime break"
+                        meas_line += " — plan-seq: one row per plan delivery slot"
                         lbl_auto_tuning.setText(
-                            "Deadtime = no A/B position fit; advance one plan slot per break "
-                            f"(≥{auto_p.min_episode_rows} row(s) on current spot first)."
+                            "Deadtime = no A/B position fit; spans aligned to plan count "
+                            f"(≥{auto_p.min_episode_rows} row(s)/span)."
                         )
+                        if planned and n_plan_kept > 0 and n_meas != n_plan_kept:
+                            meas_line += (
+                                f" — WARNING: {n_meas} measured vs {n_plan_kept} plan spots"
+                            )
                     else:
                         meas_line += (
                             f" — auto Δt≥{auto_p.episode_gap_s:g} s, "
@@ -1147,7 +1163,7 @@ class SpotCheckController:
                 _cap = p.measured_spot_weight_caption(ctx.spot_weight_mode_run)
                 meas_line += f" (one {_cap}-weighted mean per assigned plan spot)"
             elif measured and ctx.aggregate_spots and not aggregate_plot:
-                meas_line += " (aggregation requested but not applied — see layer assignment mode)"
+                meas_line += " (aggregation off for this load)"
             if cb_align.isChecked() and detector_align_caption:
                 meas_line += f". {detector_align_caption}"
             if cb_pqa.isChecked():
@@ -1205,6 +1221,7 @@ class SpotCheckController:
             )
             _plot_cache["measured_aligned"] = ld.measured_aligned
             _plot_cache["align_info"] = ld.align_info
+            _plot_cache["detector_pre_aligned"] = bool(ld.detector_pre_aligned)
             _plot_cache["align_cache_key"] = (
                 (ld.pipeline_key, True) if ld.measured_aligned is not None else None
             )
@@ -1297,6 +1314,10 @@ class SpotCheckController:
                     plan_path=dcm,
                     csv_path=csv_path,
                     aggregate_spots=aggregate_spots,
+                    auto_assign_method=auto_assign_method,
+                )
+                align_before = bool(
+                    cb_align.isChecked() and layer_mode_run == "auto" and planned
                 )
                 measured = analysis.measured_spot_abc_from_csv(
                     csv_path,
@@ -1309,12 +1330,13 @@ class SpotCheckController:
                     auto_infer_params=auto_infer and layer_mode_run == "auto",
                     auto_assign_method=auto_assign_method,
                     heal_partial_fit_axes=bool(cb_heal_partial.isChecked()),
+                    align_detector_xy_before_assign=align_before,
                 )
                 if not measured:
                     status_lbl.setText("Export: no measured rows.")
                     return
-                aligned = bool(cb_align.isChecked())
-                if aligned:
+                aligned = bool(cb_align.isChecked() and planned)
+                if aligned and not align_before:
                     measured, _align_info = analysis.align_measured_to_plan_detector_xy(
                         planned,
                         measured,

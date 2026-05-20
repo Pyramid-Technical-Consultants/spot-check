@@ -48,7 +48,7 @@ def test_run12_plan_sequential_spans_all_nominal_layers() -> None:
     assert int(layers.min()) == 0
     assert int(layers.max()) == n_layers - 1
     assert len(np.unique(layers)) == n_layers
-    assert len(rows) >= n_plan - 1
+    assert len(rows) == n_plan
 
     plan_xy = np.asarray([(p[0], p[1]) for p in planned_xyz], dtype=np.float64)
     lk = _PlanImputeLookup.from_xy(plan_xy)
@@ -67,3 +67,25 @@ def test_run12_plan_sequential_spans_all_nominal_layers() -> None:
     assert bool(seen.all())
 
     assert last_auto_layer_params() is not None
+
+
+@pytest.mark.skipif(
+    not _RUN12.is_file() or not _CUBE_PLAN.is_file(),
+    reason="run12 cube fixture or R20M10 plan not present",
+)
+def test_run12_plan_sequential_detector_align() -> None:
+    """One aggregated row per plan spot must align (finite XY; delivery-order pairs)."""
+    planned_xyz, _, _, _, _ = planned_spot_xyz_and_counts_from_pyramid_csv(_CUBE_PLAN)
+    rows = analysis.measured_spot_abc_from_csv(
+        _RUN12,
+        planned_xyz=planned_xyz,
+        layer_mode="auto",
+        auto_assign_method="plan_sequential",
+        aggregate_spots=True,
+        align_detector_xy_before_assign=True,
+    )
+    assert len(rows) == len(planned_xyz)
+    info = analysis.last_detector_align_info()
+    assert info is not None
+    assert info.pre_assignment
+    assert info.n_pairs >= 2

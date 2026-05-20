@@ -61,3 +61,4 @@ class DetectorRigidAlign2D:
     ab_axes_swapped: bool = False
     icp_iterations: int = 0
     n_pairs_fit: int = 0
+    pre_assignment: bool = False
