@@ -139,15 +139,13 @@ def show_comparison_3d_pyvista(
     wet_mm = max(0.0, float(upstream_wet_shifter_mm)) if use_depth_z else 0.0
     depth_metric = str(z_depth_metric).strip().lower() if use_depth_z else "csda"
     if use_depth_z:
-        plan_pts[:, 2] = nominal_mev_to_plot_z(
+        plan_pts[:, 2] = nominal_depth_to_scene_z_cube(
             plan_pts[:, 2],
-            use_proton_water_depth_mm=True,
             upstream_wet_mm=wet_mm,
             z_depth_metric=depth_metric,
         )
-        meas_pts[:, 2] = nominal_mev_to_plot_z(
+        meas_pts[:, 2] = nominal_depth_to_scene_z_cube(
             meas_pts[:, 2],
-            use_proton_water_depth_mm=True,
             upstream_wet_mm=wet_mm,
             z_depth_metric=depth_metric,
         )
@@ -607,10 +605,9 @@ def show_comparison_3d_pyvista(
                 return
             actor = pl.renderer.cube_axes_actor
             sb = _cube_axes.get("scene_bounds")
-            ar = _cube_axes.get("axes_ranges")
-            if actor is None or sb is None or ar is None:
+            if actor is None or sb is None:
                 return
-            refresh_pyvista_cube_axes(actor, sb, ar)
+            pin_pyvista_cube_bounds(actor, sb)
 
         def _guarded_pl_update_bounds_axes() -> None:
             _orig_pl_ub()
@@ -685,24 +682,10 @@ def show_comparison_3d_pyvista(
         return b, str(z_spec.ztitle), "%.0f"
 
     def _show_plan_cube_bounds() -> None:
-        """Bare ``bounds == axes_ranges`` first (Qt shows ticks), then flip Z label range only."""
+        """Bare cube test: ``bounds == axes_ranges`` only (split Z drops labels in Qt)."""
         bounds_axes, cube_ztitle, _fmt = _plan_cube_bounds()
         _cube_axes["scene_bounds"] = bounds_axes
-        if _cube_axes.get("sanity"):
-            axes_ranges = bounds_axes
-        else:
-            z_spec = _cube_axes.get("z_spec")
-            if z_spec is None:
-                axes_ranges = bounds_axes
-            else:
-                axes_ranges = cube_axes_ranges(
-                    float(x_min),
-                    float(x_max),
-                    float(y_min),
-                    float(y_max),
-                    z_spec,
-                )
-        _cube_axes["axes_ranges"] = axes_ranges
+        _cube_axes["axes_ranges"] = bounds_axes
         pl.show_bounds(
             mesh=None,
             bounds=bounds_axes,
@@ -721,15 +704,10 @@ def show_comparison_3d_pyvista(
         actor = pl.renderer.cube_axes_actor
         if actor is not None:
             disable_pyvista_cube_axes_label_lod(actor)
-            if axes_ranges != bounds_axes:
-                actor.z_axis_range = (
-                    float(axes_ranges[4]),
-                    float(axes_ranges[5]),
-                )
-                try:
-                    actor.z_label_visibility = True
-                except Exception:
-                    pass
+            try:
+                actor.z_label_visibility = True
+            except Exception:
+                pass
         _cube_axes["actor"] = actor
         try:
             pl.render()
@@ -931,11 +909,6 @@ def show_comparison_3d_pyvista(
             f"Layers: Viterbi vs plan, advance penalty {_vp:g} mm^2."
         )
     elif _lm == "auto":
-        _vp = (
-            VITERBI_LAYER_ADVANCE_PENALTY_MM2_DEFAULT
-            if viterbi_advance_penalty_mm2 is None
-            else viterbi_advance_penalty_mm2
-        )
         _gap = TIME_LAYER_GAP_S_DEFAULT if layer_gap_s is None else layer_gap_s
         _xytol = (
             REFILL_SAME_SPOT_XY_TOLERANCE_MM
@@ -944,8 +917,8 @@ def show_comparison_3d_pyvista(
         )
         caption = (
             f"n_plan={plan_pts.shape[0]}, n_meas={n_m}, MeV [{prep.e_lo:.1f}, {prep.e_hi:.1f}]. "
-            f"Layers: auto episodes (Δt≥{_gap:g} s or XY step>{_xytol:g} mm starts new episode); "
-            f"Viterbi advance {_vp:g} mm^2."
+            f"Layers: auto deadtime episodes; acquisition time, layer 0 = highest energy "
+            f"(Δt≥{_gap:g} s segment gaps)."
         )
     elif _lm == "gate_counter":
         caption = (

@@ -34,16 +34,30 @@ def cube_axes_ranges(
     )
 
 
+def pin_pyvista_cube_bounds(
+    actor: Any,
+    bounds: tuple[float, float, float, float, float, float],
+) -> None:
+    """Re-pin full-plan cube bounds after VTK ``update_bounds_axes``."""
+    if hasattr(actor, "bounds"):
+        actor.bounds = bounds
+    else:
+        actor.SetBounds(bounds)
+    try:
+        actor.z_label_visibility = True
+        actor.x_label_visibility = True
+        actor.y_label_visibility = True
+    except Exception:
+        pass
+    disable_pyvista_cube_axes_label_lod(actor)
+
+
 def refresh_pyvista_cube_axes(
     actor: Any,
     bounds: tuple[float, float, float, float, float, float],
     axes_ranges: tuple[float, float, float, float, float, float],
 ) -> None:
-    """Re-pin full-plan bounds and Z corner labels after VTK ``update_bounds_axes``.
-
-    Use the PyVista ``bounds`` property (not raw ``SetBounds``) so tick strings regenerate.
-    ``axes_ranges`` Z may differ from scene ``bounds`` (positive MeV/mm at corners).
-    """
+    """Re-pin bounds and axis ranges (unit tests); plotter uses :func:`pin_pyvista_cube_bounds`."""
     if hasattr(actor, "bounds"):
         actor.bounds = bounds
     else:

@@ -200,12 +200,13 @@ def delivery_layer_indices(n_spots: int, spots_per_layer: Sequence[int]) -> np.n
 
 
 def auto_episode_layer_indices(n_episodes: int, spots_per_layer: Sequence[int]) -> np.ndarray:
-    """Spread episodes in acquisition order across nominal layers (proportional to plan).
+    """Map ``n_episodes`` spots listed in **acquisition-time order** to nominal layers.
 
-    Unlike :func:`delivery_layer_indices`, which only fills a prefix of layer 0 when
-    ``n_episodes`` is smaller than ``spots_per_layer[0]``, this maps the full episode stack
-    from layer 0 through the last layer. Used when auto spot-count alignment to the plan fails
-    (e.g. cube IC256 CSV with fewer detected episodes than plan spots).
+    Layer **0** is the highest nominal energy (first energy in the plan); layer index increases
+    as delivery proceeds. Weights follow ``spots_per_layer`` (or MU totals when used upstream).
+
+    Unlike :func:`delivery_layer_indices` (plan slot index), this spreads a short episode
+    stack across all layers instead of leaving a prefix on layer 0 only.
     """
     n = int(n_episodes)
     layers = [int(c) for c in spots_per_layer]
@@ -220,6 +221,23 @@ def auto_episode_layer_indices(n_episodes: int, spots_per_layer: Sequence[int]) 
     edges = np.cumsum(w) / tot
     frac = (np.arange(n, dtype=np.float64) + 0.5) / float(n)
     return np.minimum(np.searchsorted(edges, frac, side="right"), hi).astype(np.int32)
+
+
+def layer_indices_by_acquisition_time(
+    spans: Sequence[tuple[int, int]],
+    spots_per_layer: Sequence[int],
+) -> np.ndarray:
+    """Layer index per spot from span start times (earliest -> layer 0 = highest energy)."""
+    n = len(spans)
+    if n <= 0:
+        return np.zeros(0, dtype=np.int64)
+    starts = np.fromiter((int(s) for s, _ in spans), dtype=np.int64, count=n)
+    order = np.argsort(starts, kind="stable")
+    by_time = auto_episode_layer_indices(n, spots_per_layer).astype(np.int64)
+    out = np.empty(n, dtype=np.int64)
+    for rank, orig in enumerate(order):
+        out[int(orig)] = int(by_time[rank])
+    return out
 
 
 def energies_for_measured_time_layers(

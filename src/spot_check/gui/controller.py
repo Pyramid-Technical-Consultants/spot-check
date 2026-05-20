@@ -47,6 +47,10 @@ from spot_check._version import __version__
 from spot_check.analysis.csv_io import acquisition_csv_stem
 from spot_check.constants import project_root
 from spot_check.export import build_combined_export_rows, write_combined_export_csv
+from spot_check.gui.layer_assign import (
+    normalize_layer_assign_mode,
+    resolve_layer_assign_mode,
+)
 from spot_check.gui.parsers import (
     normalize_z_depth_metric,
     parse_aggregate_even_tail_n,
@@ -146,18 +150,9 @@ class SpotCheckController:
             hint.setMaximumWidth(800)
             return hint
 
-        mode0 = (
+        mode0 = normalize_layer_assign_mode(
             str(saved.get("layer_assign_mode") or "gate_counter")
-            .strip()
-            .lower()
-            .replace("-", "_")
         )
-        if mode0 == "unified":
-            mode0 = "auto"
-        if mode0 in ("time_gap", "plan_viterbi"):
-            mode0 = "gate_counter"
-        if mode0 not in ("auto", "gate_counter"):
-            mode0 = "gate_counter"
 
         e_dcm = QLineEdit(str(saved.get("dcm_path") or ""))
         e_csv = QLineEdit(str(saved.get("csv_path") or ""))
@@ -296,14 +291,25 @@ class SpotCheckController:
         cb_view_proj.setToolTip("On: perspective (default). Off: orthogonal / parallel projection.")
 
         rb_auto = QRadioButton("Auto (signal episodes + plan spot count)")
+        rb_auto_layer_em = QRadioButton("Auto (layer EM — plan MU + XY error)")
         rb_gate = QRadioButton("Gate counter (odd=spot, even=deadtime)")
         layer_grp = QButtonGroup(win)
         layer_grp.addButton(rb_auto)
+        layer_grp.addButton(rb_auto_layer_em)
         layer_grp.addButton(rb_gate)
-        if mode0 == "auto":
+        if mode0 == "auto_layer_em":
+            rb_auto_layer_em.setChecked(True)
+        elif mode0 == "auto":
             rb_auto.setChecked(True)
         else:
             rb_gate.setChecked(True)
+
+        def _layer_assign_mode_from_ui() -> str:
+            if rb_gate.isChecked():
+                return "gate_counter"
+            if rb_auto_layer_em.isChecked():
+                return "auto_layer_em"
+            return "auto"
 
         help_lbl = QLabel()
         help_lbl.setWordWrap(True)
@@ -379,7 +385,7 @@ class SpotCheckController:
             _sync_qa_lines()
 
         def persist() -> None:
-            mode = "auto" if rb_auto.isChecked() else "gate_counter"
+            mode = _layer_assign_mode_from_ui()
             xy_tick_save = parse_bounds_xy_tick_mm(e_bxy.text())
             if xy_tick_save is None:
                 xy_tick_save = float(sc_const.BOUNDS_XY_TICK_MM_DEFAULT)
@@ -499,16 +505,29 @@ class SpotCheckController:
             cb_qa_hide.setEnabled(en)
 
         def _sync_agg_even() -> None:
-            gate_only = not rb_auto.isChecked()
+            gate_only = rb_gate.isChecked()
             e_agg_even.setEnabled(gate_only and cb_agg.isChecked())
 
         def _sync_layer_mode_ui() -> None:
             _sync_agg_even()
 
         def _update_help() -> None:
-            lm = "auto" if rb_auto.isChecked() else "gate_counter"
+            lam = _layer_assign_mode_from_ui()
             _sync_layer_mode_ui()
-            if lm == "auto":
+            if lam == "auto_layer_em":
+                help_lbl.setText(
+                    "Auto (layer EM): plan MU or spot-count fractions set energy-layer "
+                    "boundaries on delivery rows; within each layer, rows partition onto "
+                    "plan XY by weighted error (Gate Counter and Gate Signal ignored)."
+                )
+                lbl_auto_tuning.setText(
+                    "Tuning: layer EM cost — see status line after refresh (no episode infer)."
+                )
+                agg_intro_lbl.setText(
+                    "Merge rows within each assigned plan spot to one weighted-mean spot "
+                    "(per-row when unchecked)."
+                )
+            elif lam == "auto":
                 help_lbl.setText(
                     "Auto: signal episodes from timing, weight, and XY "
                     "(Gate Counter and Gate Signal ignored). "
@@ -580,6 +599,7 @@ class SpotCheckController:
         gb_layer = QGroupBox("Layer assignment")
         vl_layer = QVBoxLayout(gb_layer)
         vl_layer.addWidget(rb_auto)
+        vl_layer.addWidget(rb_auto_layer_em)
         vl_layer.addWidget(rb_gate)
         lbl_auto_tuning = QLabel(
             "Tuning: inferred from plan + CSV when Auto is selected."
@@ -783,6 +803,8 @@ class SpotCheckController:
             "align_cache_key": None,
             "label": "",
             "csv_display_name": "",
+            "layer_mode_run": "",
+            "auto_assign_method": "episodes",
             "plotter": None,
             "aligned": None,
             "z_water_depth": False,
@@ -999,13 +1021,15 @@ class SpotCheckController:
                 pass
             slice_band_init = {"slice_on": _si_on, "center_i": _si_ci}
 
-            layer_mode_plot = str(_plot_cache.get("layer_mode_run") or ctx.layer_mode)
+            layer_mode_req, _, _ = resolve_layer_assign_mode(ctx.layer_assign_mode)
+            layer_mode_plot = str(_plot_cache.get("layer_mode_run") or layer_mode_req)
             aggregate_plot = ctx.aggregate_spots and layer_mode_plot in ("auto", "gate_counter")
 
             auto_gap: float | None = None
             auto_xy: float | None = None
             auto_vp: float | None = None
-            if layer_mode_plot == "auto":
+            assign_plot = str(_plot_cache.get("auto_assign_method") or "episodes")
+            if layer_mode_plot == "auto" and assign_plot == "episodes":
                 auto_p = analysis.last_auto_layer_params()
                 if auto_p is not None:
                     auto_gap = auto_p.episode_gap_s
@@ -1118,27 +1142,39 @@ class SpotCheckController:
             else:
                 meas_line = "Measured: (none)"
             if measured and layer_mode_plot == "auto":
-                auto_p = analysis.last_auto_layer_params()
-                if auto_p is not None:
-                    meas_line += (
-                        f" — auto Δt≥{auto_p.episode_gap_s:g} s, XY>{auto_p.spot_xy_jump_mm:g} mm, "
-                        f"Viterbi {auto_p.viterbi_advance_penalty_mm2:g} mm²"
-                    )
+                if assign_plot == "layer_em":
+                    diag_em = analysis.last_layer_em_diagnostics()
+                    if diag_em is not None:
+                        meas_line += (
+                            f" — layer EM: {diag_em.n_on_rows} on-rows, "
+                            f"{diag_em.n_layers} layers, cost={diag_em.total_cost:.3g}"
+                        )
                     lbl_auto_tuning.setText(
-                        "Inferred: "
-                        f"Δt {auto_p.episode_gap_s:g} s · XY {auto_p.spot_xy_jump_mm:g} mm · "
-                        f"weight ≥{auto_p.min_on_spot_weight_na:.3g} nA · "
-                        f"≥{auto_p.min_episode_rows} row(s)/episode · "
-                        f"Viterbi {auto_p.viterbi_advance_penalty_mm2:g} mm²"
+                        "Layer EM: plan MU/spot fractions → layer row bounds → per-spot XY assign."
                     )
-                diag_auto = analysis.last_auto_episode_diagnostics()
-                if diag_auto is not None:
-                    meas_line += (
-                        f" — episodes raw={diag_auto.n_raw_episodes}, "
-                        f"aligned={diag_auto.n_after_align}/{diag_auto.n_plan}"
-                    )
-                    if not diag_auto.count_align_ok:
-                        meas_line += " (spot-count align incomplete)"
+                else:
+                    auto_p = analysis.last_auto_layer_params()
+                    if auto_p is not None:
+                        meas_line += (
+                            f" — auto Δt≥{auto_p.episode_gap_s:g} s, "
+                            f"XY>{auto_p.spot_xy_jump_mm:g} mm, "
+                            f"Viterbi {auto_p.viterbi_advance_penalty_mm2:g} mm²"
+                        )
+                        lbl_auto_tuning.setText(
+                            "Inferred: "
+                            f"Δt {auto_p.episode_gap_s:g} s · XY {auto_p.spot_xy_jump_mm:g} mm · "
+                            f"weight ≥{auto_p.min_on_spot_weight_na:.3g} nA · "
+                            f"≥{auto_p.min_episode_rows} row(s)/episode · "
+                            f"Viterbi {auto_p.viterbi_advance_penalty_mm2:g} mm²"
+                        )
+                    diag_auto = analysis.last_auto_episode_diagnostics()
+                    if diag_auto is not None:
+                        meas_line += (
+                            f" — episodes raw={diag_auto.n_raw_episodes}, "
+                            f"aligned={diag_auto.n_after_align}/{diag_auto.n_plan}"
+                        )
+                        if not diag_auto.count_align_ok:
+                            meas_line += " (spot-count align incomplete)"
             if measured and aggregate_plot:
                 _cap = p.measured_spot_weight_caption(ctx.spot_weight_mode_run)
                 if layer_mode_plot == "auto":
@@ -1212,6 +1248,7 @@ class SpotCheckController:
             _plot_cache["label"] = ld.label
             _plot_cache["csv_display_name"] = ld.csv_display_name
             _plot_cache["layer_mode_run"] = ld.layer_mode_run
+            _plot_cache["auto_assign_method"] = ld.auto_assign_method
             build_target = ld.csv_display_name or ld.label or "plan"
             build_note = f"Building 3D view — {build_target}…"
             load_overlay_msg.setText(build_note)
@@ -1246,6 +1283,8 @@ class SpotCheckController:
             _plot_cache["planned"] = None
             _plot_cache["plan_fwhm_xy"] = None
             _plot_cache["plan_mu"] = None
+            _plot_cache["layer_mode_run"] = ""
+            _plot_cache["auto_assign_method"] = "episodes"
             _plot_cache["plotter"] = None
             analysis.idle_slice_band_controls_qt(slice_qt_bindings)
             short = msg if len(msg) < 160 else f"{msg[:157]}…"
@@ -1268,7 +1307,10 @@ class SpotCheckController:
                 status_lbl.setText(f"Export: CSV not found: {csv_path}")
                 return
 
-            layer_mode = "auto" if rb_auto.isChecked() else "gate_counter"
+            layer_assign_mode = _layer_assign_mode_from_ui()
+            layer_mode_req, auto_assign_method, auto_infer = resolve_layer_assign_mode(
+                layer_assign_mode
+            )
 
             agg_even_n = parse_aggregate_even_tail_n(e_agg_even.text())
             if agg_even_n is None:
@@ -1293,7 +1335,7 @@ class SpotCheckController:
                     planned, _, plan_mu, _, _ = analysis.planned_spot_xyz_and_counts_from_plan(dcm)
                 label = str(_plot_cache.get("label") or "")
                 layer_mode_run, aggregate_run = resolve_csv_load_layer_mode(
-                    layer_mode=layer_mode,
+                    layer_mode=layer_mode_req,
                     plan_path=dcm,
                     csv_path=csv_path,
                     aggregate_spots=aggregate_spots,
@@ -1307,7 +1349,9 @@ class SpotCheckController:
                     aggregate_spots=aggregate_run,
                     aggregate_even_rows_after_odd=int(agg_even_n),
                     spot_weight_mode=spot_weight_mode_run,
-                    auto_infer_params=(layer_mode_run == "auto"),
+                    auto_infer_params=auto_infer and layer_mode_run == "auto",
+                    auto_assign_method=auto_assign_method,
+                    planned_mu=plan_mu,
                 )
                 if not measured:
                     status_lbl.setText("Export: no measured rows.")
@@ -1426,7 +1470,7 @@ class SpotCheckController:
                 else:
                     qa_pass_f, qa_warn_f = qa_pair
                     _qa_thr_by_mode[qa_mode_run] = (float(qa_pass_f), float(qa_warn_f))
-            layer_mode = "auto" if rb_auto.isChecked() else "gate_counter"
+            layer_assign_mode = _layer_assign_mode_from_ui()
             agg_even_n = parse_aggregate_even_tail_n(e_agg_even.text())
             if agg_even_n is None:
                 _bump_load_generation_invalidate_async()
@@ -1449,7 +1493,7 @@ class SpotCheckController:
                     file_mtime(plan_path) if has_plan and plan_path else -1.0,
                     str(csv_path.resolve()) if has_csv and csv_path else "",
                     file_mtime(csv_path) if has_csv and csv_path else -1.0,
-                    layer_mode,
+                    layer_assign_mode,
                     bool(cb_agg.isChecked()),
                     int(agg_even_n),
                     spot_weight_mode_run,
@@ -1461,7 +1505,7 @@ class SpotCheckController:
                     qa_mode=qa_mode_run,
                     qa_pass_f=qa_pass_f,
                     qa_warn_f=qa_warn_f,
-                    layer_mode=layer_mode,
+                    layer_assign_mode=layer_assign_mode,
                     aggregate_spots=bool(cb_agg.isChecked()),
                     agg_even_n=int(agg_even_n),
                     spot_weight_mode_run=spot_weight_mode_run,
@@ -1495,7 +1539,7 @@ class SpotCheckController:
                         return pipeline_load_job(
                             ctx.plan_path,
                             ctx.csv_path,
-                            layer_mode=ctx.layer_mode,
+                            layer_assign_mode=ctx.layer_assign_mode,
                             aggregate_spots=ctx.aggregate_spots,
                             aggregate_even_rows_after_odd=ctx.agg_even_n,
                             spot_weight_mode=ctx.spot_weight_mode_run,
@@ -1586,6 +1630,7 @@ class SpotCheckController:
         btn_view_left.clicked.connect(lambda: _apply_quick_view("left"))
         btn_view_right.clicked.connect(lambda: _apply_quick_view("right"))
         rb_auto.toggled.connect(lambda _c: (_update_help(), _do_refresh()))
+        rb_auto_layer_em.toggled.connect(lambda _c: (_update_help(), _do_refresh()))
         rb_gate.toggled.connect(lambda _c: (_update_help(), _do_refresh()))
         slice_chk.toggled.connect(lambda _c: persist())
         slice_sli.sliderReleased.connect(persist)

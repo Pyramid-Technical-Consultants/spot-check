@@ -10,6 +10,7 @@ from .cube_axes_style import (
     apply_pyvista_cube_axes_style,
     cube_axes_ranges,
     disable_pyvista_cube_axes_label_lod,
+    pin_pyvista_cube_bounds,
     pyvista_show_bounds_kwargs,
     refresh_pyvista_cube_axes,
 )
@@ -24,6 +25,7 @@ from .z_axis import (
     cube_z_axis_spec,
     label_at_scene_z,
     n_cube_axis_labels_for_mm_step,
+    nominal_depth_to_scene_z_cube,
     nominal_mev_to_plot_z,
     nominal_mev_to_scene_z_mev_cube,
 )
@@ -41,11 +43,13 @@ __all__ = [
     "label_at_scene_z",
     "n_cube_axis_labels_for_mm_step",
     "nominal_mev_to_plot_z",
+    "nominal_depth_to_scene_z_cube",
     "nominal_mev_to_scene_z_mev_cube",
     "normalize_z_depth_metric",
     "proton_cda_water_range_mm",
     "proton_csda_water_range_mm",
     "proton_water_depth_mm",
     "pyvista_show_bounds_kwargs",
+    "pin_pyvista_cube_bounds",
     "refresh_pyvista_cube_axes",
 ]

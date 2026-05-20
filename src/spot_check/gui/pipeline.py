@@ -8,6 +8,7 @@ from typing import Any
 
 from spot_check import analysis
 from spot_check.analysis.csv_io import acquisition_csv_has_gate_counter
+from spot_check.gui.layer_assign import resolve_layer_assign_mode
 from spot_check.plan import plan_label_from_path, planned_spot_xyz_and_counts_from_plan
 
 
@@ -19,7 +20,7 @@ class GuiRefreshContext:
     qa_mode: str
     qa_pass_f: float
     qa_warn_f: float
-    layer_mode: str
+    layer_assign_mode: str
     aggregate_spots: bool
     agg_even_n: int
     spot_weight_mode_run: str
@@ -40,6 +41,7 @@ class PipelineLoadOK:
     measured_aligned: list[tuple[float, ...]] | None = None
     align_info: Any | None = None
     layer_mode_run: str = "time_gap"
+    auto_assign_method: str = "episodes"
 
 
 def resolve_csv_load_layer_mode(
@@ -92,7 +94,7 @@ def pipeline_load_job(
     plan_path: Path | None,
     csv_path: Path | None,
     *,
-    layer_mode: str,
+    layer_assign_mode: str,
     aggregate_spots: bool,
     aggregate_even_rows_after_odd: int,
     spot_weight_mode: str,
@@ -116,11 +118,14 @@ def pipeline_load_job(
 
     measured_unaligned: list[tuple[float, ...]] = []
     csv_display_name = ""
-    layer_mode_run = layer_mode
+    layer_mode_req, auto_assign_method, auto_infer = resolve_layer_assign_mode(
+        layer_assign_mode
+    )
+    layer_mode_run = layer_mode_req
     if csv_path is not None:
         csv_display_name = csv_path.name
         layer_mode_run, aggregate_run = resolve_csv_load_layer_mode(
-            layer_mode=layer_mode,
+            layer_mode=layer_mode_req,
             plan_path=plan_path,
             csv_path=csv_path,
             aggregate_spots=aggregate_spots,
@@ -134,7 +139,9 @@ def pipeline_load_job(
             aggregate_spots=aggregate_run,
             aggregate_even_rows_after_odd=int(aggregate_even_rows_after_odd),
             spot_weight_mode=spot_weight_mode,
-            auto_infer_params=(layer_mode_run == "auto"),
+            auto_infer_params=auto_infer and layer_mode_run == "auto",
+            auto_assign_method=auto_assign_method,
+            planned_mu=plan_mu,
         )
         if not measured_unaligned:
             raise ValueError("No measured rows to plot.")
@@ -156,7 +163,7 @@ def pipeline_load_job(
         file_mtime(plan_path) if plan_path is not None else -1.0,
         str(csv_path.resolve()) if csv_path is not None else "",
         file_mtime(csv_path) if csv_path is not None else -1.0,
-        layer_mode,
+        layer_assign_mode,
         bool(aggregate_spots),
         int(aggregate_even_rows_after_odd),
         spot_weight_mode,
@@ -174,4 +181,5 @@ def pipeline_load_job(
         measured_aligned=list(measured_aligned) if measured_aligned is not None else None,
         align_info=align_info,
         layer_mode_run=layer_mode_run,
+        auto_assign_method=auto_assign_method,
     )

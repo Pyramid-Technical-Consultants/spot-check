@@ -10,8 +10,7 @@ from spot_check.analysis.layers import (
     _opt_float_cell,
     _plan_impute_lookups_per_layer,
     _PlanImputeLookup,
-    delivery_layer_indices,
-    viterbi_monotone_layer_assign,
+    layer_indices_by_acquisition_time,
 )
 from spot_check.analysis.spatial import (
     _ab_from_plan_xy,
@@ -325,14 +324,6 @@ def gate_counter_aggregated_layer_indices_from_csv(
     return np.asarray(layers, dtype=np.int64)
 
 
-def _aligned_auto_layer_indices(
-    n_episodes: int,
-    spots_per_layer: Sequence[int],
-) -> np.ndarray:
-    """Nominal layers when auto episode count matches the plan (delivery order)."""
-    return delivery_layer_indices(n_episodes, spots_per_layer)
-
-
 def _apply_gate_spot_aggregation(
     rows: list[tuple[float, ...]],
     gates: list[int],
@@ -405,6 +396,9 @@ def measured_spot_abc_from_csv(
     auto_spot_xy_jump_mm: float = AUTO_SPOT_XY_JUMP_MM_DEFAULT,
     auto_min_episode_rows: int = AUTO_MIN_EPISODE_ROWS_DEFAULT,
     auto_infer_params: bool = True,
+    auto_assign_method: str = "episodes",
+    planned_mu: np.ndarray | None = None,
+    auto_layer_em_refine_passes: int | None = None,
 ) -> list[tuple[float, ...]]:
     """Measured rows as (A mm, B mm, layer index, spot weight, partial code).
 
@@ -413,11 +407,12 @@ def measured_spot_abc_from_csv(
 
     Returns 8-tuples ``(A, B, layer, weight, partial, σ_A, σ_B, channel_sum_nA)`` (σ may be NaN).
 
-    **auto** segments acquisition rows into delivery episodes from **deadtime** in IX512
-    channel sum and fit amplitude A (never reads ``Gate Counter``). Rows below a rolling
-    baseline × calibrated ratio are off-spot; short glitches merge forward. Episodes are
-    aligned to the plan spot count when the raw count is far off, then nominal layers use
-    delivery order or monotone Viterbi on episode centroids.
+    **auto** never reads ``Gate Counter``. With ``auto_assign_method='episodes'`` (default),
+    deadtime segmentation aligns spot count to the plan; layers follow **acquisition time**
+    (earliest spot -> layer 0 = highest nominal energy).
+    With ``auto_assign_method='layer_em'``, delivery is split in **time order** (highest-energy
+    layer first), then plan MU/spot fractions and XY error set layer and spot boundaries
+    (:mod:`spot_check.analysis.auto_layer_em`).
     With ``aggregate_spots=True``, each episode becomes one **weighted-mean** spot; when False,
     every on-spot CSV row is kept and shares the episode's nominal layer.
     ``aggregate_even_rows_after_odd`` applies only in **gate_counter** mode.
@@ -479,6 +474,9 @@ def measured_spot_abc_from_csv(
             raise ValueError("viterbi_advance_penalty_mm2 must be >= 0")
         if not planned_xyz:
             raise ValueError("auto requires planned_xyz from the RT plan")
+        assign_m = str(auto_assign_method).strip().lower().replace("-", "_")
+        if assign_m not in ("episodes", "layer_em"):
+            raise ValueError("auto_assign_method must be 'episodes' or 'layer_em'")
     else:  # gate_counter
         if not planned_xyz:
             raise ValueError("gate_counter requires planned_xyz from the RT plan")
@@ -595,6 +593,7 @@ def measured_spot_abc_from_csv(
     if mode == "auto":
         from spot_check.analysis.auto_columns import load_auto_fit_columns_from_csv
         from spot_check.analysis.episodes import (
+            AutoEpisodeDiagnostics,
             aggregate_spans_batch,
             cols_with_delivery_weights,
             segment_align_auto_columns,
@@ -629,8 +628,18 @@ def measured_spot_abc_from_csv(
             for arr in layer_xy
         ]
 
-        vp = float(viterbi_advance_penalty_mm2)
-        if auto_infer_params:
+        from spot_check.constants import (
+            AUTO_EDGE_DEAD_RATIO_DEFAULT,
+            AUTO_EDGE_TINY_MERGE_ROWS,
+        )
+
+        gap_s = float(auto_episode_gap_s)
+        xy_jump = float(auto_spot_xy_jump_mm)
+        min_w = float(auto_min_on_spot_weight_na)
+        min_rows = int(auto_min_episode_rows)
+        dead_ratio = float(AUTO_EDGE_DEAD_RATIO_DEFAULT)
+        tiny_merge = int(AUTO_EDGE_TINY_MERGE_ROWS)
+        if assign_m == "episodes" and auto_infer_params:
             from spot_check.analysis.auto_params import infer_auto_layer_params
 
             auto_p = infer_auto_layer_params(cols, planned_xyz)  # type: ignore[arg-type]
@@ -640,40 +649,49 @@ def measured_spot_abc_from_csv(
             min_rows = auto_p.min_episode_rows
             dead_ratio = auto_p.dead_ratio
             tiny_merge = auto_p.tiny_merge_rows
-            vp = float(auto_p.viterbi_advance_penalty_mm2)
+
+        if assign_m == "layer_em":
+            from spot_check.analysis.auto_layer_em import layer_em_plan_spans
+            from spot_check.constants import AUTO_LAYER_EM_REFINE_PASSES_DEFAULT
+
+            ref_n = (
+                int(auto_layer_em_refine_passes)
+                if auto_layer_em_refine_passes is not None
+                else int(AUTO_LAYER_EM_REFINE_PASSES_DEFAULT)
+            )
+            aligned_groups, _lem = layer_em_plan_spans(
+                cols,
+                plan_xy2,
+                spots_per_layer,
+                plan_mu=planned_mu,
+                refine_passes=ref_n,
+            )
+            _diag = AutoEpisodeDiagnostics(
+                n_raw_episodes=0,
+                n_after_align=len(aligned_groups),
+                n_plan=n_plan_spots,
+                count_align_ok=len(aligned_groups) == n_plan_spots,
+            )
+            from spot_check.analysis.episodes import _set_last_diag
+
+            _set_last_diag(_diag)
         else:
-            gap_s = float(auto_episode_gap_s)
-            xy_jump = float(auto_spot_xy_jump_mm)
-            min_w = float(auto_min_on_spot_weight_na)
-            min_rows = int(auto_min_episode_rows)
-            from spot_check.constants import (
-                AUTO_EDGE_DEAD_RATIO_DEFAULT,
-                AUTO_EDGE_TINY_MERGE_ROWS,
+            aligned_groups, _diag = segment_align_auto_columns(
+                cols,
+                n_plan_spots=n_plan_spots,
+                episode_gap_s=gap_s,
+                min_on_spot_weight_na=min_w,
+                spot_xy_jump_mm=xy_jump,
+                min_episode_rows=min_rows,
+                dead_ratio=dead_ratio,
+                tiny_merge_rows=tiny_merge,
+                plan_xy=plan_xy2,
             )
 
-            dead_ratio = float(AUTO_EDGE_DEAD_RATIO_DEFAULT)
-            tiny_merge = int(AUTO_EDGE_TINY_MERGE_ROWS)
-
-        aligned_groups, _diag = segment_align_auto_columns(
-            cols,
-            n_plan_spots=n_plan_spots,
-            episode_gap_s=gap_s,
-            min_on_spot_weight_na=min_w,
-            spot_xy_jump_mm=xy_jump,
-            min_episode_rows=min_rows,
-            dead_ratio=dead_ratio,
-            tiny_merge_rows=tiny_merge,
-            plan_xy=plan_xy2,
-        )
         cols_w = cols_with_delivery_weights(cols)
         aggs = aggregate_spans_batch(cols_w, aligned_groups)
 
-        if len(aggs) == n_plan_spots and _diag.count_align_ok:
-            layers_idx_auto = _aligned_auto_layer_indices(len(aggs), spots_per_layer)
-        else:
-            meas_xy = np.asarray([(a.mx, a.my) for a in aggs], dtype=np.float64)
-            emit = _emit_sqdist_to_layers_mm2(meas_xy, layer_xy)
-            layers_idx_auto = viterbi_monotone_layer_assign(emit, vp)
+        layers_idx_auto = layer_indices_by_acquisition_time(aligned_groups, spots_per_layer)
 
         hi_auto = max_layer
 

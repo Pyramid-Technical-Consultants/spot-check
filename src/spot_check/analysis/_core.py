@@ -15,6 +15,9 @@ from spot_check.analysis import (
     spatial,
 )
 from spot_check.analysis import (
+    auto_layer_em as auto_layer_em_mod,
+)
+from spot_check.analysis import (
     auto_params as auto_params_mod,
 )
 from spot_check.analysis import (
@@ -35,6 +38,7 @@ _SUBMODULES = (
     layers,
     measured,
     auto_params_mod,
+    auto_layer_em_mod,
     episodes_mod,
     viz_data,
     viz_glyphs,

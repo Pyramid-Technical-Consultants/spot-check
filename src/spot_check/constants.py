@@ -45,7 +45,7 @@ AUTO_EPISODE_COUNT_ALIGN_MAX_SPLITS: Final[int] = 2048
 AUTO_PLAN_MAX_SPOTS_PER_EPISODE: Final[int] = 32
 # Plan imputation: wide tie-bands on dense grids are O(N) per row; use 1D nearest above this N.
 AUTO_PLAN_IMPUTE_FAST_MIN_N: Final[int] = 512
-# Plan XY boundary refine (cost ~ O(n_episodes × window)); skip above this episode count.
+# Plan XY boundary refine (cost ~ O(n_episodes × window)); align skips above split cap.
 AUTO_PLAN_REFINE_MAX_EPISODES: Final[int] = 32_000
 # Plan XY hint: search this many rows around each inter-spot boundary when refining spans.
 AUTO_PLAN_BOUNDARY_REFINE_ROWS: Final[int] = 32
@@ -54,6 +54,19 @@ AUTO_PLAN_BOUNDARY_REFINE_PASSES: Final[int] = 4
 AUTO_PLAN_MERGE_BLEND: Final[float] = 0.65
 # Episode merge scoring: centroid XY delta² (mm²) + coeff × (Δt s)² when aligning M→N_plan.
 AUTO_EPISODE_MERGE_DT_MM2_PER_S: Final[float] = 50.0
+
+# --- Auto assign: ``episodes`` (deadtime) vs ``layer_em`` (layer error minimization) ---
+AUTO_ASSIGN_METHOD_DEFAULT: Final[str] = "episodes"
+AUTO_LAYER_EM_BOUNDARY_SHIFT_ROWS: Final[int] = 64
+AUTO_LAYER_EM_REFINE_PASSES_DEFAULT: Final[int] = 2
+# Search ±rows around MU-initial layer boundaries (layer 0 = highest energy, first in time).
+AUTO_LAYER_EM_LAYER_BOUNDARY_BAND_ROWS: Final[int] = 512
+# Above this row count: MU layer cuts only (cube-scale CSVs).
+AUTO_LAYER_EM_FAST_MIN_ROWS: Final[int] = 20_000
+# Per-layer contiguous spot DP; above this use MU quantile splits + boundary refine.
+AUTO_LAYER_EM_DP_MAX_CELLS: Final[int] = 50_000
+AUTO_LAYER_EM_DP_MAX_SPOTS: Final[int] = 48
+AUTO_LAYER_EM_SPOT_REFINE_PASSES: Final[int] = 2
 
 # --- Nominal energy → water-equivalent depth (display / approximate QA only) -----
 # See :mod:`spot_check.geometry.proton_csda_water` (NIST PSTAR table + interpolation).

@@ -18,7 +18,6 @@ from spot_check.constants import (
     AUTO_EPISODE_MERGE_DT_MM2_PER_S,
     AUTO_PLAN_BOUNDARY_REFINE_PASSES,
     AUTO_PLAN_BOUNDARY_REFINE_ROWS,
-    AUTO_PLAN_MAX_SPOTS_PER_EPISODE,
     AUTO_PLAN_MERGE_BLEND,
     AUTO_PLAN_REFINE_MAX_EPISODES,
 )
@@ -213,14 +212,24 @@ def _episode_abmx_means(
             float(sum_my / sw),
         )
     s, e = span
+    n = len(cols)
+    s = max(0, min(int(s), n))
+    e = max(s, min(int(e), n))
     if e <= s:
-        return 0.0, 0.0, 0.0, 0.0
+        idx = min(s, n - 1) if n else 0
+        return (
+            float(cols.a[idx]) if n else 0.0,
+            float(cols.b[idx]) if n else 0.0,
+            float(cols.mx[idx]) if n else 0.0,
+            float(cols.my[idx]) if n else 0.0,
+        )
     sl = slice(s, e)
+    den = float(e - s)
     return (
-        float(np.mean(cols.a[sl])),
-        float(np.mean(cols.b[sl])),
-        float(np.mean(cols.mx[sl])),
-        float(np.mean(cols.my[sl])),
+        float(np.sum(cols.a[sl]) / den),
+        float(np.sum(cols.b[sl]) / den),
+        float(np.sum(cols.mx[sl]) / den),
+        float(np.sum(cols.my[sl]) / den),
     )
 
 
@@ -862,173 +871,125 @@ def _partition_plans_across_episodes(
     return groups
 
 
-def _row_span_plan_cost(
+def _episode_weight_sums(
     cols: AutoFitColumns,
-    s: int,
-    e: int,
-    plan_pt: np.ndarray,
+    spans: list[EpisodeSpan],
     row_w: np.ndarray,
-) -> float:
-    if e <= s:
-        return 0.0
-    ww = row_w[s:e]
-    den = float(ww.sum())
-    if den <= 0.0:
-        return _xy_sqdist(
-            float(cols.mx[s]), float(cols.my[s]), float(plan_pt[0]), float(plan_pt[1])
-        )
-    mx = float(np.dot(cols.mx[s:e], ww) / den)
-    my = float(np.dot(cols.my[s:e], ww) / den)
-    return _xy_sqdist(mx, my, float(plan_pt[0]), float(plan_pt[1]))
+) -> np.ndarray:
+    """Per-episode sum of row delivery weights (``O(n_rows)``)."""
+    k = len(spans)
+    n = len(cols)
+    if k == 0:
+        return np.zeros(0, dtype=np.float64)
+    ep = np.full(n, -1, dtype=np.int32)
+    for i, (s, e) in enumerate(spans):
+        if e > s:
+            ep[s:e] = i
+    ok = ep >= 0
+    if not ok.any():
+        return np.zeros(k, dtype=np.float64)
+    return np.bincount(ep[ok], weights=row_w[ok], minlength=k).astype(np.float64, copy=False)
 
 
-def _split_span_rows_among_plans(
-    cols: AutoFitColumns,
-    span: EpisodeSpan,
-    plan_xy: np.ndarray,
-    p0: int,
-    p1: int,
-    row_w: np.ndarray,
-) -> list[EpisodeSpan]:
-    """Partition episode rows into contiguous plan spots (min centroid distance per spot)."""
-    n_spots = p1 - p0
+def _clamp_monotone_plan_edges(edges: np.ndarray, p_n: int) -> np.ndarray:
+    e_n = int(edges.size) - 1
+    out = edges.astype(np.int64, copy=True)
+    out[0] = 0
+    out[-1] = p_n
+    for i in range(1, e_n + 1):
+        lo = out[i - 1] + 1
+        hi = p_n - (e_n - i)
+        out[i] = int(np.clip(out[i], lo, hi))
+    out[-1] = p_n
+    return out
+
+
+def _plan_edges_from_episode_weights(ep_w: np.ndarray, p_n: int) -> np.ndarray:
+    """Map each raw episode to a contiguous plan-index range (by delivery weight)."""
+    e_n = int(ep_w.size)
+    edges = np.zeros(e_n + 1, dtype=np.int64)
+    edges[-1] = p_n
+    if e_n <= 1:
+        return edges
+    w = ep_w.astype(np.float64, copy=False)
+    tot = float(w.sum())
+    if tot <= 0.0:
+        edges[1:e_n] = np.round(np.linspace(0, p_n, e_n + 1)[1:-1]).astype(np.int64)
+        return _clamp_monotone_plan_edges(edges, p_n)
+    cum = np.cumsum(w)
+    targets = tot * np.arange(1, e_n, dtype=np.float64) / float(e_n)
+    edges[1:e_n] = np.searchsorted(cum, targets, side="right")
+    return _clamp_monotone_plan_edges(edges, p_n)
+
+
+def _linspace_subspans(span: EpisodeSpan, n_parts: int) -> list[EpisodeSpan]:
     s, e = span
-    if n_spots <= 0:
+    if n_parts <= 0:
         return []
-    if n_spots == 1:
+    if n_parts == 1:
         return [span]
-    n_rows = e - s
-    if n_rows < n_spots:
-        edges = np.linspace(s, e, n_spots + 1, dtype=np.int64)
-        edges[0] = s
-        edges[-1] = e
-        for i in range(1, n_spots):
-            edges[i] = max(edges[i], edges[i - 1] + 1)
-        edges[-1] = e
-        return [(int(edges[i]), int(edges[i + 1])) for i in range(n_spots)]
-
-    inf = 1e300
-    dp = np.full((n_rows + 1, n_spots + 1), inf, dtype=np.float64)
-    back = np.full((n_rows + 1, n_spots + 1), -1, dtype=np.int32)
-    dp[0, 0] = 0.0
-    for k in range(1, n_spots + 1):
-        pi = plan_xy[p0 + k - 1]
-        for i in range(k, n_rows + 1):
-            for j in range(k - 1, i):
-                if dp[j, k - 1] >= inf:
-                    continue
-                c = float(dp[j, k - 1]) + _row_span_plan_cost(cols, s + j, s + i, pi, row_w)
-                if c < dp[i, k]:
-                    dp[i, k] = c
-                    back[i, k] = j
-    if dp[n_rows, n_spots] >= inf:
-        edges = np.linspace(s, e, n_spots + 1, dtype=np.int64)
-        edges[0] = s
-        edges[-1] = e
-        return [(int(edges[i]), int(edges[i + 1])) for i in range(n_spots)]
-    bounds = [e]
-    i, k = n_rows, n_spots
-    while k > 0:
-        j = int(back[i, k])
-        if j < 0:
-            break
-        bounds.append(s + j)
-        i, k = j, k - 1
-    bounds.append(s)
-    bounds = sorted(set(bounds))
-    if len(bounds) != n_spots + 1:
-        bounds = list(np.linspace(s, e, n_spots + 1, dtype=np.int64))
-        bounds[0] = s
-        bounds[-1] = e
-    return [(int(bounds[i]), int(bounds[i + 1])) for i in range(n_spots)]
+    edges = np.linspace(s, e, n_parts + 1, dtype=np.int64)
+    edges[0] = s
+    edges[-1] = e
+    for i in range(1, n_parts):
+        edges[i] = min(max(edges[i], edges[i - 1] + 1), e)
+    edges[-1] = e
+    out: list[EpisodeSpan] = []
+    for i in range(n_parts):
+        a, b = int(edges[i]), int(edges[i + 1])
+        if b <= a:
+            b = min(a + 1, e)
+        out.append((a, b))
+    return out
 
 
-def _split_span_into_plan_spots(
-    cols: AutoFitColumns,
-    span: EpisodeSpan,
-    plan_xy: np.ndarray,
-    p0: int,
-    p1: int,
-    row_w: np.ndarray,
+def _plan_edges_to_spans(edges: np.ndarray) -> list[EpisodeSpan]:
+    return [(int(edges[i]), int(edges[i + 1])) for i in range(int(edges.size) - 1)]
+
+
+def _spans_from_row_weight_quantiles(
+    n_rows: int,
+    n_plan: int,
+    cum_w: np.ndarray,
 ) -> list[EpisodeSpan]:
-    """Split one raw episode span into ``p1 - p0`` plan spots."""
-    n_spots = p1 - p0
-    s, e = span
-    if n_spots > AUTO_PLAN_MAX_SPOTS_PER_EPISODE or (e - s) > 4096:
-        edges = np.linspace(s, e, n_spots + 1, dtype=np.int64)
-        edges[0] = s
-        edges[-1] = e
-        for i in range(1, n_spots):
-            edges[i] = max(edges[i], edges[i - 1] + 1)
-        edges[-1] = e
-        return [(int(edges[i]), int(edges[i + 1])) for i in range(n_spots)]
-    return _split_span_rows_among_plans(cols, span, plan_xy, p0, p1, row_w)
+    """Fallback: partition acquisition rows into ``n_plan`` spans by delivery weight."""
+    if n_plan <= 0 or n_rows <= 0:
+        return []
+    if n_plan == 1:
+        return [(0, n_rows)]
+    total = float(cum_w[-1])
+    if total > 0 and np.isfinite(total):
+        targets = total * np.arange(1, n_plan, dtype=np.float64) / float(n_plan)
+        inner = np.searchsorted(cum_w, targets, side="right").astype(np.int64)
+    else:
+        inner = np.round(np.linspace(1, n_rows - 1, n_plan - 1)).astype(np.int64)
+    edges = np.zeros(n_plan + 1, dtype=np.int64)
+    edges[0] = 0
+    edges[1:-1] = inner
+    edges[-1] = n_rows
+    return _plan_edges_to_spans(_clamp_monotone_plan_edges(edges, n_rows))
 
 
 def _spans_from_plan_episode_expansion(
     cols: AutoFitColumns,
     spans: list[EpisodeSpan],
     plan_xy: np.ndarray,
-    *,
-    look_ahead: int = 64,
-    match_tol_mm: float = 8.0,
 ) -> list[EpisodeSpan]:
-    """One span per plan spot: forward nearest delivery episode + row partition."""
+    """One span per plan spot: split each raw episode across its plan-index range."""
     e_n = len(spans)
     p_n = int(plan_xy.shape[0])
     if e_n == 0 or p_n == 0:
         return []
     row_w = delivery_row_weights(cols)
-    cents = np.asarray(
-        [_span_xy_centroid(cols, sp, row_w) for sp in spans],
-        dtype=np.float64,
-    )
-    ep_next_row = [int(sp[0]) for sp in spans]
+    ep_w = _episode_weight_sums(cols, spans, row_w)
+    plan_edges = _plan_edges_from_episode_weights(ep_w, p_n)
     out: list[EpisodeSpan] = []
-    ep_i = 0
-    pi = 0
-    la = max(1, int(look_ahead))
-    tol_sq = float(match_tol_mm) ** 2
-    while pi < p_n:
-        if ep_i >= e_n:
-            return []
-        end_e = min(e_n, ep_i + la)
-        dists = np.sum((cents[ep_i:end_e] - plan_xy[pi]) ** 2, axis=1)
-        best_off = int(np.argmin(dists))
-        best_e = ep_i + best_off
-        if float(dists[best_off]) > tol_sq:
-            best_e = ep_i
-        s_ep, e_ep = spans[best_e]
-        use_s = ep_next_row[best_e]
-        if use_s >= e_ep:
-            ep_i += 1
-            if ep_i >= e_n:
-                return []
+    for ei, (s, e) in enumerate(spans):
+        p0 = int(plan_edges[ei])
+        p1 = int(plan_edges[ei + 1])
+        if p1 <= p0:
             continue
-        pj = pi + 1
-        max_group = max(1, AUTO_PLAN_MAX_SPOTS_PER_EPISODE)
-        while pj < p_n and (pj - pi) < max_group:
-            d_stay = float(np.sum((cents[best_e] - plan_xy[pj]) ** 2))
-            d_next = (
-                float(np.sum((cents[best_e + 1] - plan_xy[pj]) ** 2))
-                if best_e + 1 < e_n
-                else float("inf")
-            )
-            if d_stay <= d_next:
-                pj += 1
-            else:
-                break
-        sub = _split_span_into_plan_spots(cols, (use_s, e_ep), plan_xy, pi, pj, row_w)
-        if len(sub) != pj - pi:
-            return []
-        for sp in sub:
-            out.append(sp)
-            ep_next_row[best_e] = max(ep_next_row[best_e], sp[1])
-        pi = pj
-        if ep_next_row[best_e] >= e_ep:
-            ep_i = best_e + 1
-        else:
-            ep_i = best_e
+        out.extend(_linspace_subspans((s, e), p1 - p0))
     return out if len(out) == p_n else []
 
 
@@ -1116,12 +1077,15 @@ def align_episode_spans_to_plan_count_cols(
     splits_needed = max(0, n_plan - len(work))
     if splits_needed > 0 and plan_xy is not None and raw_n < n_plan:
         expanded = _spans_from_plan_episode_expansion(cols, work, plan_xy)
+        if len(expanded) != n_plan:
+            cum_w = np.cumsum(delivery_row_weights(cols))
+            expanded = _spans_from_row_weight_quantiles(n_rows, n_plan, cum_w)
         if len(expanded) == n_plan:
             work = expanded
             count_align_ok = True
-    if len(work) < n_plan:
+    if len(work) < n_plan and splits_needed <= AUTO_EPISODE_COUNT_ALIGN_MAX_SPLITS:
         split_iters = 0
-        split_cap = max(splits_needed + 1, AUTO_EPISODE_COUNT_ALIGN_MAX_SPLITS)
+        split_cap = splits_needed + 1
         while len(work) < n_plan:
             best_ei = -1
             best_k = -1
@@ -1161,7 +1125,12 @@ def align_episode_spans_to_plan_count_cols(
     if len(work) != n_plan:
         count_align_ok = False
 
-    if count_align_ok and plan_xy is not None and len(work) == n_plan:
+    if (
+        count_align_ok
+        and plan_xy is not None
+        and len(work) == n_plan
+        and n_plan <= AUTO_EPISODE_COUNT_ALIGN_MAX_SPLITS
+    ):
         work = refine_spans_with_plan_xy(cols, work, plan_xy)
 
     diag = AutoEpisodeDiagnostics(

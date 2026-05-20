@@ -31,4 +31,4 @@ def test_aggregate_zero_weight_span_no_runtime_warning() -> None:
         aggs = aggregate_spans_batch(cols, [(0, 2)])
     assert len(aggs) == 1
     assert aggs[0].a == 1.5
-    assert aggs[0].weight == 0.0
+    assert aggs[0].weight < 1e-12

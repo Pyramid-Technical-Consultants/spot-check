@@ -385,7 +385,7 @@ def test_t0g40_deepest_layer_same_as_t0g10_shallowest_differs() -> None:
 
 @pytest.mark.skipif(not _T0G10_DCM.is_file(), reason="T0G10 DICOM not under test_data/")
 def test_t0g10_mev_axis_full_plan_range_with_slice_on() -> None:
-    """Slice must not collapse Z; MeV uses flipped Z ``axes_ranges`` (positive nominal MeV)."""
+    """Slice must not collapse Z; MeV cube uses ``bounds == axes_ranges`` (positive scene Z)."""
     from spot_check import analysis
     from spot_check.plan import planned_spot_xyz_and_counts_from_dicom
 
@@ -411,7 +411,7 @@ def test_t0g10_mev_axis_full_plan_range_with_slice_on() -> None:
         assert all(t > 0 for t in zl)
         assert max(zl) == pytest.approx(134.4, abs=8.0)
         assert min(zl) == pytest.approx(78.5, abs=8.0)
-        assert zl[0] > zl[-1]  # high MeV (deep) at scene zmin / axis origin
+        assert zl[0] < zl[-1]  # deep/high energy at scene zmin (axis origin)
         assert float(actor.bounds[4]) > 70.0
         assert float(actor.bounds[5]) < 145.0
         assert actor.z_label_visibility is True

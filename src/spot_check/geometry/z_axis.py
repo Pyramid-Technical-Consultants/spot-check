@@ -79,9 +79,29 @@ def nominal_mev_to_scene_z_mev_cube(
     e_lo: float,
     e_hi: float,
 ) -> np.ndarray:
-    """Positive scene Z: high nominal MeV (deep) at ``zmin``; use with :func:`cube_axes_ranges`."""
+    """Positive scene Z: high nominal MeV (deep) at ``zmin`` (``bounds == axes_ranges`` ticks)."""
     e = np.asarray(energy_mev, dtype=np.float64)
     return float(e_hi) + float(e_lo) - e
+
+
+def nominal_depth_to_scene_z_cube(
+    energy_mev: np.ndarray,
+    *,
+    upstream_wet_mm: float = 0.0,
+    z_depth_metric: str = "csda",
+) -> np.ndarray:
+    """Positive scene Z: deep layers (large mm) at ``zmin``; ``bounds == axes_ranges`` ticks."""
+    e = np.asarray(energy_mev, dtype=np.float64)
+    wet = max(0.0, float(upstream_wet_mm))
+    metric = normalize_z_depth_metric(z_depth_metric)
+    depth = np.maximum(proton_water_depth_mm(e, metric=metric) - wet, 0.0)
+    if depth.size == 0:
+        return depth
+    d_lo = float(np.min(depth))
+    d_hi = float(np.max(depth))
+    if d_hi <= d_lo:
+        d_hi = d_lo + 1.0
+    return float(d_hi) + float(d_lo) - depth
 
 
 def n_cube_axis_labels_for_mm_step(

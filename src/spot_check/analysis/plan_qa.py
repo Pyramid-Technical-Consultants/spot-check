@@ -161,9 +161,8 @@ def _plan_qa_error_line_polylines(
                 continue
             p0 = meas_pts_view[i]
             if use_proton_water_depth_mm:
-                zm = nominal_mev_to_plot_z(
+                zm = nominal_depth_to_scene_z_cube(
                     np.array([float(exp[2])], dtype=np.float64),
-                    use_proton_water_depth_mm=True,
                     upstream_wet_mm=upstream_wet_mm,
                     z_depth_metric=z_depth_metric,
                 )
