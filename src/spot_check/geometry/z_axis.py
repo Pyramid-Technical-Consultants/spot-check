@@ -72,6 +72,9 @@ def cube_z_axis_spec(
     use_proton_water_depth_mm: bool,
     tick_mm: float,
     tick_mev: float = BOUNDS_Z_TICK_MEV_DEFAULT,
+    nominal_energy_mev: np.ndarray | None = None,
+    upstream_wet_mm: float = 0.0,
+    z_depth_metric: str = "csda",
 ) -> CubeZAxisSpec:
     z = np.asarray(z_scene, dtype=np.float64).reshape(-1)
     if z.size == 0:
@@ -89,9 +92,21 @@ def cube_z_axis_spec(
         z_pad = max(z_span * 0.06, min_pad)
         zmin_p = zmin_b - z_pad * 0.5
         zmax_p = zmax_b + z_pad * 0.5
-        # Scene zmin is deepest (most negative); labels are positive mm depth.
-        z_lbl_min = -zmin_p
-        z_lbl_max = -zmax_p
+        # Tick labels must be PSTAR depth (mm), not ``-scene_z`` (confused with raw MeV).
+        if nominal_energy_mev is not None:
+            e_lbl = np.asarray(nominal_energy_mev, dtype=np.float64).reshape(-1)
+        else:
+            e_lbl = np.array([], dtype=np.float64)
+        if e_lbl.size > 0:
+            wet = max(0.0, float(upstream_wet_mm))
+            metric = normalize_z_depth_metric(z_depth_metric)
+            depth_mm = proton_water_depth_mm(e_lbl, metric=metric) - wet
+            depth_mm = np.maximum(depth_mm, 0.0)
+            z_lbl_min = float(np.max(depth_mm))
+            z_lbl_max = float(np.min(depth_mm))
+        else:
+            z_lbl_min = -zmin_p
+            z_lbl_max = -zmax_p
         z_step = (
             float(tick_mm)
             if tick_mm > 0.0 and math.isfinite(tick_mm)
@@ -152,9 +167,11 @@ def apply_pyvista_cube_z_axis(
     PyVista's ``actor.bounds`` setter copies scene Z into ``z_axis_range`` (negative mm).
     Use VTK ``SetBounds`` plus explicit ``z_axis_range`` so labels stay positive depth mm.
 
-    ``SetZAxisRange`` uses (deep_mm, shallow_mm) so tick index 0 at scene zmin shows the
-    largest depth. Pair with descending ``SetAxisLabels`` strings. Do not call
-    ``SetRebuildAxes`` afterward (it regenerates labels and hides Z ticks).
+    Use ascending ``SetZAxisRange(shallow_mm, deep_mm)`` so VTK draws Z ticks, then
+    ``SetAxisLabels`` with deep→shallow strings (index 0 at scene zmin = deepest).
+    Do **not** assign ``actor.z_axis_range`` afterward — PyVista's setter calls
+    ``SetZAxisRange`` again and ``_update_z_labels()``, which clears custom labels.
+    Do not call ``SetRebuildAxes`` afterward.
     """
     apply_pyvista_cube_axes_style(actor)
     actor.SetBounds(
@@ -170,12 +187,7 @@ def apply_pyvista_cube_z_axis(
     actor._n_zlabels = int(z_spec.n_zlabels)
     actor.SetZTitle(str(z_spec.ztitle))
     deep_mm, shallow_mm = _cube_z_depth_label_endpoints(z_spec)
-    # Match ``show_bounds`` axes_ranges: zmin (deepest scene Z) → deep_mm, zmax → shallow_mm.
-    actor.SetZAxisRange(deep_mm, shallow_mm)
-    try:
-        actor.z_axis_range = (deep_mm, shallow_mm)
-    except Exception:
-        pass
+    actor.SetZAxisRange(shallow_mm, deep_mm)
     actor.SetAxisLabels(2, _vtk_z_tick_labels(z_spec))
     actor._z_label_visibility = True
     actor.SetZAxisVisibility(True)

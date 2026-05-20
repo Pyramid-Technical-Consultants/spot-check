@@ -38,7 +38,12 @@ def test_pyvista_bounds_property_resets_z_labels() -> None:
     pv.OFF_SCREEN = True
     e = np.linspace(100.0, 160.0, 12)
     z = nominal_mev_to_plot_z(e, use_proton_water_depth_mm=True)
-    spec = cube_z_axis_spec(z, use_proton_water_depth_mm=True, tick_mm=5.0)
+    spec = cube_z_axis_spec(
+        z,
+        use_proton_water_depth_mm=True,
+        tick_mm=5.0,
+        nominal_energy_mev=e,
+    )
     x_min, x_max, y_min, y_max = -40.0, 40.0, -40.0, 40.0
     bounds = (x_min, x_max, y_min, y_max, spec.zmin_scene, spec.zmax_scene)
     axes = (x_min, x_max, y_min, y_max, spec.z_label_at_min, spec.z_label_at_max)
@@ -65,8 +70,9 @@ def test_pyvista_bounds_property_resets_z_labels() -> None:
     assert actor.GetLabelOffset() == pytest.approx(PYVISTA_CUBE_AXES_LABEL_OFFSET)
     deep = float(max(spec.z_label_at_min, spec.z_label_at_max))
     shallow = float(min(spec.z_label_at_min, spec.z_label_at_max))
-    assert actor.GetZAxisRange()[0] == pytest.approx(deep)
-    assert actor.GetZAxisRange()[1] == pytest.approx(shallow)
+    z_lo, z_hi = actor.GetZAxisRange()
+    assert z_lo == pytest.approx(shallow)
+    assert z_hi == pytest.approx(deep)
 
 
 def test_plot_z_upstream_wet_shifter_subtracts_mm() -> None:
@@ -95,7 +101,12 @@ def test_plot_z_shallow_toward_top_and_depth_labels() -> None:
     z = nominal_mev_to_plot_z(e, use_proton_water_depth_mm=True)
     assert np.all(z < 0)
     assert z[0] > z[-1]  # lower energy / shallower → higher scene Z (top)
-    spec = cube_z_axis_spec(z, use_proton_water_depth_mm=True, tick_mm=5.0)
+    spec = cube_z_axis_spec(
+        z,
+        use_proton_water_depth_mm=True,
+        tick_mm=5.0,
+        nominal_energy_mev=e,
+    )
     assert spec.z_label_at_min > spec.z_label_at_max  # deep mm at zmin, shallow at zmax
     assert spec.zmin_scene < spec.zmax_scene
     assert spec.z_label_at_min > 0 and spec.z_label_at_max > 0

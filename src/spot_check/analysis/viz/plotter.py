@@ -582,6 +582,17 @@ def show_comparison_3d_pyvista(
             layer_energies_plan, int(slice_cfg["center_i"]), half_width=2
         )
 
+    def _energies_for_cube_axis_labels(pm: np.ndarray, mm: np.ndarray) -> np.ndarray:
+        """Nominal MeV for cube Z tick labels (always energy, not scene Z / depth)."""
+        parts: list[np.ndarray] = []
+        if np.any(pm):
+            parts.append(np.asarray(plan_e_mev[pm], dtype=np.float64).reshape(-1))
+        if meas_e_final.size > 0 and np.any(mm):
+            parts.append(np.asarray(meas_e_final[mm], dtype=np.float64).reshape(-1))
+        if parts:
+            return np.concatenate(parts)
+        return np.asarray(plan_e_mev, dtype=np.float64).reshape(-1)
+
     def _scene_z_for_cube_axes(
         pm: np.ndarray,
         mm: np.ndarray,
@@ -626,6 +637,9 @@ def show_comparison_3d_pyvista(
             _scene_z_for_cube_axes(pm, mm),
             use_proton_water_depth_mm=use_depth_z,
             tick_mm=eff_tick,
+            nominal_energy_mev=_energies_for_cube_axis_labels(pm, mm) if use_depth_z else None,
+            upstream_wet_mm=wet_mm,
+            z_depth_metric=depth_metric,
         )
         _cube_axes["z_spec"] = z_spec
         try:
@@ -925,6 +939,9 @@ def show_comparison_3d_pyvista(
         z_all,
         use_proton_water_depth_mm=use_depth_z,
         tick_mm=eff_tick,
+        nominal_energy_mev=_energies_for_cube_axis_labels(pm0, mm0) if use_depth_z else None,
+        upstream_wet_mm=wet_mm,
+        z_depth_metric=depth_metric,
     )
     _cube_axes["z_spec"] = z_spec_init
     bounds_axes = (
