@@ -76,7 +76,7 @@ def test_infer_episode_gap_from_timing() -> None:
 def test_infer_dead_ratio_calibrated() -> None:
     cols = _cols_with_spots(40)
     p = infer_auto_layer_params(cols, MINIMAL_PLANNED_XYZ)
-    assert 0.52 <= p.dead_ratio <= 0.64
+    assert 0.48 <= p.dead_ratio <= 0.85
     assert p.tiny_merge_rows >= 1
 
 

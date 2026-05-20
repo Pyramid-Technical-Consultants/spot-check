@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from spot_check import analysis
+from spot_check.analysis.csv_io import acquisition_csv_has_gate_counter
 from spot_check.plan import plan_label_from_path, planned_spot_xyz_and_counts_from_plan
 
 
@@ -38,6 +39,39 @@ class PipelineLoadOK:
     csv_display_name: str
     measured_aligned: list[tuple[float, ...]] | None = None
     align_info: Any | None = None
+    layer_mode_run: str = "time_gap"
+
+
+def resolve_csv_load_layer_mode(
+    *,
+    layer_mode: str,
+    plan_path: Path | None,
+    csv_path: Path,
+    aggregate_spots: bool,
+) -> tuple[str, bool]:
+    """Layer mode and gate aggregation for :func:`measured_spot_abc_from_csv`.
+
+    Aggregation is honored in **auto** (weighted mean per signal episode) and **gate_counter**
+    (odd ``Gate Counter`` phases; requires that column). Gate-counter mode without it falls back
+    to **time_gap** when a plan is loaded.
+    """
+    mode = layer_mode.strip().lower().replace("-", "_")
+    if mode not in ("auto", "gate_counter", "plan_viterbi", "time_gap"):
+        mode = "gate_counter"
+
+    agg = bool(aggregate_spots) and mode in ("auto", "gate_counter")
+    if mode == "gate_counter" and not acquisition_csv_has_gate_counter(csv_path):
+        if plan_path is not None:
+            mode = "time_gap"
+        agg = False
+    elif mode not in ("auto", "gate_counter"):
+        agg = False
+
+    if plan_path is None and mode in ("auto", "gate_counter", "plan_viterbi"):
+        mode = "time_gap"
+        agg = False
+
+    return mode, agg
 
 
 def file_mtime(path: Path) -> float:
@@ -82,18 +116,22 @@ def pipeline_load_job(
 
     measured_unaligned: list[tuple[float, ...]] = []
     csv_display_name = ""
+    layer_mode_run = layer_mode
     if csv_path is not None:
         csv_display_name = csv_path.name
-        layer_mode_run = layer_mode
-        if plan_path is None and layer_mode_run in ("auto", "gate_counter", "plan_viterbi"):
-            layer_mode_run = "time_gap"
+        layer_mode_run, aggregate_run = resolve_csv_load_layer_mode(
+            layer_mode=layer_mode,
+            plan_path=plan_path,
+            csv_path=csv_path,
+            aggregate_spots=aggregate_spots,
+        )
         measured_unaligned = analysis.measured_spot_abc_from_csv(
             csv_path,
             max_points=None,
             planned_xyz=planned if planned else None,
             a_is_x=False,
             layer_mode=layer_mode_run,
-            aggregate_spots=aggregate_spots,
+            aggregate_spots=aggregate_run,
             aggregate_even_rows_after_odd=int(aggregate_even_rows_after_odd),
             spot_weight_mode=spot_weight_mode,
             auto_infer_params=(layer_mode_run == "auto"),
@@ -135,4 +173,5 @@ def pipeline_load_job(
         csv_display_name=csv_display_name,
         measured_aligned=list(measured_aligned) if measured_aligned is not None else None,
         align_info=align_info,
+        layer_mode_run=layer_mode_run,
     )

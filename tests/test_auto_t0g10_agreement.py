@@ -49,6 +49,7 @@ def test_auto_matches_gate_counter_t0g10() -> None:
         planned_xyz=list(planned),
         layer_mode="auto",
         a_is_x=False,
+        aggregate_spots=True,
     )
     assert len(auto) == len(gate) == len(planned)
 
@@ -68,4 +69,4 @@ def test_auto_matches_gate_counter_t0g10() -> None:
 
     params = analysis.last_auto_layer_params()
     assert params is not None
-    assert 0.52 <= params.dead_ratio <= 0.64
+    assert 0.48 <= params.dead_ratio <= 0.85

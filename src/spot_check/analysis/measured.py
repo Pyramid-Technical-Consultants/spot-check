@@ -134,6 +134,7 @@ def _probe_csv_columns_for_measured_weights(
     *,
     aggregate_spots: bool,
     spot_weight_mode: str,
+    gate_counter_aggregate: bool = False,
 ) -> None:
     swm = normalize_measured_spot_weight_mode(spot_weight_mode)
     with open_acquisition_csv(csv_path) as f:
@@ -141,7 +142,7 @@ def _probe_csv_columns_for_measured_weights(
         fn = pr.fieldnames
         if not fn:
             return
-        if aggregate_spots and GATE_COUNTER_KEY not in fn:
+        if gate_counter_aggregate and GATE_COUNTER_KEY not in fn:
             raise ValueError(f"aggregate_spots needs a “{GATE_COUNTER_KEY}” column (found {fn!r})")
         has_ch = CHANNEL_SUM_KEY in fn
         if swm == "channel_sum" and not has_ch:
@@ -396,7 +397,7 @@ def measured_spot_abc_from_csv(
     viterbi_advance_penalty_mm2: float = VITERBI_LAYER_ADVANCE_PENALTY_MM2_DEFAULT,
     planned_xyz: list[tuple[float, float, float]] | None = None,
     a_is_x: bool = False,
-    aggregate_spots: bool = False,
+    aggregate_spots: bool = True,
     aggregate_even_rows_after_odd: int = AGGREGATE_EVEN_ROWS_AFTER_ODD_DEFAULT,
     spot_weight_mode: str = SPOT_WEIGHT_MODE_DEFAULT,
     auto_episode_gap_s: float = TIME_LAYER_GAP_S_DEFAULT,
@@ -417,18 +418,19 @@ def measured_spot_abc_from_csv(
     baseline × calibrated ratio are off-spot; short glitches merge forward. Episodes are
     aligned to the plan spot count when the raw count is far off, then nominal layers use
     delivery order or monotone Viterbi on episode centroids.
-    ``aggregate_spots`` and ``aggregate_even_rows_after_odd`` are ignored in **auto** mode.
+    With ``aggregate_spots=True``, each episode becomes one **weighted-mean** spot; when False,
+    every on-spot CSV row is kept and shares the episode's nominal layer.
+    ``aggregate_even_rows_after_odd`` applies only in **gate_counter** mode.
 
     When ``auto_infer_params`` is True (default), episode gap, XY jump, on-spot weight floor,
     min episode rows, and Viterbi advance penalty are derived from the CSV timing/weights and
     plan geometry (:func:`infer_auto_layer_params`); explicit ``auto_*`` / ``viterbi_*`` kwargs
     are ignored. Set ``auto_infer_params=False`` to use the keyword values (tests, scripts).
 
-    If ``aggregate_spots`` is True, requires ``Gate Counter`` on the CSV; each contiguous run of
-    rows with the same **odd** gate value is one spot (even gate closes a spot), optionally extended
-    in **gate_counter** mode by up to ``aggregate_even_rows_after_odd`` **even-phase** rows with
-    valid amplitude + position after each odd→even transition (0 = legacy close on transition).
-    Aggregated rows use weighted means of position, layer, and σ.
+    In **gate_counter** mode with ``aggregate_spots=True``, requires ``Gate Counter`` on the CSV;
+    each contiguous run of rows with the same **odd** gate value is one spot (even gate closes a
+    spot), optionally extended by up to ``aggregate_even_rows_after_odd`` **even-phase** rows
+    after each odd→even transition. Aggregated rows use weighted means of position, layer, and σ.
     """
     mode = layer_mode.strip().lower().replace("-", "_")
     if mode not in ("time_gap", "plan_viterbi", "auto", "gate_counter"):
@@ -438,7 +440,7 @@ def measured_spot_abc_from_csv(
 
     swm = normalize_measured_spot_weight_mode(spot_weight_mode)
 
-    if aggregate_spots:
+    if aggregate_spots and mode == "gate_counter":
         ne = int(aggregate_even_rows_after_odd)
         if ne < 0 or ne > AGGREGATE_EVEN_TAIL_MAX:
             raise ValueError(
@@ -448,8 +450,9 @@ def measured_spot_abc_from_csv(
 
     _probe_csv_columns_for_measured_weights(
         csv_path,
-        aggregate_spots=aggregate_spots and mode != "auto",
+        aggregate_spots=aggregate_spots,
         spot_weight_mode=swm,
+        gate_counter_aggregate=aggregate_spots and mode == "gate_counter",
     )
     if mode == "time_gap":
         if layer_gap_s <= 0:
@@ -626,6 +629,7 @@ def measured_spot_abc_from_csv(
             for arr in layer_xy
         ]
 
+        vp = float(viterbi_advance_penalty_mm2)
         if auto_infer_params:
             from spot_check.analysis.auto_params import infer_auto_layer_params
 
@@ -634,15 +638,14 @@ def measured_spot_abc_from_csv(
             xy_jump = auto_p.spot_xy_jump_mm
             min_w = auto_p.min_on_spot_weight_na
             min_rows = auto_p.min_episode_rows
-            vit_pen = auto_p.viterbi_advance_penalty_mm2
             dead_ratio = auto_p.dead_ratio
             tiny_merge = auto_p.tiny_merge_rows
+            vp = float(auto_p.viterbi_advance_penalty_mm2)
         else:
             gap_s = float(auto_episode_gap_s)
             xy_jump = float(auto_spot_xy_jump_mm)
             min_w = float(auto_min_on_spot_weight_na)
             min_rows = int(auto_min_episode_rows)
-            vit_pen = float(viterbi_advance_penalty_mm2)
             from spot_check.constants import (
                 AUTO_EDGE_DEAD_RATIO_DEFAULT,
                 AUTO_EDGE_TINY_MERGE_ROWS,
@@ -662,9 +665,67 @@ def measured_spot_abc_from_csv(
             tiny_merge_rows=tiny_merge,
             plan_xy=plan_xy2,
         )
-        assign_by_delivery = _diag.count_align_ok and len(aligned_groups) == n_plan_spots
+        cols_w = cols_with_delivery_weights(cols)
+        aggs = aggregate_spans_batch(cols_w, aligned_groups)
 
-        aggs = aggregate_spans_batch(cols_with_delivery_weights(cols), aligned_groups)
+        if len(aggs) == n_plan_spots and _diag.count_align_ok:
+            layers_idx_auto = _aligned_auto_layer_indices(len(aggs), spots_per_layer)
+        else:
+            meas_xy = np.asarray([(a.mx, a.my) for a in aggs], dtype=np.float64)
+            emit = _emit_sqdist_to_layers_mm2(meas_xy, layer_xy)
+            layers_idx_auto = viterbi_monotone_layer_assign(emit, vp)
+
+        hi_auto = max_layer
+
+        def _clamp_layer(efi: int) -> int:
+            if efi < 0:
+                return 0
+            if efi > hi_auto:
+                return hi_auto
+            return efi
+
+        if not aggregate_spots:
+            out_rows: list[tuple[float, ...]] = []
+            for ei, (s, e) in enumerate(aligned_groups):
+                efi = _clamp_layer(int(layers_idx_auto[ei]))
+                lk_ref = layer_lks[efi] if efi < len(layer_lks) else None
+                if lk_ref is None:
+                    lk_ref = global_lk
+                for ri in range(s, e):
+                    pcd = int(cols.pcd[ri])
+                    mx_pp = float(cols.mx_p[ri])
+                    my_pp = float(cols.my_p[ri])
+                    if pcd == 0:
+                        a_fin, b_fin = float(cols.a[ri]), float(cols.b[ri])
+                    else:
+                        mx_f, my_f = _impute_plan_axis_fast(
+                            lk_ref,
+                            mx_pp if mx_pp == mx_pp else None,
+                            my_pp if my_pp == my_pp else None,
+                        )
+                        a_fin, b_fin = _ab_from_plan_xy(mx_f, my_f, a_is_x=a_is_x)
+                    sa_v = float(cols.sa[ri])
+                    sb_v = float(cols.sb[ri])
+                    sa = sa_v if sa_v == sa_v else None
+                    sb = sb_v if sb_v == sb_v else None
+                    wch = float(cols_w.weight[ri])
+                    ch_n = float(cols_w.ch_n[ri])
+                    out_rows.append(
+                        _measured_row_with_sigma(
+                            a_fin,
+                            b_fin,
+                            float(efi),
+                            wch,
+                            pcd,
+                            sa,
+                            sb,
+                            channel_sum_na=ch_n,
+                        )
+                    )
+                    if max_points is not None and len(out_rows) >= max_points:
+                        return out_rows
+            return out_rows
+
         ab_buf_auto = [(a.a, a.b) for a in aggs]
         w_buf_auto = [a.weight for a in aggs]
         ch_buf_auto = [a.ch_n for a in aggs]
@@ -672,37 +733,21 @@ def measured_spot_abc_from_csv(
         partial_plan_xy_auto = [(a.mx_pp, a.my_pp) for a in aggs]
         sig_acc_auto = [(a.sa, a.sb) for a in aggs]
 
-        if assign_by_delivery:
-            layers_idx_auto = _aligned_auto_layer_indices(len(aggs), spots_per_layer)
-        else:
-            meas_xy_auto = np.asarray([(a.mx, a.my) for a in aggs], dtype=np.float64)
-            emit_auto = _emit_sqdist_to_layers_mm2(meas_xy_auto, layer_xy)
-            layers_idx_auto = viterbi_monotone_layer_assign(emit_auto, vit_pen)
-        hi_auto = max_layer
         for i, (mx_pp2, my_pp2) in enumerate(partial_plan_xy_auto):
             if partial_codes_auto[i] == 0:
                 continue
-            efi = int(layers_idx_auto[i])
-            if efi < 0:
-                efi = 0
-            elif efi > hi_auto:
-                efi = hi_auto
+            efi = _clamp_layer(int(layers_idx_auto[i]))
             lk_ref = layer_lks[efi]
             if lk_ref is None:
                 lk_ref = global_lk
             mx_f, my_f = _impute_plan_axis_fast(lk_ref, mx_pp2, my_pp2)
-            a_fin2, b_fin2 = _ab_from_plan_xy(mx_f, my_f, a_is_x=a_is_x)
-            ab_buf_auto[i] = (a_fin2, b_fin2)
+            ab_buf_auto[i] = _ab_from_plan_xy(mx_f, my_f, a_is_x=a_is_x)
 
         out_auto: list[tuple[float, ...]] = []
         for i, ((a, b), ell, wch, ch_n, pcd) in enumerate(
             zip(ab_buf_auto, layers_idx_auto, w_buf_auto, ch_buf_auto, partial_codes_auto)
         ):
-            efi = int(ell)
-            if efi < 0:
-                efi = 0
-            elif efi > hi_auto:
-                efi = hi_auto
+            efi = _clamp_layer(int(ell))
             sa, sb = sig_acc_auto[i]
             out_auto.append(
                 _measured_row_with_sigma(

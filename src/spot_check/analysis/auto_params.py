@@ -8,10 +8,13 @@ from typing import Sequence
 import numpy as np
 
 from spot_check.analysis.auto_columns import AutoFitColumns
-from spot_check.analysis.episodes import segment_into_episodes_cols
+from spot_check.analysis.episodes import _rolling_mean, count_episodes_for_dead_ratio
 from spot_check.analysis.spatial import _plan_xy_by_energy_layer, nominal_layer_energies_mev
 from spot_check.constants import (
     AUTO_EDGE_DEAD_RATIO_DEFAULT,
+    AUTO_EDGE_DEAD_RATIO_MAX,
+    AUTO_EDGE_DEAD_RATIO_MIN,
+    AUTO_EDGE_ROLLING_WINDOW,
     AUTO_EDGE_TINY_MERGE_ROWS,
     AUTO_MIN_EPISODE_ROWS_DEFAULT,
     AUTO_MIN_ON_SPOT_WEIGHT_NA_DEFAULT,
@@ -86,19 +89,18 @@ def _calibrate_dead_ratio(
         return float(AUTO_EDGE_DEAD_RATIO_DEFAULT)
     best_ratio = float(AUTO_EDGE_DEAD_RATIO_DEFAULT)
     best_err = float("inf")
-    grid = np.linspace(0.52, 0.64, 49)
+    grid = np.linspace(AUTO_EDGE_DEAD_RATIO_MIN, AUTO_EDGE_DEAD_RATIO_MAX, 49)
+    rm_ch = _rolling_mean(cols.ch_n, AUTO_EDGE_ROLLING_WINDOW)
+    rm_fa = _rolling_mean(cols.fit_a, AUTO_EDGE_ROLLING_WINDOW)
     counts: list[int] = []
     for ratio in grid:
-        n_ep = len(
-            segment_into_episodes_cols(
-                cols,
-                episode_gap_s=1.0,
-                min_on_spot_weight_na=0.0,
-                spot_xy_jump_mm=999.0,
-                min_episode_rows=min_episode_rows,
-                dead_ratio=float(ratio),
-                tiny_merge_rows=tiny_merge_rows,
-            )
+        n_ep = count_episodes_for_dead_ratio(
+            cols,
+            float(ratio),
+            min_episode_rows=min_episode_rows,
+            tiny_merge_rows=tiny_merge_rows,
+            rm_ch=rm_ch,
+            rm_fa=rm_fa,
         )
         counts.append(n_ep)
         err = abs(n_ep - n_plan)
@@ -115,7 +117,7 @@ def _calibrate_dead_ratio(
             if ia > ib and counts_arr[ia] != counts_arr[ib]:
                 t = (n_plan - counts_arr[ib]) / float(counts_arr[ia] - counts_arr[ib])
                 best_ratio = float(grid[ib] + t * (grid[ia] - grid[ib]))
-    return float(np.clip(best_ratio, 0.52, 0.64))
+    return float(np.clip(best_ratio, AUTO_EDGE_DEAD_RATIO_MIN, AUTO_EDGE_DEAD_RATIO_MAX))
 
 
 def _infer_min_on_spot_weight_na(weight: np.ndarray) -> float:

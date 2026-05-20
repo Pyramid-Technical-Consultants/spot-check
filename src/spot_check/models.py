@@ -13,8 +13,8 @@ class CubeZAxisSpec:
 
     zmin_scene: float
     zmax_scene: float
-    z_label_at_min: float
-    z_label_at_max: float
+    z_label_at_min: float  # tick label at scene zmin (VTK index 0)
+    z_label_at_max: float  # tick label at scene zmax
     n_zlabels: int
     ztitle: str
 

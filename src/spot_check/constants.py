@@ -30,13 +30,23 @@ VITERBI_LAYER_ADVANCE_PENALTY_MM2_DEFAULT: Final[float] = 400.0
 AUTO_MIN_ON_SPOT_WEIGHT_NA_DEFAULT: Final[float] = 1e-9
 AUTO_SPOT_XY_JUMP_MM_DEFAULT: Final[float] = 3.0
 AUTO_MIN_EPISODE_ROWS_DEFAULT: Final[int] = 1
-# Delivery-edge segmentation: rows below rolling IX512 sum + fit-A baselines are deadtime.
+# Delivery-edge segmentation: row metric = sqrt((ch/baseline)(fit-A/baseline)); below ratio = dead.
 AUTO_EDGE_DEAD_RATIO_DEFAULT: Final[float] = 0.60
+AUTO_EDGE_DEAD_RATIO_MIN: Final[float] = 0.48
+AUTO_EDGE_DEAD_RATIO_MAX: Final[float] = 0.85
 AUTO_EDGE_TINY_MERGE_ROWS: Final[int] = 2
 AUTO_EDGE_ROLLING_WINDOW: Final[int] = 15
 AUTO_EDGE_ON_WEIGHT_FRAC: Final[float] = 0.45
 # When raw episode count equals the plan, skip merge/split alignment.
 AUTO_EDGE_COUNT_ALIGN_FRAC: Final[float] = 0.01
+# Greedy row splits per episode when expanding raw episodes to plan spot count.
+AUTO_EPISODE_COUNT_ALIGN_MAX_SPLITS: Final[int] = 2048
+# Max plan spots assigned to one raw delivery episode (cube: ~3 energies per grid cell).
+AUTO_PLAN_MAX_SPOTS_PER_EPISODE: Final[int] = 32
+# Plan imputation: wide tie-bands on dense grids are O(N) per row; use 1D nearest above this N.
+AUTO_PLAN_IMPUTE_FAST_MIN_N: Final[int] = 512
+# Plan XY boundary refine (cost ~ O(n_episodes × window)); skip above this episode count.
+AUTO_PLAN_REFINE_MAX_EPISODES: Final[int] = 32_000
 # Plan XY hint: search this many rows around each inter-spot boundary when refining spans.
 AUTO_PLAN_BOUNDARY_REFINE_ROWS: Final[int] = 32
 AUTO_PLAN_BOUNDARY_REFINE_PASSES: Final[int] = 4
@@ -107,6 +117,7 @@ CHANNEL_SUM_KEY: Final[str] = "IX512 Channel Sum (nA)"
 FIT_AMPLITUDE_A_KEY: Final[str] = "Fit Amplitude A (nA)"
 FIT_AMPLITUDE_B_KEY: Final[str] = "Fit Amplitude B (nA)"
 GATE_COUNTER_KEY: Final[str] = "Gate Counter"
+# ``Gate Signal`` appears on some IC256 exports; SpotCheck never reads it (unrelated to layering).
 SIGMA_A_KEY: Final[str] = "Fit Standard Deviation A (mm)"
 SIGMA_B_KEY: Final[str] = "Fit Standard Deviation B (mm)"
 

@@ -62,6 +62,7 @@ from spot_check.gui.pipeline import (
     file_mtime,
     is_acquisition_csv_file,
     pipeline_load_job,
+    resolve_csv_load_layer_mode,
 )
 from spot_check.gui.state import (
     apply_saved_window_layout,
@@ -502,7 +503,6 @@ class SpotCheckController:
             e_agg_even.setEnabled(gate_only and cb_agg.isChecked())
 
         def _sync_layer_mode_ui() -> None:
-            cb_agg.setEnabled(not rb_auto.isChecked())
             _sync_agg_even()
 
         def _update_help() -> None:
@@ -510,14 +510,16 @@ class SpotCheckController:
             _sync_layer_mode_ui()
             if lm == "auto":
                 help_lbl.setText(
-                    "Auto: signal episodes from timing, weight, and XY (Gate Counter ignored). "
+                    "Auto: signal episodes from timing, weight, and XY "
+                    "(Gate Counter and Gate Signal ignored). "
                     "Thresholds are inferred and episodes aligned to the plan spot count."
                 )
                 lbl_auto_tuning.setText(
                     "Tuning: inferred per load — see status line after refresh."
                 )
                 agg_intro_lbl.setText(
-                    "Gate-counter aggregation applies only in Gate counter mode (ignored for Auto)."
+                    "Merge rows within each signal episode to one weighted-mean spot "
+                    "(per-row when unchecked)."
                 )
             else:
                 help_lbl.setText(
@@ -997,10 +999,13 @@ class SpotCheckController:
                 pass
             slice_band_init = {"slice_on": _si_on, "center_i": _si_ci}
 
+            layer_mode_plot = str(_plot_cache.get("layer_mode_run") or ctx.layer_mode)
+            aggregate_plot = ctx.aggregate_spots and layer_mode_plot in ("auto", "gate_counter")
+
             auto_gap: float | None = None
             auto_xy: float | None = None
             auto_vp: float | None = None
-            if ctx.layer_mode == "auto":
+            if layer_mode_plot == "auto":
                 auto_p = analysis.last_auto_layer_params()
                 if auto_p is not None:
                     auto_gap = auto_p.episode_gap_s
@@ -1043,12 +1048,12 @@ class SpotCheckController:
                 measured,
                 title=view_title,
                 a_is_x=False,
-                layer_mode=ctx.layer_mode,
+                layer_mode=layer_mode_plot,
                 layer_gap_s=auto_gap,
                 refill_same_spot_xy_tol_mm=auto_xy,
                 viterbi_advance_penalty_mm2=auto_vp,
                 weight_measured_by_channel=cb_weight_ch.isChecked(),
-                aggregate_spots=ctx.aggregate_spots,
+                aggregate_spots=aggregate_plot,
                 aggregate_even_rows_after_odd=int(ctx.agg_even_n),
                 spot_weight_mode=ctx.spot_weight_mode_run,
                 detector_align_caption=detector_align_caption,
@@ -1112,7 +1117,7 @@ class SpotCheckController:
                 meas_line = f"Measured points: {n_meas} built and plotted"
             else:
                 meas_line = "Measured: (none)"
-            if measured and ctx.layer_mode == "auto":
+            if measured and layer_mode_plot == "auto":
                 auto_p = analysis.last_auto_layer_params()
                 if auto_p is not None:
                     meas_line += (
@@ -1134,10 +1139,13 @@ class SpotCheckController:
                     )
                     if not diag_auto.count_align_ok:
                         meas_line += " (spot-count align incomplete)"
-            if measured and ctx.aggregate_spots and ctx.layer_mode != "auto":
+            if measured and aggregate_plot:
                 _cap = p.measured_spot_weight_caption(ctx.spot_weight_mode_run)
-                meas_line += f" (one {_cap}-weighted mean per odd gate spot)"
-                if ctx.agg_even_n > 0 and ctx.layer_mode == "gate_counter":
+                if layer_mode_plot == "auto":
+                    meas_line += f" (one {_cap}-weighted mean per signal episode)"
+                else:
+                    meas_line += f" (one {_cap}-weighted mean per odd gate spot)"
+                if ctx.agg_even_n > 0 and layer_mode_plot == "gate_counter":
                     meas_line += (
                         f"; up to {ctx.agg_even_n} good even-phase row(s) merged after odd→even"
                     )
@@ -1203,6 +1211,7 @@ class SpotCheckController:
             )
             _plot_cache["label"] = ld.label
             _plot_cache["csv_display_name"] = ld.csv_display_name
+            _plot_cache["layer_mode_run"] = ld.layer_mode_run
             build_target = ld.csv_display_name or ld.label or "plan"
             build_note = f"Building 3D view — {build_target}…"
             load_overlay_msg.setText(build_note)
@@ -1283,16 +1292,22 @@ class SpotCheckController:
                 if planned is None or plan_mu is None:
                     planned, _, plan_mu, _, _ = analysis.planned_spot_xyz_and_counts_from_plan(dcm)
                 label = str(_plot_cache.get("label") or "")
+                layer_mode_run, aggregate_run = resolve_csv_load_layer_mode(
+                    layer_mode=layer_mode,
+                    plan_path=dcm,
+                    csv_path=csv_path,
+                    aggregate_spots=aggregate_spots,
+                )
                 measured = analysis.measured_spot_abc_from_csv(
                     csv_path,
                     max_points=None,
                     planned_xyz=planned,
                     a_is_x=False,
-                    layer_mode=layer_mode,
-                    aggregate_spots=aggregate_spots,
+                    layer_mode=layer_mode_run,
+                    aggregate_spots=aggregate_run,
                     aggregate_even_rows_after_odd=int(agg_even_n),
                     spot_weight_mode=spot_weight_mode_run,
-                    auto_infer_params=(layer_mode == "auto"),
+                    auto_infer_params=(layer_mode_run == "auto"),
                 )
                 if not measured:
                     status_lbl.setText("Export: no measured rows.")
@@ -1304,7 +1319,7 @@ class SpotCheckController:
                         measured,
                         a_is_x=False,
                     )
-                suffix = "-spots-agg.csv" if aggregate_spots else "-spots.csv"
+                suffix = "-spots-agg.csv" if aggregate_run else "-spots.csv"
                 default_out = csv_path.with_name(acquisition_csv_stem(csv_path) + suffix)
                 out_path, _ = QFileDialog.getSaveFileName(
                     win,
@@ -1318,7 +1333,7 @@ class SpotCheckController:
                     planned,
                     plan_mu,
                     measured,
-                    aggregated=aggregate_spots,
+                    aggregated=aggregate_run,
                     positions_aligned_to_plan=aligned,
                 )
                 write_combined_export_csv(
@@ -1327,8 +1342,8 @@ class SpotCheckController:
                     metadata={
                         "rt_plan_label": label,
                         "acquisition_csv": csv_path.name,
-                        "layer_mode": layer_mode,
-                        "aggregate_spots": "yes" if aggregate_spots else "no",
+                        "layer_mode": layer_mode_run,
+                        "aggregate_spots": "yes" if aggregate_run else "no",
                         "spot_weight_mode": spot_weight_mode_run,
                         "aligned_measured_xy": "yes" if aligned else "no",
                     },

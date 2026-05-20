@@ -8,7 +8,10 @@ from .cube_axes_style import (
     PYVISTA_CUBE_AXES_PADDING,
     PYVISTA_CUBE_AXES_TICKS,
     apply_pyvista_cube_axes_style,
+    cube_axes_ranges,
+    disable_pyvista_cube_axes_label_lod,
     pyvista_show_bounds_kwargs,
+    refresh_pyvista_cube_axes,
 )
 from .proton_csda_water import (
     normalize_z_depth_metric,
@@ -17,10 +20,12 @@ from .proton_csda_water import (
     proton_water_depth_mm,
 )
 from .z_axis import (
-    apply_pyvista_cube_z_axis,
+    cube_z_axis_label_endpoints,
     cube_z_axis_spec,
+    label_at_scene_z,
     n_cube_axis_labels_for_mm_step,
     nominal_mev_to_plot_z,
+    nominal_mev_to_scene_z_mev_cube,
 )
 
 __all__ = [
@@ -29,13 +34,18 @@ __all__ = [
     "PYVISTA_CUBE_AXES_PADDING",
     "PYVISTA_CUBE_AXES_TICKS",
     "apply_pyvista_cube_axes_style",
-    "apply_pyvista_cube_z_axis",
+    "cube_axes_ranges",
+    "disable_pyvista_cube_axes_label_lod",
+    "cube_z_axis_label_endpoints",
     "cube_z_axis_spec",
+    "label_at_scene_z",
     "n_cube_axis_labels_for_mm_step",
     "nominal_mev_to_plot_z",
+    "nominal_mev_to_scene_z_mev_cube",
     "normalize_z_depth_metric",
     "proton_cda_water_range_mm",
     "proton_csda_water_range_mm",
     "proton_water_depth_mm",
     "pyvista_show_bounds_kwargs",
+    "refresh_pyvista_cube_axes",
 ]

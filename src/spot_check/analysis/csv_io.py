@@ -13,7 +13,10 @@ from spot_check.constants import GATE_COUNTER_KEY
 
 
 def acquisition_csv_has_gate_counter(csv_path: Path) -> bool:
-    """True when the acquisition CSV includes a Gate Counter column."""
+    """True when the acquisition CSV includes a Gate Counter column.
+
+    Other gate-related headers (e.g. ``Gate Signal`` on IC256 exports) are ignored.
+    """
     with open_acquisition_csv(csv_path) as f:
         reader = csv.reader(f)
         try:

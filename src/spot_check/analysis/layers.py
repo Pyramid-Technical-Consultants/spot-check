@@ -7,6 +7,7 @@ from typing import Sequence
 
 from spot_check.analysis._imports import *  # noqa: F403
 from spot_check.analysis.spatial import _kdtree_query_k1, _min_xy_dist_to_nominal_energy
+from spot_check.constants import AUTO_PLAN_IMPUTE_FAST_MIN_N
 
 
 def _opt_float_cell(row: dict[str, str], key: str) -> float | None:
@@ -85,6 +86,10 @@ def _pick_axis_band(
         lo_i = hi_i = n - 1
     else:
         lo_i, hi_i = idx - 1, idx
+    if n > AUTO_PLAN_IMPUTE_FAST_MIN_N:
+        j = lo_i if abs(float(spv[lo_i]) - mcoord) <= abs(float(spv[hi_i]) - mcoord) else hi_i
+        best_j = int(ordv[j])
+        return float(px[best_j]), float(py[best_j])
     best_d = min(abs(float(spv[lo_i]) - mcoord), abs(float(spv[hi_i]) - mcoord))
     lo, hi = min(lo_i, hi_i), max(lo_i, hi_i)
     tol = max(1e-9, 1e-12 * max(1.0, abs(mcoord)))
@@ -192,6 +197,29 @@ def delivery_layer_indices(n_spots: int, spots_per_layer: Sequence[int]) -> np.n
     for i in range(n_spots):
         out[i] = max(0, min(bisect.bisect_right(cumul, i) - 1, hi))
     return out
+
+
+def auto_episode_layer_indices(n_episodes: int, spots_per_layer: Sequence[int]) -> np.ndarray:
+    """Spread episodes in acquisition order across nominal layers (proportional to plan).
+
+    Unlike :func:`delivery_layer_indices`, which only fills a prefix of layer 0 when
+    ``n_episodes`` is smaller than ``spots_per_layer[0]``, this maps the full episode stack
+    from layer 0 through the last layer. Used when auto spot-count alignment to the plan fails
+    (e.g. cube IC256 CSV with fewer detected episodes than plan spots).
+    """
+    n = int(n_episodes)
+    layers = [int(c) for c in spots_per_layer]
+    l_n = len(layers)
+    if n <= 0 or l_n == 0:
+        return np.zeros(max(0, n), dtype=np.int32)
+    w = np.asarray(layers, dtype=np.float64)
+    tot = float(w.sum())
+    if tot <= 0:
+        return np.zeros(n, dtype=np.int32)
+    hi = l_n - 1
+    edges = np.cumsum(w) / tot
+    frac = (np.arange(n, dtype=np.float64) + 0.5) / float(n)
+    return np.minimum(np.searchsorted(edges, frac, side="right"), hi).astype(np.int32)
 
 
 def energies_for_measured_time_layers(

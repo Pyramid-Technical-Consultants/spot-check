@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from typing import Any
 
 import numpy as np
 
@@ -13,16 +12,41 @@ from spot_check.constants import (
     BOUNDS_Z_TICK_MEV_DEFAULT,
     BOUNDS_Z_TICK_MM_DEFAULT,
 )
-from spot_check.geometry.cube_axes_style import (
-    PYVISTA_CUBE_AXES_LABEL_OFFSET,
-    PYVISTA_CUBE_Z_TICK_LABEL_ORIENTATION,
-    apply_pyvista_cube_axes_style,
-)
 from spot_check.geometry.proton_csda_water import (
     normalize_z_depth_metric,
     proton_water_depth_mm,
 )
 from spot_check.models import CubeZAxisSpec
+
+
+def label_at_scene_z(actor: object, z_scene: float) -> float | None:
+    """Interpolate the displayed Z tick value at a scene-Z position.
+
+    VTK places tick index 0 at scene ``zmin`` and the last index at ``zmax``; labels
+    are built from ``z_label_at_min`` to ``z_label_at_max`` along those bounds.
+    """
+    try:
+        zl = [float(actor.z_labels[i]) for i in range(len(actor.z_labels))]  # type: ignore[attr-defined]
+        bb = actor.bounds  # type: ignore[attr-defined]
+        zmin, zmax = float(bb[4]), float(bb[5])
+    except Exception:
+        return None
+    if len(zl) < 2 or zmin == zmax:
+        return None
+    lbl_at_zmin, lbl_at_zmax = float(zl[0]), float(zl[-1])
+    frac = (float(z_scene) - zmin) / (zmax - zmin)
+    frac = float(np.clip(frac, 0.0, 1.0))
+    return float(lbl_at_zmin + (lbl_at_zmax - lbl_at_zmin) * frac)
+
+
+def _label_at_scene_z(actor: object, z_scene: float) -> float | None:
+    """Alias for :func:`label_at_scene_z` (tests and internal callers)."""
+    return label_at_scene_z(actor, z_scene)
+
+
+def cube_z_axis_label_endpoints(z_spec: CubeZAxisSpec) -> tuple[float, float]:
+    """Tick label at scene ``zmin`` then ``zmax`` (VTK index 0 is at scene zmin)."""
+    return float(z_spec.z_label_at_min), float(z_spec.z_label_at_max)
 
 
 def nominal_mev_to_plot_z(
@@ -49,6 +73,17 @@ def nominal_mev_to_plot_z(
     return -e * float(_ENERGY_AXIS_VIEW_SCALE)
 
 
+def nominal_mev_to_scene_z_mev_cube(
+    energy_mev: np.ndarray,
+    *,
+    e_lo: float,
+    e_hi: float,
+) -> np.ndarray:
+    """Positive scene Z: high nominal MeV (deep) at ``zmin``; use with :func:`cube_axes_ranges`."""
+    e = np.asarray(energy_mev, dtype=np.float64)
+    return float(e_hi) + float(e_lo) - e
+
+
 def n_cube_axis_labels_for_mm_step(
     vmin: float,
     vmax: float,
@@ -64,6 +99,58 @@ def n_cube_axis_labels_for_mm_step(
         return 5
     n = int(math.ceil(span / step_mm)) + 1
     return max(5, min(n, max_n))
+
+
+def _tick_labels_at_scene_bounds(
+    z_scene: np.ndarray,
+    tick_values: np.ndarray,
+    zmin_scene: float,
+    zmax_scene: float,
+) -> tuple[float, float]:
+    """Tick labels at cube ``SetBounds`` Z endpoints (VTK index 0 is at ``zmin_scene``)."""
+    z = np.asarray(z_scene, dtype=np.float64).reshape(-1)
+    tv = np.asarray(tick_values, dtype=np.float64).reshape(-1)
+    if z.size == 0 or tv.size == 0:
+        return 0.0, 1.0
+    if z.size != tv.size:
+        return float(np.min(tv)), float(np.max(tv))
+
+    order = np.argsort(z)
+    zs = z[order]
+    tvs = tv[order]
+    # Plan spots often share layer Z; keep one tick value per scene Z for interp.
+    uz: list[float] = []
+    utv: list[float] = []
+    for zi, ti in zip(zs, tvs, strict=True):
+        if uz and float(zi) == uz[-1]:
+            utv[-1] = float(ti)
+        else:
+            uz.append(float(zi))
+            utv.append(float(ti))
+    if len(uz) == 1:
+        v = utv[0]
+        return v, v
+
+    zs_u = np.asarray(uz, dtype=np.float64)
+    tvs_u = np.asarray(utv, dtype=np.float64)
+
+    def _at(zq: float) -> float:
+        zq = float(zq)
+        if zq <= float(zs_u[0]):
+            dz = float(zs_u[1] - zs_u[0])
+            if abs(dz) < 1e-12:
+                return float(tvs_u[0])
+            slope = float((tvs_u[1] - tvs_u[0]) / dz)
+            return float(tvs_u[0] + slope * (zq - zs_u[0]))
+        if zq >= float(zs_u[-1]):
+            dz = float(zs_u[-1] - zs_u[-2])
+            if abs(dz) < 1e-12:
+                return float(tvs_u[-1])
+            slope = float((tvs_u[-1] - tvs_u[-2]) / dz)
+            return float(tvs_u[-1] + slope * (zq - zs_u[-1]))
+        return float(np.interp(zq, zs_u, tvs_u))
+
+    return _at(zmin_scene), _at(zmax_scene)
 
 
 def cube_z_axis_spec(
@@ -89,10 +176,8 @@ def cube_z_axis_spec(
             z_span = min_pad * 2.0
             zmin_b -= min_pad
             zmax_b += min_pad
-        z_pad = max(z_span * 0.06, min_pad)
-        zmin_p = zmin_b - z_pad * 0.5
-        zmax_p = zmax_b + z_pad * 0.5
-        # Tick labels must be PSTAR depth (mm), not ``-scene_z`` (confused with raw MeV).
+        zmin_p = zmin_b
+        zmax_p = zmax_b
         if nominal_energy_mev is not None:
             e_lbl = np.asarray(nominal_energy_mev, dtype=np.float64).reshape(-1)
         else:
@@ -102,8 +187,7 @@ def cube_z_axis_spec(
             metric = normalize_z_depth_metric(z_depth_metric)
             depth_mm = proton_water_depth_mm(e_lbl, metric=metric) - wet
             depth_mm = np.maximum(depth_mm, 0.0)
-            z_lbl_min = float(np.max(depth_mm))
-            z_lbl_max = float(np.min(depth_mm))
+            z_lbl_min, z_lbl_max = _tick_labels_at_scene_bounds(z, depth_mm, zmin_p, zmax_p)
         else:
             z_lbl_min = -zmin_p
             z_lbl_max = -zmax_p
@@ -120,103 +204,16 @@ def cube_z_axis_spec(
         z_span = min_pad * 2.0
         zmin_b -= min_pad
         zmax_b += min_pad
-    z_pad = max(z_span * 0.06, min_pad)
-    zmin_p = zmin_b - z_pad * 0.5
-    zmax_p = zmax_b + z_pad * 0.5
+    zmin_p = zmin_b
+    zmax_p = zmax_b
     if nominal_energy_mev is not None:
         e_lbl = np.asarray(nominal_energy_mev, dtype=np.float64).reshape(-1)
     else:
         e_lbl = np.array([], dtype=np.float64)
     if e_lbl.size > 0:
-        z_lbl_min = float(np.max(e_lbl))
-        z_lbl_max = float(np.min(e_lbl))
+        z_lbl_min, z_lbl_max = _tick_labels_at_scene_bounds(z, e_lbl, zmin_p, zmax_p)
     else:
         z_lbl_min = -zmin_p / s_view
         z_lbl_max = -zmax_p / s_view
     n_z = n_cube_axis_labels_for_mm_step(z_lbl_min, z_lbl_max, float(tick_mev))
     return CubeZAxisSpec(zmin_p, zmax_p, z_lbl_min, z_lbl_max, n_z, "Z (MeV)")
-
-
-def _cube_z_axis_label_endpoints(z_spec: CubeZAxisSpec) -> tuple[float, float]:
-    """Tick value at scene zmin (index 0) and zmax (last).
-
-    For water depth that is deep/shallow mm; for MeV, high/low energy. ``z_label_at_min`` is
-    always the value at the most-negative scene Z (deepest in the stack).
-    """
-    deep = float(max(z_spec.z_label_at_min, z_spec.z_label_at_max))
-    shallow = float(min(z_spec.z_label_at_min, z_spec.z_label_at_max))
-    return deep, shallow
-
-
-def _vtk_z_tick_labels(z_spec: CubeZAxisSpec, *, fmt: str = "%.4g") -> Any:
-    """Build vtkStringArray for Z ticks (deep→shallow along scene zmin→zmax)."""
-    from pyvista.plotting.cube_axes_actor import make_axis_labels
-
-    deep, shallow = _cube_z_axis_label_endpoints(z_spec)
-    # VTK maps tick index 0 to z_axis_range[0] at scene zmin (deepest); use descending labels.
-    return make_axis_labels(
-        vmin=deep,
-        vmax=shallow,
-        n=int(z_spec.n_zlabels),
-        fmt=fmt,
-    )
-
-
-def apply_pyvista_cube_z_axis(
-    actor: Any,
-    z_spec: CubeZAxisSpec,
-    *,
-    x_min: float,
-    x_max: float,
-    y_min: float,
-    y_max: float,
-) -> None:
-    """Apply scene bounds and Z tick labels for water-depth or MeV cube axes.
-
-    PyVista's ``actor.bounds`` setter copies scene Z into ``z_axis_range`` (negative mm).
-    Use VTK ``SetBounds`` plus explicit ``z_axis_range`` so labels stay positive depth mm.
-
-    Use ascending ``SetZAxisRange(shallow_mm, deep_mm)`` so VTK draws Z ticks, then
-    ``SetAxisLabels`` with deep→shallow strings (index 0 at scene zmin = deepest).
-    Do **not** assign ``actor.z_axis_range`` afterward — PyVista's setter calls
-    ``SetZAxisRange`` again and ``_update_z_labels()``, which clears custom labels.
-    Do not call ``SetRebuildAxes`` afterward.
-    """
-    apply_pyvista_cube_axes_style(actor)
-    actor.SetBounds(
-        float(x_min),
-        float(x_max),
-        float(y_min),
-        float(y_max),
-        float(z_spec.zmin_scene),
-        float(z_spec.zmax_scene),
-    )
-    actor.x_axis_range = (float(x_min), float(x_max))
-    actor.y_axis_range = (float(y_min), float(y_max))
-    actor._n_zlabels = int(z_spec.n_zlabels)
-    actor.SetZTitle(str(z_spec.ztitle))
-    deep_mm, shallow_mm = _cube_z_axis_label_endpoints(z_spec)
-    actor.SetZAxisRange(shallow_mm, deep_mm)
-    actor.SetAxisLabels(2, _vtk_z_tick_labels(z_spec))
-    actor._z_label_visibility = True
-    actor.SetZAxisVisibility(True)
-    actor.SetZAxisTickVisibility(True)
-    try:
-        actor.GetZAxesLabelProperty().SetOrientation(
-            float(PYVISTA_CUBE_Z_TICK_LABEL_ORIENTATION)
-        )
-    except Exception:
-        pass
-    try:
-        actor.SetLabelOffset(float(PYVISTA_CUBE_AXES_LABEL_OFFSET))
-    except Exception:
-        pass
-    try:
-        actor.SetUseTextActor3D(False)
-    except Exception:
-        pass
-    try:
-        actor.SetEnableViewAngleLOD(False)
-        actor.SetEnableDistanceLOD(False)
-    except Exception:
-        pass

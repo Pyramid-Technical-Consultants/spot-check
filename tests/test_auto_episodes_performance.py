@@ -156,6 +156,50 @@ def test_segment_align_million_dwell_rows_finishes() -> None:
     assert abs(diag.n_raw_episodes - n_plan) <= max(1, n_plan // 100)
 
 
+def test_align_repartitions_by_weight_when_many_splits_needed() -> None:
+    """When n_plan >> raw episodes, weight-quantile repartition reaches plan count."""
+    from spot_check.analysis.auto_columns import AutoFitColumns
+    from spot_check.analysis.episodes import (
+        align_episode_spans_to_plan_count_cols,
+        segment_into_episodes_cols,
+    )
+
+    n_rows = 4000
+    sig = np.full(n_rows, 100.0, dtype=np.float64)
+    cols = AutoFitColumns(
+        t=np.arange(n_rows, dtype=np.float64) * 1e-3,
+        mx=np.zeros(n_rows, dtype=np.float64),
+        my=np.zeros(n_rows, dtype=np.float64),
+        a=np.zeros(n_rows, dtype=np.float64),
+        b=np.zeros(n_rows, dtype=np.float64),
+        mx_p=np.zeros(n_rows, dtype=np.float64),
+        my_p=np.zeros(n_rows, dtype=np.float64),
+        weight=sig,
+        ch_n=sig,
+        fit_a=sig * 0.1,
+        pcd=np.zeros(n_rows, dtype=np.int32),
+        sa=np.full(n_rows, np.nan, dtype=np.float64),
+        sb=np.full(n_rows, np.nan, dtype=np.float64),
+    )
+    spans = segment_into_episodes_cols(
+        cols,
+        episode_gap_s=0.05,
+        min_on_spot_weight_na=1e-12,
+        spot_xy_jump_mm=500.0,
+        min_episode_rows=1,
+        dead_ratio=0.55,
+    )
+    raw_n = len(spans)
+    n_plan = 3000
+    plan_xy = np.zeros((n_plan, 2), dtype=np.float64)
+    work, diag = align_episode_spans_to_plan_count_cols(
+        cols, spans, n_plan, plan_xy=plan_xy
+    )
+    assert diag.count_align_ok
+    assert len(work) == n_plan
+    assert diag.n_raw_episodes == raw_n
+
+
 @pytest.mark.slow
 @pytest.mark.timeout(120)
 def test_measured_auto_many_rows_csv_finishes(tmp_path: Path) -> None:

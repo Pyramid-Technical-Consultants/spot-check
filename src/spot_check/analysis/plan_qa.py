@@ -137,6 +137,8 @@ def _plan_qa_error_line_polylines(
     use_proton_water_depth_mm: bool = False,
     upstream_wet_mm: float = 0.0,
     z_depth_metric: str = "csda",
+    plan_e_lo_mev: float | None = None,
+    plan_e_hi_mev: float | None = None,
 ) -> tuple[Any, Any]:
     """Separate line sets for warn-tier and fail-tier points (measured → NN plan spot), view Z."""
     if pv is None:
@@ -158,17 +160,30 @@ def _plan_qa_error_line_polylines(
             if not np.all(np.isfinite(exp)):
                 continue
             p0 = meas_pts_view[i]
-            zm = nominal_mev_to_plot_z(
-                np.array([float(exp[2])], dtype=np.float64),
-                use_proton_water_depth_mm=use_proton_water_depth_mm,
-                upstream_wet_mm=upstream_wet_mm,
-                z_depth_metric=z_depth_metric,
-            )
+            if use_proton_water_depth_mm:
+                zm = nominal_mev_to_plot_z(
+                    np.array([float(exp[2])], dtype=np.float64),
+                    use_proton_water_depth_mm=True,
+                    upstream_wet_mm=upstream_wet_mm,
+                    z_depth_metric=z_depth_metric,
+                )
+                z1 = float(zm[0])
+            else:
+                if plan_e_lo_mev is None or plan_e_hi_mev is None:
+                    raise ValueError(
+                        "plan_e_lo_mev and plan_e_hi_mev required for MeV-axis QA lines"
+                    )
+                zm = nominal_mev_to_scene_z_mev_cube(
+                    np.array([float(exp[2])], dtype=np.float64),
+                    e_lo=float(plan_e_lo_mev),
+                    e_hi=float(plan_e_hi_mev),
+                )
+                z1 = float(zm[0])
             p1 = np.array(
                 [
                     float(exp[0]),
                     float(exp[1]),
-                    float(zm[0]),
+                    z1,
                 ],
                 dtype=np.float64,
             )

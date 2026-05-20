@@ -11,13 +11,19 @@ ellipsoids in 3D (see ``scale_plan_spots_by_dicom_fwhm`` in :func:`show_comparis
 
 Layer assignment (nominal energy index per row):
 
+Acquisition CSVs may include a ``Gate Signal`` column (e.g. IC256); it is **never read**.
+Only ``Gate Counter`` is used, and only in **gate_counter** mode / optional aggregation.
+
 - **time_gap** — ``TIME_LAYER_GAP_S_DEFAULT`` plus refill heuristics (constants below).
   ``Gate Counter`` is ignored unless ``aggregate_spots=True``.
 
-- **auto** — **deadtime** segmentation from IX512 channel sum + fit amplitude A (rolling
-  baseline), plan spot-count alignment with optional **plan XY boundary refinement**, then
-  delivery-order layers (when aligned) or **monotone Viterbi**. Never reads ``Gate Counter``.
-  ``aggregate_spots`` is ignored in **auto** mode.
+- **auto** — **deadtime** segmentation from a scale-free delivery metric: geometric mean of
+  IX512 channel sum and fit amplitude A versus rolling baselines (works across accelerators),
+  plan spot-count alignment with optional **plan XY boundary refinement**, then
+  delivery-order layers when spot count matches the plan; otherwise proportional spread
+  by episode order (not XY Viterbi). Never reads ``Gate Counter``.
+  With ``aggregate_spots=True``, each episode is one **weighted-mean** spot; when False, every
+  on-spot CSV row is plotted and shares the episode layer.
 
 - **plan_viterbi** — global decode: each row keeps measured A/B; layer index comes from
   a monotone path (stay or +1 layer) minimizing distance-to-plan, plus a penalty for

@@ -1,7 +1,7 @@
 """PyInstaller runtime hook: skip VTK's matplotlib text backend.
 
 PyVista imports ``vtkmodules.vtkRenderingMatplotlib`` for LaTeX/math labels. SpotCheck
-uses FreeType axis labels (:func:`spot_check.geometry.apply_pyvista_cube_z_axis`) and does
+uses FreeType axis labels (PyVista ``show_bounds`` / ``CubeAxesActor``) and does
 not need matplotlib (~15MB+ in the bundle).
 """
 

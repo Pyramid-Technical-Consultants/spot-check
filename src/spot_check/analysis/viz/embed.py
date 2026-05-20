@@ -282,9 +282,32 @@ def apply_comparison_3d_camera_view(
     if render:
         plotter.render()
 
+def disconnect_slice_band_controls_qt(slice_qt: dict[str, Any] | None) -> None:
+    """Stop Qt slice callbacks from a prior plot while a new 3D view is building."""
+    if slice_qt is None:
+        return
+    chk: Any = slice_qt.get("check")
+    sli: Any = slice_qt.get("slider")
+    prev_chk = slice_qt.get("_slice_chk_handler")
+    prev_sli = slice_qt.get("_slice_sli_handler")
+    if chk is not None and prev_chk is not None:
+        try:
+            chk.toggled.disconnect(prev_chk)
+        except (TypeError, RuntimeError):
+            pass
+    if sli is not None and prev_sli is not None:
+        try:
+            sli.valueChanged.disconnect(prev_sli)
+        except (TypeError, RuntimeError):
+            pass
+    slice_qt.pop("_slice_chk_handler", None)
+    slice_qt.pop("_slice_sli_handler", None)
+
+
 def idle_slice_band_controls_qt(slice_qt: dict[str, Any] | None) -> None:
     if slice_qt is None:
         return
+    disconnect_slice_band_controls_qt(slice_qt)
     try:
         slice_qt["slider"].setEnabled(False)
         slice_qt["check"].setEnabled(False)
@@ -327,21 +350,13 @@ def _wire_slice_band_controls_qt(
 
     def on_chk(checked: bool) -> None:
         slice_cfg["slice_on"] = bool(checked)
-        apply_slice()
+        try:
+            apply_slice(refit_camera=True)
+        except TypeError:
+            apply_slice()
         refresh()
 
-    prev_chk = slice_qt.get("_slice_chk_handler")
-    prev_sli = slice_qt.get("_slice_sli_handler")
-    if prev_chk is not None:
-        try:
-            chk.toggled.disconnect(prev_chk)
-        except (TypeError, RuntimeError):
-            pass
-    if prev_sli is not None:
-        try:
-            sli.valueChanged.disconnect(prev_sli)
-        except (TypeError, RuntimeError):
-            pass
+    disconnect_slice_band_controls_qt(slice_qt)
 
     sli.setMinimum(0)
     sli.setMaximum(max(0, n_plan_layers - 1))
@@ -350,8 +365,12 @@ def _wire_slice_band_controls_qt(
         sli.setTracking(True)
     except Exception:
         pass
+    sli.blockSignals(True)
     sli.setValue(int(slice_cfg["center_i"]))
+    sli.blockSignals(False)
+    chk.blockSignals(True)
     chk.setChecked(bool(slice_cfg["slice_on"]))
+    chk.blockSignals(False)
     chk.setEnabled(True)
     sli.setEnabled(True)
     slice_qt["_slice_sli_handler"] = on_sli

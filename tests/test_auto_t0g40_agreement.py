@@ -34,6 +34,7 @@ def test_auto_reasonable_on_t0g40() -> None:
         planned_xyz=list(planned),
         layer_mode="auto",
         a_is_x=False,
+        aggregate_spots=True,
     )
     assert len(auto) == len(gate) == len(planned)
     assert analysis.last_auto_episode_diagnostics() is not None

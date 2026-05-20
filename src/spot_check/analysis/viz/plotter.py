@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from spot_check.analysis._imports import *  # noqa: F403
 from spot_check.analysis.colors import (
     _hex_to_rgb_u8,
@@ -39,6 +41,7 @@ from spot_check.analysis.viz.embed import (
     _vtk_rendering_tk_dll_present,
     _wire_slice_band_controls,
     _wire_slice_band_controls_qt,
+    disconnect_slice_band_controls_qt,
     idle_slice_band_controls,
     idle_slice_band_controls_qt,
 )
@@ -102,6 +105,7 @@ def show_comparison_3d_pyvista(
     upstream_wet_shifter_mm: float = 0.0,
     z_depth_metric: str = "csda",
     view_projection_perspective: bool = True,
+    cube_axes_sanity: bool | None = None,
 ) -> Any:
     require_pyvista()
 
@@ -134,18 +138,28 @@ def show_comparison_3d_pyvista(
     use_depth_z = bool(z_axis_use_proton_water_depth_mm)
     wet_mm = max(0.0, float(upstream_wet_shifter_mm)) if use_depth_z else 0.0
     depth_metric = str(z_depth_metric).strip().lower() if use_depth_z else "csda"
-    plan_pts[:, 2] = nominal_mev_to_plot_z(
-        plan_pts[:, 2],
-        use_proton_water_depth_mm=use_depth_z,
-        upstream_wet_mm=wet_mm,
-        z_depth_metric=depth_metric,
-    )
-    meas_pts[:, 2] = nominal_mev_to_plot_z(
-        meas_pts[:, 2],
-        use_proton_water_depth_mm=use_depth_z,
-        upstream_wet_mm=wet_mm,
-        z_depth_metric=depth_metric,
-    )
+    if use_depth_z:
+        plan_pts[:, 2] = nominal_mev_to_plot_z(
+            plan_pts[:, 2],
+            use_proton_water_depth_mm=True,
+            upstream_wet_mm=wet_mm,
+            z_depth_metric=depth_metric,
+        )
+        meas_pts[:, 2] = nominal_mev_to_plot_z(
+            meas_pts[:, 2],
+            use_proton_water_depth_mm=True,
+            upstream_wet_mm=wet_mm,
+            z_depth_metric=depth_metric,
+        )
+    else:
+        _e_lo = float(prep.e_lo)
+        _e_hi = float(prep.e_hi)
+        plan_pts[:, 2] = nominal_mev_to_scene_z_mev_cube(
+            plan_pts[:, 2], e_lo=_e_lo, e_hi=_e_hi
+        )
+        meas_pts[:, 2] = nominal_mev_to_scene_z_mev_cube(
+            meas_pts[:, 2], e_lo=_e_lo, e_hi=_e_hi
+        )
 
     n_m = meas_pts.shape[0]
     _POINT_SIZE_3D = 9
@@ -377,12 +391,6 @@ def show_comparison_3d_pyvista(
     eff_tick = (
         float(BOUNDS_XY_TICK_MM_DEFAULT) if bounds_xy_tick_mm is None else float(bounds_xy_tick_mm)
     )
-    if eff_tick > 0.0 and math.isfinite(eff_tick):
-        n_xlabels = n_cube_axis_labels_for_mm_step(x_min, x_max, eff_tick)
-        n_ylabels = n_cube_axis_labels_for_mm_step(y_min, y_max, eff_tick)
-    else:
-        n_xlabels = 5
-        n_ylabels = 5
 
     plan_cloud = pv.PolyData(plan_pts)
 
@@ -421,6 +429,13 @@ def show_comparison_3d_pyvista(
     pl = reuse_plotter
     saved_camera_position: Any = None
     if pl is not None:
+        _orig_pl_ub = getattr(pl, "_spot_check_orig_update_bounds_axes", None)
+        _orig_ren_ub = getattr(pl, "_spot_check_orig_renderer_update_bounds_axes", None)
+        if _orig_pl_ub is not None:
+            pl.update_bounds_axes = _orig_pl_ub
+        if _orig_ren_ub is not None:
+            pl.renderer.update_bounds_axes = _orig_ren_ub
+        pl._spot_check_cube_axes_guard = False
         if reuse_camera:
             try:
                 saved_camera_position = pl.camera_position
@@ -487,6 +502,8 @@ def show_comparison_3d_pyvista(
             use_proton_water_depth_mm=use_depth_z,
             upstream_wet_mm=wet_mm,
             z_depth_metric=depth_metric,
+            plan_e_lo_mev=float(prep.e_lo),
+            plan_e_hi_mev=float(prep.e_hi),
         )
         if lines_warn is not None:
             line_warn_actor = pl.add_mesh(
@@ -570,7 +587,58 @@ def show_comparison_3d_pyvista(
             slice_cfg["center_i"] = int(np.clip(ci0, 0, max(0, n_plan_layers - 1)))
     # Filled when embedding in Qt so slice callback can repaint the QVTK widget after updates.
     _qt_vtk_embed: dict[str, Any] = {"widget": None}
-    _cube_axes: dict[str, Any] = {"actor": None, "z_spec": None}
+    _cube_axes: dict[str, Any] = {
+        "actor": None,
+        "z_spec": None,
+        "scene_bounds": None,
+        "axes_ranges": None,
+    }
+    _cube_axes_ready = False
+
+    def _install_plan_cube_axes_guard() -> None:
+        """Keep cube on full-plan Z after VTK ``update_bounds_axes`` (visible-mesh shrink)."""
+        if getattr(pl, "_spot_check_cube_axes_guard", False):
+            return
+        _orig_pl_ub = pl.update_bounds_axes
+        _orig_ren_ub = pl.renderer.update_bounds_axes
+
+        def _refresh_plan_cube_axes() -> None:
+            if not _cube_axes_ready or _cube_axes.get("sanity"):
+                return
+            actor = pl.renderer.cube_axes_actor
+            sb = _cube_axes.get("scene_bounds")
+            ar = _cube_axes.get("axes_ranges")
+            if actor is None or sb is None or ar is None:
+                return
+            refresh_pyvista_cube_axes(actor, sb, ar)
+
+        def _guarded_pl_update_bounds_axes() -> None:
+            _orig_pl_ub()
+            _refresh_plan_cube_axes()
+
+        def _guarded_ren_update_bounds_axes() -> None:
+            _orig_ren_ub()
+            _refresh_plan_cube_axes()
+
+        pl._spot_check_orig_update_bounds_axes = _orig_pl_ub
+        pl._spot_check_orig_renderer_update_bounds_axes = _orig_ren_ub
+        pl.update_bounds_axes = _guarded_pl_update_bounds_axes
+        pl.renderer.update_bounds_axes = _guarded_ren_update_bounds_axes
+        pl._spot_check_cube_axes_guard = True
+
+    def _reset_camera_full_plan_bounds() -> None:
+        """Frame the cube axes on the full plan Z extent, not the sliced spot cluster."""
+        sb = _cube_axes.get("scene_bounds")
+        try:
+            if sb is not None:
+                pl.reset_camera(bounds=sb)
+            else:
+                pl.reset_camera()
+            pl.camera.zoom(1.05)
+        except Exception:
+            pass
+    if slice_qt is not None:
+        disconnect_slice_band_controls_qt(slice_qt)
 
     def _empty_poly() -> Any:
         return pv.PolyData(np.zeros((0, 3), dtype=np.float64))
@@ -582,100 +650,156 @@ def show_comparison_3d_pyvista(
             layer_energies_plan, int(slice_cfg["center_i"]), half_width=2
         )
 
-    def _all_energies_mev_for_cube_axis_labels() -> np.ndarray:
-        """Full-plan nominal MeV for Z ticks (not narrowed by the 5-layer slice)."""
-        parts: list[np.ndarray] = [np.asarray(plan_e_mev, dtype=np.float64).reshape(-1)]
-        if meas_e_final.size > 0:
-            parts.append(np.asarray(meas_e_final, dtype=np.float64).reshape(-1))
-        return np.concatenate(parts)
+    def _plan_energies_mev_for_cube_axis() -> np.ndarray:
+        """Nominal plan MeV for Z ticks (never measured rows or the 5-layer slice)."""
+        return np.asarray(plan_e_mev, dtype=np.float64).reshape(-1)
 
-    def _all_scene_z_for_cube_axis_spec() -> np.ndarray:
-        """Scene Z extent for cube bounds/ticks (full plan + measured, not slice-masked)."""
-        if plan_pts.shape[0] and meas_pts_final.shape[0]:
-            return np.r_[plan_pts[:, 2], meas_pts_final[:, 2]]
+    def _plan_scene_z_for_cube_axis() -> np.ndarray:
+        """Scene Z from the full plan stack (slice only hides spot actors)."""
         if plan_pts.shape[0]:
             return np.asarray(plan_pts[:, 2], dtype=np.float64).reshape(-1)
-        if meas_pts_final.shape[0]:
-            return np.asarray(meas_pts_final[:, 2], dtype=np.float64).reshape(-1)
         return np.zeros(0, dtype=np.float64)
 
-    def _apply_cube_z_axis(actor: Any, z_spec: _CubeZAxisSpec) -> None:
-        apply_pyvista_cube_z_axis(
-            actor,
-            z_spec,
-            x_min=float(x_min),
-            x_max=float(x_max),
-            y_min=float(y_min),
-            y_max=float(y_max),
-        )
-
-    def _sync_cube_z_axis(
-        pm: np.ndarray | None = None,
-        mm: np.ndarray | None = None,
-    ) -> None:
-        actor = _cube_axes.get("actor")
-        z_spec0 = _cube_axes.get("z_spec")
-        if actor is None or z_spec0 is None:
-            return
-        if pm is None or mm is None:
-            lo_m, hi_m = _slice_lo_hi_mev()
-            pm = _energy_slice_mask(plan_e_mev, lo_m, hi_m)
-            mm = (
-                _energy_slice_mask(meas_e_final, lo_m, hi_m)
-                if meas_e_final.size > 0
-                else np.zeros(0, dtype=bool)
-            )
+    def _plan_cube_bounds() -> tuple[tuple[float, float, float, float, float, float], str, str]:
+        """Scene box for cube axes; ``bounds == axes_ranges`` (``cube_axes_10_cube_test``)."""
+        if _cube_axes.get("sanity"):
+            b = (0.0, 10.0, 0.0, 10.0, 0.0, 10.0)
+            return b, "Z", "%.0f"
         z_spec = _cube_z_axis_spec(
-            _all_scene_z_for_cube_axis_spec(),
+            _plan_scene_z_for_cube_axis(),
             use_proton_water_depth_mm=use_depth_z,
             tick_mm=eff_tick,
-            nominal_energy_mev=_all_energies_mev_for_cube_axis_labels(),
+            nominal_energy_mev=_plan_energies_mev_for_cube_axis(),
             upstream_wet_mm=wet_mm,
             z_depth_metric=depth_metric,
         )
         _cube_axes["z_spec"] = z_spec
-        try:
-            _apply_cube_z_axis(actor, z_spec)
-        except Exception as exc:
-            logger.warning("Cube Z-axis refresh failed: %s", exc)
-
-    def _apply_nominal_energy_slice() -> None:
-        nonlocal line_warn_actor, line_fail_actor
-        lo_m, hi_m = _slice_lo_hi_mev()
-        pm = _energy_slice_mask(plan_e_mev, lo_m, hi_m)
-        mm = (
-            _energy_slice_mask(meas_e_final, lo_m, hi_m)
-            if meas_e_final.size > 0
-            else np.zeros(0, dtype=bool)
+        b = (
+            float(x_min),
+            float(x_max),
+            float(y_min),
+            float(y_max),
+            float(z_spec.zmin_scene),
+            float(z_spec.zmax_scene),
         )
+        return b, str(z_spec.ztitle), "%.0f"
 
-        if plan_actor is not None:
-            if plan_actor_uses_fwhm_glyphs and prep.plan_fwhm_xy_mm is not None:
-                if not np.any(pm):
-                    _set_actor_polydata(plan_actor, _empty_poly())
-                else:
+    def _show_plan_cube_bounds() -> None:
+        """Bare ``bounds == axes_ranges`` first (Qt shows ticks), then flip Z label range only."""
+        bounds_axes, cube_ztitle, _fmt = _plan_cube_bounds()
+        _cube_axes["scene_bounds"] = bounds_axes
+        if _cube_axes.get("sanity"):
+            axes_ranges = bounds_axes
+        else:
+            z_spec = _cube_axes.get("z_spec")
+            if z_spec is None:
+                axes_ranges = bounds_axes
+            else:
+                axes_ranges = cube_axes_ranges(
+                    float(x_min),
+                    float(x_max),
+                    float(y_min),
+                    float(y_max),
+                    z_spec,
+                )
+        _cube_axes["axes_ranges"] = axes_ranges
+        pl.show_bounds(
+            mesh=None,
+            bounds=bounds_axes,
+            axes_ranges=bounds_axes,
+            location="outer",
+            padding=0.0,
+            xtitle=prep.xlab,
+            ytitle=prep.ylab,
+            ztitle=cube_ztitle,
+            n_xlabels=6,
+            n_ylabels=6,
+            n_zlabels=6,
+            fmt="%.0f",
+            color="white",
+        )
+        actor = pl.renderer.cube_axes_actor
+        if actor is not None:
+            disable_pyvista_cube_axes_label_lod(actor)
+            if axes_ranges != bounds_axes:
+                actor.z_axis_range = (
+                    float(axes_ranges[4]),
+                    float(axes_ranges[5]),
+                )
+                try:
+                    actor.z_label_visibility = True
+                except Exception:
+                    pass
+        _cube_axes["actor"] = actor
+        try:
+            pl.render()
+        except Exception:
+            pass
+
+    _install_plan_cube_axes_guard()
+
+    def _update_slice_meshes() -> np.ndarray:
+        """Show/hide spot actors for the energy slice (does not touch cube axes)."""
+        slice_active = bool(slice_cfg["slice_on"]) and n_plan_layers > 0
+
+        if not slice_active:
+            if plan_actor is not None:
+                if plan_actor_uses_fwhm_glyphs and prep.plan_fwhm_xy_mm is not None:
                     _set_actor_polydata(
                         plan_actor,
-                        _plan_spot_fwhm_glyph_mesh(plan_pts[pm], prep.plan_fwhm_xy_mm[pm]),
+                        _plan_spot_fwhm_glyph_mesh(plan_pts, prep.plan_fwhm_xy_mm),
                     )
-            else:
-                if not np.any(pm):
-                    _set_actor_polydata(plan_actor, _empty_poly())
                 else:
-                    _set_actor_polydata(plan_actor, pv.PolyData(plan_pts[pm]))
-
-        if meas_actor is not None:
-            if not np.any(mm):
-                _set_actor_polydata(meas_actor, _empty_poly())
+                    _set_actor_polydata(plan_actor, plan_cloud)
+            if meas_actor is not None:
+                _set_actor_polydata(meas_actor, meas_view0)
+            if n_m > 0:
+                mm_full = np.ones(meas_pts_final.shape[0], dtype=bool)
             else:
-                sub_pts = meas_pts_final[mm]
-                sub_sig = meas_sigma_final[mm]
-                sub_rgba = meas_rgba_final[mm] if meas_rgba_final is not None else None
-                _set_actor_polydata(
-                    meas_actor,
-                    _make_measured_view_mesh(sub_pts, sub_sig, sub_rgba),
-                )
+                mm_full = np.zeros(0, dtype=bool)
+        else:
+            lo_m, hi_m = _slice_lo_hi_mev()
+            pm = _energy_slice_mask(plan_e_mev, lo_m, hi_m)
+            mm_full = (
+                _energy_slice_mask(meas_e_final, lo_m, hi_m)
+                if meas_e_final.size > 0
+                else np.zeros(0, dtype=bool)
+            )
 
+            if plan_actor is not None:
+                if plan_actor_uses_fwhm_glyphs and prep.plan_fwhm_xy_mm is not None:
+                    if not np.any(pm):
+                        _set_actor_polydata(plan_actor, _empty_poly())
+                    else:
+                        _set_actor_polydata(
+                            plan_actor,
+                            _plan_spot_fwhm_glyph_mesh(plan_pts[pm], prep.plan_fwhm_xy_mm[pm]),
+                        )
+                else:
+                    if not np.any(pm):
+                        _set_actor_polydata(plan_actor, _empty_poly())
+                    else:
+                        _set_actor_polydata(plan_actor, pv.PolyData(plan_pts[pm]))
+
+            if meas_actor is not None:
+                if not np.any(mm_full):
+                    _set_actor_polydata(meas_actor, _empty_poly())
+                else:
+                    sub_pts = meas_pts_final[mm_full]
+                    sub_sig = meas_sigma_final[mm_full]
+                    sub_rgba = meas_rgba_final[mm_full] if meas_rgba_final is not None else None
+                    _set_actor_polydata(
+                        meas_actor,
+                        _make_measured_view_mesh(sub_pts, sub_sig, sub_rgba),
+                    )
+
+        return mm_full
+
+    def _apply_nominal_energy_slice(*, refit_camera: bool = False) -> None:
+        nonlocal line_warn_actor, line_fail_actor
+        if not _cube_axes_ready:
+            return
+        mm_full = _update_slice_meshes()
         if line_warn_actor is not None:
             pl.remove_actor(line_warn_actor)
             line_warn_actor = None
@@ -687,17 +811,19 @@ def show_comparison_3d_pyvista(
             and qa_draw_lines
             and dist_qa_draw is not None
             and exp_xyz_qa_draw is not None
-            and np.any(mm)
+            and np.any(mm_full)
         ):
             lw, lf = _plan_qa_error_line_polylines(
-                meas_pts_final[mm],
-                exp_xyz_qa_draw[mm],
-                dist_qa_draw[mm],
+                meas_pts_final[mm_full],
+                exp_xyz_qa_draw[mm_full],
+                dist_qa_draw[mm_full],
                 pass_mm=plan_qa_pass_mm,
                 warn_mm=plan_qa_warn_mm,
                 use_proton_water_depth_mm=use_depth_z,
                 upstream_wet_mm=wet_mm,
                 z_depth_metric=depth_metric,
+                plan_e_lo_mev=float(prep.e_lo),
+                plan_e_hi_mev=float(prep.e_hi),
             )
             if lw is not None:
                 line_warn_actor = pl.add_mesh(
@@ -715,29 +841,24 @@ def show_comparison_3d_pyvista(
                     opacity=0.7,
                     pickable=False,
                 )
-        _sync_cube_z_axis(pm, mm)
+        if refit_camera:
+            _reset_camera_full_plan_bounds()
         pl.render()
-        qw = None
-        if slice_qt is not None:
-            qw = slice_qt.get("_qt_vtk_widget")
-        if qw is None:
-            qw = _qt_vtk_embed.get("widget")
-        if qw is not None:
-            try:
-                qw.update()
-            except Exception:
-                pass
+
+    def _refresh_slice_view(*, refit_camera: bool = False) -> None:
+        _apply_nominal_energy_slice(refit_camera=refit_camera)
+        _show_plan_cube_bounds()
 
     if n_plan_layers > 0 and embed_parent is None and embed_qt is None:
 
         def _on_center_layer(value: float) -> None:
             ci = int(round(float(value)))
             slice_cfg["center_i"] = int(np.clip(ci, 0, n_plan_layers - 1))
-            _apply_nominal_energy_slice()
+            _refresh_slice_view()
 
         def _on_slice_mode_checkbox(checked: bool) -> None:
             slice_cfg["slice_on"] = bool(checked)
-            _apply_nominal_energy_slice()
+            _refresh_slice_view(refit_camera=True)
 
         _slider_rng = (0.0, float(max(0, n_plan_layers - 1)))
         _slider_val = float(slice_cfg["center_i"])
@@ -777,7 +898,7 @@ def show_comparison_3d_pyvista(
                 )
         pl.add_checkbox_button_widget(
             _on_slice_mode_checkbox,
-            value=False,
+            value=bool(slice_cfg["slice_on"]),
             position=(14, 118),
             size=22,
             border_size=4,
@@ -854,17 +975,22 @@ def show_comparison_3d_pyvista(
             caption += (
                 f" Gold: {n_gold} one-axis row(s); missing fit axis from plan at nominal layer."
             )
-    if aggregate_spots and _lm != "auto":
+    if aggregate_spots and _lm in ("auto", "gate_counter"):
         _sw = measured_spot_weight_caption(spot_weight_mode)
-        caption += (
-            f" Measured spots aggregated: {_sw}-weighted mean XY + σ per odd "
-            f"{GATE_COUNTER_KEY} phase."
-        )
-        if aggregate_even_rows_after_odd > 0:
+        if _lm == "auto":
             caption += (
-                f" Gate-counter: up to {aggregate_even_rows_after_odd} even-phase row(s) "
-                "with good fits merged after each odd→even switch."
+                f" Measured spots aggregated: {_sw}-weighted mean XY + σ per signal episode."
             )
+        else:
+            caption += (
+                f" Measured spots aggregated: {_sw}-weighted mean XY + σ per odd "
+                f"{GATE_COUNTER_KEY} phase."
+            )
+            if aggregate_even_rows_after_odd > 0:
+                caption += (
+                    f" Gate-counter: up to {aggregate_even_rows_after_odd} even-phase row(s) "
+                    "with good fits merged after each odd→even switch."
+                )
     if plan_rendered_fwhm_glyphs:
         caption += (
             " Plan: FWHM ellipsoids from DICOM Scanning Spot Size (300A,0398); "
@@ -883,6 +1009,23 @@ def show_comparison_3d_pyvista(
     if plan_qa_caption_extra:
         caption += " " + plan_qa_caption_extra
     if n_plan_layers > 0:
+        if bool(slice_cfg["slice_on"]):
+            _slo, _shi = _nominal_layer_index_band_mev(
+                layer_energies_plan, int(slice_cfg["center_i"]), half_width=2
+            )
+            if use_depth_z:
+                caption += (
+                    " Z axis ticks: full plan water-depth range (PSTAR);"
+                    f" visible spots ≈ {_slo:.1f}–{_shi:.1f} MeV nominal layers."
+                )
+            else:
+                caption += (
+                    f" Z axis ticks: full plan {e_rng_lo:.1f}–{e_rng_hi:.1f} MeV"
+                    f" (not the slice band); visible spots ≈ {_slo:.1f}–{_shi:.1f} MeV."
+                    " High energy (deep) toward axis origin."
+                )
+        elif not use_depth_z:
+            caption += " Z: high energy (deep) toward axis origin; ticks are nominal MeV."
         if embed_qt is not None:
             caption += (
                 " Right-hand panel: toggle 5-layer slice and drag the center layer slider "
@@ -917,80 +1060,40 @@ def show_comparison_3d_pyvista(
     pl.add_text(title, position="upper_left", font_size=11, color="#f0f6fc", shadow=True)
     pl.add_text(caption, position="lower_left", font_size=9, color="#8b949e")
 
-    # Scene Z: negative depth/mm or −E×view_scale (shallow toward top); see nominal_mev_to_plot_z.
-    # ``axes_ranges`` maps bounding-box corners to tick labels (mm or MeV).
-    z_spec_init = _cube_z_axis_spec(
-        _all_scene_z_for_cube_axis_spec(),
-        use_proton_water_depth_mm=use_depth_z,
-        tick_mm=eff_tick,
-        nominal_energy_mev=_all_energies_mev_for_cube_axis_labels(),
-        upstream_wet_mm=wet_mm,
-        z_depth_metric=depth_metric,
+    # Cube axes last: same call as ``scripts/cube_axes_10_cube_test.py`` (``mesh=None``,
+    # ``location='outer'``, ``padding=0``). ``SPOT_CHECK_CUBE_AXES_SANITY=1`` → 0..10 box.
+    _sanity_env = os.environ.get("SPOT_CHECK_CUBE_AXES_SANITY", "").strip().lower()
+    use_cube_sanity = (
+        bool(cube_axes_sanity)
+        if cube_axes_sanity is not None
+        else _sanity_env in ("1", "true", "yes", "on")
     )
-    _cube_axes["z_spec"] = z_spec_init
-    bounds_axes = (
-        float(x_min),
-        float(x_max),
-        float(y_min),
-        float(y_max),
-        z_spec_init.zmin_scene,
-        z_spec_init.zmax_scene,
-    )
-    z_deep_lbl = float(max(z_spec_init.z_label_at_min, z_spec_init.z_label_at_max))
-    z_shallow_lbl = float(min(z_spec_init.z_label_at_min, z_spec_init.z_label_at_max))
-    axes_ranges_scene = (
-        float(x_min),
-        float(x_max),
-        float(y_min),
-        float(y_max),
-        z_deep_lbl,
-        z_shallow_lbl,
-    )
-    _cube_axes["actor"] = pl.show_bounds(
-        bounds=bounds_axes,
-        axes_ranges=axes_ranges_scene,
-        all_edges=False,
-        color="#8b949e",
-        xtitle=prep.xlab,
-        ytitle=prep.ylab,
-        ztitle=z_spec_init.ztitle,
-        n_xlabels=n_xlabels,
-        n_ylabels=n_ylabels,
-        n_zlabels=z_spec_init.n_zlabels,
-        show_xaxis=True,
-        show_yaxis=True,
-        show_zaxis=True,
-        show_xlabels=True,
-        show_ylabels=True,
-        show_zlabels=True,
-        fmt="%.4g",
-        **pyvista_show_bounds_kwargs(),
-    )
-    try:
-        _apply_cube_z_axis(_cube_axes["actor"], z_spec_init)
-    except Exception as exc:
-        logger.warning("Initial cube Z-axis apply failed: %s", exc)
+    _cube_axes["sanity"] = use_cube_sanity
+    _cube_axes_ready = True
+    _apply_nominal_energy_slice()
+    _show_plan_cube_bounds()
+    sb = _cube_axes.get("scene_bounds")
+    if sb is not None:
+        try:
+            pl.reset_camera(bounds=sb)
+            pl.camera.zoom(1.05)
+        except Exception:
+            pass
 
     if reuse_plotter is None or not reuse_camera:
-        pl.reset_camera()
-        pl.camera.zoom(1.05)
+        _reset_camera_full_plan_bounds()
     elif saved_camera_position is not None:
         try:
             pl.camera_position = saved_camera_position
         except Exception:
-            pl.reset_camera()
-            pl.camera.zoom(1.05)
+            _reset_camera_full_plan_bounds()
     else:
-        pl.reset_camera()
-        pl.camera.zoom(1.05)
+        _reset_camera_full_plan_bounds()
 
     try:
         pl.camera.parallel_projection = not bool(view_projection_perspective)
     except Exception:
         pass
-
-    _sync_cube_z_axis()
-    _apply_nominal_energy_slice()
 
     if embed_qt is not None:
         try:
@@ -1009,7 +1112,6 @@ def show_comparison_3d_pyvista(
                         qw.update()
                     except Exception:
                         pass
-            _sync_cube_z_axis()
             pl.render()
         except Exception:
             idle_slice_band_controls_qt(slice_qt)
@@ -1021,7 +1123,7 @@ def show_comparison_3d_pyvista(
                     slice_cfg,
                     layer_energies_plan,
                     n_plan_layers,
-                    _apply_nominal_energy_slice,
+                    _refresh_slice_view,
                 )
             else:
                 idle_slice_band_controls_qt(slice_qt)
@@ -1053,7 +1155,7 @@ def show_comparison_3d_pyvista(
                         slice_cfg,
                         layer_energies_plan,
                         n_plan_layers,
-                        _apply_nominal_energy_slice,
+                        _refresh_slice_view,
                     )
                 else:
                     idle_slice_band_controls(slice_tk)
