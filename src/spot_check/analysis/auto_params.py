@@ -9,6 +9,7 @@ import numpy as np
 
 from spot_check.analysis.auto_columns import AutoFitColumns
 from spot_check.analysis.episodes import _rolling_mean, count_episodes_for_dead_ratio
+from spot_check.analysis.plan_sequential import infer_plan_seq_cluster_radius_mm2
 from spot_check.analysis.spatial import _plan_xy_by_energy_layer, nominal_layer_energies_mev
 from spot_check.constants import (
     AUTO_EDGE_DEAD_RATIO_DEFAULT,
@@ -37,6 +38,7 @@ class AutoLayerParams:
     viterbi_advance_penalty_mm2: float
     dead_ratio: float
     tiny_merge_rows: int
+    plan_seq_cluster_radius_mm2: float = 100.0
 
 
 def last_auto_layer_params() -> AutoLayerParams | None:
@@ -173,6 +175,9 @@ def infer_auto_layer_params(
     dead_ratio = _calibrate_dead_ratio(
         cols, n_plan, min_episode_rows=min_rows, tiny_merge_rows=tiny_merge
     )
+    plan_list = list(planned_xyz)
+    energies = nominal_layer_energies_mev(plan_list)
+    plan_xy2 = np.asarray([(float(px), float(py)) for px, py, _ in plan_list], dtype=np.float64)
     params = AutoLayerParams(
         episode_gap_s=_infer_episode_gap_s(cols.t, n_plan),
         spot_xy_jump_mm=float(AUTO_SPOT_XY_JUMP_MM_DEFAULT),
@@ -181,6 +186,7 @@ def infer_auto_layer_params(
         viterbi_advance_penalty_mm2=_infer_viterbi_penalty_mm2(planned_xyz),
         dead_ratio=dead_ratio,
         tiny_merge_rows=tiny_merge,
+        plan_seq_cluster_radius_mm2=infer_plan_seq_cluster_radius_mm2(plan_xy2),
     )
     _set_last_params(params)
     return params

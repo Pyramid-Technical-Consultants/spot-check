@@ -141,7 +141,6 @@ def pipeline_load_job(
             spot_weight_mode=spot_weight_mode,
             auto_infer_params=auto_infer and layer_mode_run == "auto",
             auto_assign_method=auto_assign_method,
-            planned_mu=plan_mu,
         )
         if not measured_unaligned:
             raise ValueError("No measured rows to plot.")

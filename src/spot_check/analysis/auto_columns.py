@@ -110,6 +110,14 @@ def _plan_xy_partial_arrays(
     return mx_p, my_p, pcd
 
 
+def position_fit_deadtime_mask(cols: AutoFitColumns) -> np.ndarray:
+    """True when neither Fit Mean Position A nor B has a finite value (deadtime).
+
+    Includes acquisition rows with no fit amplitude (timeline gaps in the CSV).
+    """
+    return ~(np.isfinite(cols.mx_p) | np.isfinite(cols.my_p))
+
+
 def _grow_f64(buf: np.ndarray, new_cap: int) -> np.ndarray:
     out = np.empty(new_cap, dtype=np.float64)
     out[: buf.shape[0]] = buf
@@ -122,6 +130,7 @@ def _parse_acquisition_prealloc(
     *,
     swm: str,
     max_points: int | None,
+    include_deadtime_rows: bool = False,
 ) -> tuple[np.ndarray, ...]:
     col_time = col_map.get("time (s)", 0)
     col_fa = col_map[FIT_AMPLITUDE_A_KEY]
@@ -156,7 +165,32 @@ def _parse_acquisition_prealloc(
         if not line:
             continue
         parts = line.split(",")
-        if col_fa >= len(parts) or not parts[col_fa]:
+        has_fa = col_fa < len(parts) and bool(parts[col_fa].strip())
+        if not has_fa:
+            if not include_deadtime_rows:
+                continue
+            nan = float("nan")
+            t[i] = _cell_float(parts, col_time)
+            a_mm[i] = nan
+            b_mm[i] = nan
+            w_arr[i] = nan
+            fa_arr[i] = nan
+            ch_arr[i] = nan
+            sa[i] = nan
+            sb[i] = nan
+            i += 1
+            if i >= n_cap:
+                if max_points is not None:
+                    break
+                n_cap = max(n_cap * 2, i + 4096)
+                t = _grow_f64(t, n_cap)
+                a_mm = _grow_f64(a_mm, n_cap)
+                b_mm = _grow_f64(b_mm, n_cap)
+                w_arr = _grow_f64(w_arr, n_cap)
+                ch_arr = _grow_f64(ch_arr, n_cap)
+                fa_arr = _grow_f64(fa_arr, n_cap)
+                sa = _grow_f64(sa, n_cap)
+                sb = _grow_f64(sb, n_cap)
             continue
         t[i] = _cell_float(parts, col_time)
         a_mm[i] = _cell_float(parts, col_a)
@@ -226,8 +260,13 @@ def load_auto_fit_columns_from_csv(
     a_is_x: bool,
     spot_weight_mode: str,
     max_points: int | None = None,
+    include_deadtime_rows: bool = False,
 ) -> AutoFitColumns:
-    """Read CSV into column arrays; skips rows without fit amplitude or valid partial code."""
+    """Read CSV into column arrays; skips rows without fit amplitude.
+
+    Rows with fit amplitude but no position on either A/B axis are kept as deadtime
+    (``position_fit_deadtime_mask``); they are not imputed to a plan XY.
+    """
     with open_acquisition_csv(csv_path) as f:
         header = f.readline()
         if not header:
@@ -243,25 +282,19 @@ def load_auto_fit_columns_from_csv(
             col_map,
             swm=swm,
             max_points=max_points,
+            include_deadtime_rows=include_deadtime_rows,
         )
     t, a_mm, b_mm, w_arr, ch_arr, fa_arr, sa, sb = parsed
     if t.shape[0] == 0:
         return _empty_columns()
 
     mx_p, my_p, pcd = _plan_xy_partial_arrays(a_mm, b_mm, a_is_x=a_is_x)
-    keep = pcd >= 0
-    if not keep.all():
-        t = t[keep]
-        mx_p = mx_p[keep]
-        my_p = my_p[keep]
-        pcd = pcd[keep]
-        w_arr = w_arr[keep]
-        ch_arr = ch_arr[keep]
-        fa_arr = fa_arr[keep]
-        sa = sa[keep]
-        sb = sb[keep]
+    has_pos = np.isfinite(mx_p) | np.isfinite(my_p)
 
     mx_i, my_i = global_lk.impute_xy_arrays(mx_p, my_p)
+    nan = float("nan")
+    mx_i = np.where(has_pos, mx_i, nan)
+    my_i = np.where(has_pos, my_i, nan)
     if a_is_x:
         a_arr, b_arr = mx_i, my_i
     else:

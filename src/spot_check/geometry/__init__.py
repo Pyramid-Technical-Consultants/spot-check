@@ -28,6 +28,7 @@ from .z_axis import (
     nominal_depth_to_scene_z_cube,
     nominal_mev_to_plot_z,
     nominal_mev_to_scene_z_mev_cube,
+    plan_depth_bounds_mm,
 )
 
 __all__ = [
@@ -45,6 +46,7 @@ __all__ = [
     "nominal_mev_to_plot_z",
     "nominal_depth_to_scene_z_cube",
     "nominal_mev_to_scene_z_mev_cube",
+    "plan_depth_bounds_mm",
     "normalize_z_depth_metric",
     "proton_cda_water_range_mm",
     "proton_csda_water_range_mm",

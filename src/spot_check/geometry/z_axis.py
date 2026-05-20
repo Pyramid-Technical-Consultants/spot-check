@@ -84,21 +84,52 @@ def nominal_mev_to_scene_z_mev_cube(
     return float(e_hi) + float(e_lo) - e
 
 
+def plan_depth_bounds_mm(
+    e_lo_mev: float,
+    e_hi_mev: float,
+    *,
+    upstream_wet_mm: float = 0.0,
+    z_depth_metric: str = "csda",
+) -> tuple[float, float]:
+    """Shallow and deep plan water-depth bounds (mm) for cube scene-Z mapping."""
+    wet = max(0.0, float(upstream_wet_mm))
+    metric = normalize_z_depth_metric(z_depth_metric)
+    depths = np.maximum(
+        proton_water_depth_mm(
+            np.array([float(e_lo_mev), float(e_hi_mev)], dtype=np.float64),
+            metric=metric,
+        )
+        - wet,
+        0.0,
+    )
+    return float(np.min(depths)), float(np.max(depths))
+
+
 def nominal_depth_to_scene_z_cube(
     energy_mev: np.ndarray,
     *,
     upstream_wet_mm: float = 0.0,
     z_depth_metric: str = "csda",
+    depth_lo_mm: float | None = None,
+    depth_hi_mm: float | None = None,
 ) -> np.ndarray:
-    """Positive scene Z: deep layers (large mm) at ``zmin``; ``bounds == axes_ranges`` ticks."""
+    """Positive scene Z: deep layers (large mm) at ``zmin``; ``bounds == axes_ranges`` ticks.
+
+    When ``depth_lo_mm`` / ``depth_hi_mm`` are set, use those plan-wide bounds instead of
+    min/max from ``energy_mev`` alone (required for per-spot QA error lines).
+    """
     e = np.asarray(energy_mev, dtype=np.float64)
     wet = max(0.0, float(upstream_wet_mm))
     metric = normalize_z_depth_metric(z_depth_metric)
     depth = np.maximum(proton_water_depth_mm(e, metric=metric) - wet, 0.0)
     if depth.size == 0:
         return depth
-    d_lo = float(np.min(depth))
-    d_hi = float(np.max(depth))
+    if depth_lo_mm is not None and depth_hi_mm is not None:
+        d_lo = float(depth_lo_mm)
+        d_hi = float(depth_hi_mm)
+    else:
+        d_lo = float(np.min(depth))
+        d_hi = float(np.max(depth))
     if d_hi <= d_lo:
         d_hi = d_lo + 1.0
     return float(d_hi) + float(d_lo) - depth

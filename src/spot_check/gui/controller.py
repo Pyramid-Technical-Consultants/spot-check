@@ -290,25 +290,25 @@ class SpotCheckController:
         cb_view_proj.setChecked(_bool_saved("view_projection_perspective", True))
         cb_view_proj.setToolTip("On: perspective (default). Off: orthogonal / parallel projection.")
 
-        rb_auto = QRadioButton("Auto (signal episodes + plan spot count)")
-        rb_auto_layer_em = QRadioButton("Auto (layer EM — plan MU + XY error)")
+        rb_auto_episodes = QRadioButton("Auto: signal episodes + plan spot count")
+        rb_auto_seq = QRadioButton("Auto: plan order (break + XY cluster)")
         rb_gate = QRadioButton("Gate counter (odd=spot, even=deadtime)")
         layer_grp = QButtonGroup(win)
-        layer_grp.addButton(rb_auto)
-        layer_grp.addButton(rb_auto_layer_em)
+        layer_grp.addButton(rb_auto_episodes)
+        layer_grp.addButton(rb_auto_seq)
         layer_grp.addButton(rb_gate)
-        if mode0 == "auto_layer_em":
-            rb_auto_layer_em.setChecked(True)
+        if mode0 == "auto_plan_sequential":
+            rb_auto_seq.setChecked(True)
         elif mode0 == "auto":
-            rb_auto.setChecked(True)
+            rb_auto_episodes.setChecked(True)
         else:
             rb_gate.setChecked(True)
 
         def _layer_assign_mode_from_ui() -> str:
             if rb_gate.isChecked():
                 return "gate_counter"
-            if rb_auto_layer_em.isChecked():
-                return "auto_layer_em"
+            if rb_auto_seq.isChecked():
+                return "auto_plan_sequential"
             return "auto"
 
         help_lbl = QLabel()
@@ -514,22 +514,22 @@ class SpotCheckController:
         def _update_help() -> None:
             lam = _layer_assign_mode_from_ui()
             _sync_layer_mode_ui()
-            if lam == "auto_layer_em":
+            if lam == "auto_plan_sequential":
                 help_lbl.setText(
-                    "Auto (layer EM): plan MU or spot-count fractions set energy-layer "
-                    "boundaries on delivery rows; within each layer, rows partition onto "
-                    "plan XY by weighted error (Gate Counter and Gate Signal ignored)."
+                    "Auto plan-sequential: assign from the first plan spot (highest energy "
+                    "layer). Deadtime = no fit on Fit Mean Position A or B. After each gap, "
+                    "advance exactly one plan slot (never skip). Gate Counter ignored."
                 )
                 lbl_auto_tuning.setText(
-                    "Tuning: layer EM cost — see status line after refresh (no episode infer)."
+                    "Advance one plan slot per deadtime break after rows on the current spot."
                 )
                 agg_intro_lbl.setText(
-                    "Merge rows within each assigned plan spot to one weighted-mean spot "
+                    "Merge rows within each assigned plan spot to one weighted-mean row "
                     "(per-row when unchecked)."
                 )
             elif lam == "auto":
                 help_lbl.setText(
-                    "Auto: signal episodes from timing, weight, and XY "
+                    "Auto episodes: segment from timing, weight, and XY "
                     "(Gate Counter and Gate Signal ignored). "
                     "Thresholds are inferred and episodes aligned to the plan spot count."
                 )
@@ -598,8 +598,8 @@ class SpotCheckController:
 
         gb_layer = QGroupBox("Layer assignment")
         vl_layer = QVBoxLayout(gb_layer)
-        vl_layer.addWidget(rb_auto)
-        vl_layer.addWidget(rb_auto_layer_em)
+        vl_layer.addWidget(rb_auto_episodes)
+        vl_layer.addWidget(rb_auto_seq)
         vl_layer.addWidget(rb_gate)
         lbl_auto_tuning = QLabel(
             "Tuning: inferred from plan + CSV when Auto is selected."
@@ -1142,19 +1142,15 @@ class SpotCheckController:
             else:
                 meas_line = "Measured: (none)"
             if measured and layer_mode_plot == "auto":
-                if assign_plot == "layer_em":
-                    diag_em = analysis.last_layer_em_diagnostics()
-                    if diag_em is not None:
-                        meas_line += (
-                            f" — layer EM: {diag_em.n_on_rows} on-rows, "
-                            f"{diag_em.n_layers} layers, cost={diag_em.total_cost:.3g}"
+                auto_p = analysis.last_auto_layer_params()
+                if auto_p is not None:
+                    if assign_plot == "plan_sequential":
+                        meas_line += " — plan-seq: +1 plan slot per deadtime break"
+                        lbl_auto_tuning.setText(
+                            "Deadtime = no A/B position fit; advance one plan slot per break "
+                            f"(≥{auto_p.min_episode_rows} row(s) on current spot first)."
                         )
-                    lbl_auto_tuning.setText(
-                        "Layer EM: plan MU/spot fractions → layer row bounds → per-spot XY assign."
-                    )
-                else:
-                    auto_p = analysis.last_auto_layer_params()
-                    if auto_p is not None:
+                    else:
                         meas_line += (
                             f" — auto Δt≥{auto_p.episode_gap_s:g} s, "
                             f"XY>{auto_p.spot_xy_jump_mm:g} mm, "
@@ -1167,18 +1163,21 @@ class SpotCheckController:
                             f"≥{auto_p.min_episode_rows} row(s)/episode · "
                             f"Viterbi {auto_p.viterbi_advance_penalty_mm2:g} mm²"
                         )
-                    diag_auto = analysis.last_auto_episode_diagnostics()
-                    if diag_auto is not None:
-                        meas_line += (
-                            f" — episodes raw={diag_auto.n_raw_episodes}, "
-                            f"aligned={diag_auto.n_after_align}/{diag_auto.n_plan}"
-                        )
-                        if not diag_auto.count_align_ok:
-                            meas_line += " (spot-count align incomplete)"
+                        diag_auto = analysis.last_auto_episode_diagnostics()
+                        if diag_auto is not None:
+                            meas_line += (
+                                f" — episodes raw={diag_auto.n_raw_episodes}, "
+                                f"aligned={diag_auto.n_after_align}/{diag_auto.n_plan}"
+                            )
+                            if not diag_auto.count_align_ok:
+                                meas_line += " (spot-count align incomplete)"
             if measured and aggregate_plot:
                 _cap = p.measured_spot_weight_caption(ctx.spot_weight_mode_run)
                 if layer_mode_plot == "auto":
-                    meas_line += f" (one {_cap}-weighted mean per signal episode)"
+                    if assign_plot == "plan_sequential":
+                        meas_line += f" (one {_cap}-weighted mean per plan spot)"
+                    else:
+                        meas_line += f" (one {_cap}-weighted mean per signal episode)"
                 else:
                     meas_line += f" (one {_cap}-weighted mean per odd gate spot)"
                 if ctx.agg_even_n > 0 and layer_mode_plot == "gate_counter":
@@ -1351,7 +1350,6 @@ class SpotCheckController:
                     spot_weight_mode=spot_weight_mode_run,
                     auto_infer_params=auto_infer and layer_mode_run == "auto",
                     auto_assign_method=auto_assign_method,
-                    planned_mu=plan_mu,
                 )
                 if not measured:
                     status_lbl.setText("Export: no measured rows.")
@@ -1629,8 +1627,8 @@ class SpotCheckController:
         btn_view_top.clicked.connect(lambda: _apply_quick_view("top"))
         btn_view_left.clicked.connect(lambda: _apply_quick_view("left"))
         btn_view_right.clicked.connect(lambda: _apply_quick_view("right"))
-        rb_auto.toggled.connect(lambda _c: (_update_help(), _do_refresh()))
-        rb_auto_layer_em.toggled.connect(lambda _c: (_update_help(), _do_refresh()))
+        rb_auto_episodes.toggled.connect(lambda _c: (_update_help(), _do_refresh()))
+        rb_auto_seq.toggled.connect(lambda _c: (_update_help(), _do_refresh()))
         rb_gate.toggled.connect(lambda _c: (_update_help(), _do_refresh()))
         slice_chk.toggled.connect(lambda _c: persist())
         slice_sli.sliderReleased.connect(persist)

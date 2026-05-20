@@ -151,41 +151,42 @@ def _plan_qa_error_line_polylines(
     fail_m = d > warn_mm
     warn_m = ~pass_m & ~fail_m
 
+    if plan_e_lo_mev is None or plan_e_hi_mev is None:
+        raise ValueError("plan_e_lo_mev and plan_e_hi_mev required for plan QA error lines")
+
+    exp = np.asarray(expected_plan_xyz, dtype=np.float64).reshape(-1, 3)
+    meas = np.asarray(meas_pts_view, dtype=np.float64).reshape(-1, 3)
+    exp_view = exp.copy()
+    if use_proton_water_depth_mm:
+        d_lo, d_hi = plan_depth_bounds_mm(
+            float(plan_e_lo_mev),
+            float(plan_e_hi_mev),
+            upstream_wet_mm=upstream_wet_mm,
+            z_depth_metric=z_depth_metric,
+        )
+        exp_view[:, 2] = nominal_depth_to_scene_z_cube(
+            exp[:, 2],
+            upstream_wet_mm=upstream_wet_mm,
+            z_depth_metric=z_depth_metric,
+            depth_lo_mm=d_lo,
+            depth_hi_mm=d_hi,
+        )
+    else:
+        exp_view[:, 2] = nominal_mev_to_scene_z_mev_cube(
+            exp[:, 2],
+            e_lo=float(plan_e_lo_mev),
+            e_hi=float(plan_e_hi_mev),
+        )
+
     def _build(idxs: np.ndarray) -> Any:
         pts_list: list[np.ndarray] = []
         lines_list: list[int] = []
         v = 0
         for i in idxs:
-            exp = expected_plan_xyz[i]
-            if not np.all(np.isfinite(exp)):
+            p1 = exp_view[i]
+            if not np.all(np.isfinite(p1)):
                 continue
-            p0 = meas_pts_view[i]
-            if use_proton_water_depth_mm:
-                zm = nominal_depth_to_scene_z_cube(
-                    np.array([float(exp[2])], dtype=np.float64),
-                    upstream_wet_mm=upstream_wet_mm,
-                    z_depth_metric=z_depth_metric,
-                )
-                z1 = float(zm[0])
-            else:
-                if plan_e_lo_mev is None or plan_e_hi_mev is None:
-                    raise ValueError(
-                        "plan_e_lo_mev and plan_e_hi_mev required for MeV-axis QA lines"
-                    )
-                zm = nominal_mev_to_scene_z_mev_cube(
-                    np.array([float(exp[2])], dtype=np.float64),
-                    e_lo=float(plan_e_lo_mev),
-                    e_hi=float(plan_e_hi_mev),
-                )
-                z1 = float(zm[0])
-            p1 = np.array(
-                [
-                    float(exp[0]),
-                    float(exp[1]),
-                    z1,
-                ],
-                dtype=np.float64,
-            )
+            p0 = meas[i]
             pts_list.append(p0)
             pts_list.append(p1)
             lines_list.extend((2, v, v + 1))

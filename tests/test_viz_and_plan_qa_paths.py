@@ -56,10 +56,51 @@ def test_plan_qa_error_line_polylines_builds_with_pyvista(measured_csv_writer) -
         dist,
         pass_mm=1.0,
         warn_mm=3.0,
+        plan_e_lo_mev=100.0,
+        plan_e_hi_mev=120.0,
     )
     # May be None when all pass; with our fixture at least one point may warn/fail.
     assert warn_lines is None or hasattr(warn_lines, "n_points")
     assert fail_lines is None or hasattr(fail_lines, "n_points")
+
+
+def test_plan_qa_error_line_target_z_uses_plan_depth_bounds() -> None:
+    """Per-spot depth mapping must use plan-wide bounds (same as measured/plan clouds)."""
+    from spot_check.geometry.z_axis import (
+        nominal_depth_to_scene_z_cube,
+        plan_depth_bounds_mm,
+    )
+
+    e_lo, e_hi = 100.0, 120.0
+    d_lo, d_hi = plan_depth_bounds_mm(e_lo, e_hi)
+    z_plan = float(
+        nominal_depth_to_scene_z_cube(
+            np.array([e_lo, e_hi], dtype=np.float64),
+            depth_lo_mm=d_lo,
+            depth_hi_mm=d_hi,
+        )[0]
+    )
+    z_single_bug = float(nominal_depth_to_scene_z_cube(np.array([e_lo], dtype=np.float64))[0])
+    assert z_single_bug != pytest.approx(z_plan)
+
+    meas_pts = np.array([[1.0, 2.0, 0.0]], dtype=np.float64)
+    exp_xyz = np.array([[3.0, 4.0, e_lo]], dtype=np.float64)
+    warn_lines, _fail = _plan_qa_error_line_polylines(
+        meas_pts,
+        exp_xyz,
+        np.array([2.0], dtype=np.float64),
+        pass_mm=1.0,
+        warn_mm=3.0,
+        use_proton_water_depth_mm=True,
+        plan_e_lo_mev=e_lo,
+        plan_e_hi_mev=e_hi,
+    )
+    assert warn_lines is not None
+    pts = np.asarray(warn_lines.points, dtype=np.float64)
+    assert pts.shape == (2, 3)
+    assert pts[1, 0] == pytest.approx(3.0)
+    assert pts[1, 1] == pytest.approx(4.0)
+    assert pts[1, 2] == pytest.approx(z_plan)
 
 
 def test_show_comparison_3d_pyvista_plan_only_no_measured(

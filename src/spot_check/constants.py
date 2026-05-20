@@ -55,18 +55,18 @@ AUTO_PLAN_MERGE_BLEND: Final[float] = 0.65
 # Episode merge scoring: centroid XY delta² (mm²) + coeff × (Δt s)² when aligning M→N_plan.
 AUTO_EPISODE_MERGE_DT_MM2_PER_S: Final[float] = 50.0
 
-# --- Auto assign: ``episodes`` (deadtime) vs ``layer_em`` (layer error minimization) ---
+# --- Auto assign (signal episodes + plan spot count) ---
 AUTO_ASSIGN_METHOD_DEFAULT: Final[str] = "episodes"
-AUTO_LAYER_EM_BOUNDARY_SHIFT_ROWS: Final[int] = 64
-AUTO_LAYER_EM_REFINE_PASSES_DEFAULT: Final[int] = 2
-# Search ±rows around MU-initial layer boundaries (layer 0 = highest energy, first in time).
-AUTO_LAYER_EM_LAYER_BOUNDARY_BAND_ROWS: Final[int] = 512
-# Above this row count: MU layer cuts only (cube-scale CSVs).
-AUTO_LAYER_EM_FAST_MIN_ROWS: Final[int] = 20_000
-# Per-layer contiguous spot DP; above this use MU quantile splits + boundary refine.
-AUTO_LAYER_EM_DP_MAX_CELLS: Final[int] = 50_000
-AUTO_LAYER_EM_DP_MAX_SPOTS: Final[int] = 48
-AUTO_LAYER_EM_SPOT_REFINE_PASSES: Final[int] = 2
+AUTO_ASSIGN_METHODS: Final[frozenset[str]] = frozenset({"episodes", "plan_sequential"})
+# Plan-sequential: trailing row window; forward search and on-spot radius (mm²) after deadtime.
+AUTO_PLAN_SEQ_CLUSTER_WINDOW: Final[int] = 5
+AUTO_PLAN_SEQ_FORWARD_WINDOW_MIN: Final[int] = 8
+AUTO_PLAN_SEQ_FORWARD_WINDOW_MAX: Final[int] = 128
+AUTO_PLAN_SEQ_FORWARD_WINDOW_DEFAULT: Final[int] = 32
+AUTO_PLAN_SEQ_CLUSTER_RADIUS_MM_DEFAULT: Final[float] = 10.0
+AUTO_PLAN_SEQ_CLUSTER_RADIUS_SCALE: Final[float] = 1.6
+# Legacy pairwise plan[i] vs plan[i+1] margin (mm²); kept for tests tuning pairwise mode.
+AUTO_PLAN_SEQ_ADVANCE_MARGIN_MM2: Final[float] = 4.0
 
 # --- Nominal energy → water-equivalent depth (display / approximate QA only) -----
 # See :mod:`spot_check.geometry.proton_csda_water` (NIST PSTAR table + interpolation).
