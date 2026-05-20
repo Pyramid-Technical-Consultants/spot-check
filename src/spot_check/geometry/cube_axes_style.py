@@ -23,7 +23,12 @@ def cube_axes_ranges(
     y_max: float,
     z_spec: CubeZAxisSpec,
 ) -> tuple[float, float, float, float, float, float]:
-    """``axes_ranges`` for :meth:`pyvista.Plotter.show_bounds` (scene XY, Z tick corners)."""
+    """Z tick corners in depth/mm (or MeV) for a *split* ``axes_ranges`` tuple.
+
+    The 3D plotter uses ``bounds == axes_ranges`` (scene Z on all corners) like
+    ``scripts/cube_axes_10_cube_test.py`` so VTK ticks stay aligned; this helper remains for
+    callers that need explicit label endpoints vs scene bounds.
+    """
     return (
         float(x_min),
         float(x_max),

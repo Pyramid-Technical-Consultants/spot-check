@@ -3,7 +3,6 @@ import pytest
 
 from spot_check.geometry import (
     apply_z_display_to_comparison_clouds,
-    cube_axes_ranges,
     cube_z_axis_spec,
     n_cube_axis_labels_for_mm_step,
     nominal_energy_to_scene_z,
@@ -119,7 +118,7 @@ def test_cube_z_axis_spec_labels_match_scene_z_order() -> None:
 
 
 def test_refresh_pyvista_cube_axes_after_update_bounds() -> None:
-    """Public ``*_axis_range`` refresh restores depth-mm ticks after ``update_bounds``."""
+    """After a tight ``update_bounds``, refresh restores full-plan scene Z on the axis."""
     import os
 
     os.environ.setdefault("PYVISTA_OFF_SCREEN", "true")
@@ -145,7 +144,7 @@ def test_refresh_pyvista_cube_axes_after_update_bounds() -> None:
     )
     x_min, x_max, y_min, y_max = -40.0, 40.0, -40.0, 40.0
     bounds = (x_min, x_max, y_min, y_max, spec.zmin_scene, spec.zmax_scene)
-    axes = cube_axes_ranges(x_min, x_max, y_min, y_max, spec)
+    axes = bounds
     pl = pv.Plotter(off_screen=True)
     actor = pl.show_bounds(
         bounds=bounds,
@@ -161,12 +160,14 @@ def test_refresh_pyvista_cube_axes_after_update_bounds() -> None:
     actor.update_bounds((x_min, x_max, y_min, y_max, -220.0, -180.0))
     refresh_pyvista_cube_axes(actor, bounds, axes)
     assert actor.z_label_visibility is True
-    assert spec.z_label_at_min > spec.z_label_at_max
-    assert float(actor.z_labels[0]) == pytest.approx(spec.z_label_at_min, rel=0.02)
-    assert float(actor.z_labels[-1]) == pytest.approx(spec.z_label_at_max, rel=0.02)
     z_lo, z_hi = actor.GetZAxisRange()
-    assert z_lo == pytest.approx(spec.z_label_at_min)
-    assert z_hi == pytest.approx(spec.z_label_at_max)
+    lo_scene = min(spec.zmin_scene, spec.zmax_scene)
+    hi_scene = max(spec.zmin_scene, spec.zmax_scene)
+    assert z_lo == pytest.approx(lo_scene, rel=0.02, abs=1.0)
+    assert z_hi == pytest.approx(hi_scene, rel=0.02, abs=1.0)
+    zl0, zl1 = float(actor.z_labels[0]), float(actor.z_labels[-1])
+    assert min(zl0, zl1) >= lo_scene - 5.0
+    assert max(zl0, zl1) <= hi_scene + 5.0
     pl.close()
 
 

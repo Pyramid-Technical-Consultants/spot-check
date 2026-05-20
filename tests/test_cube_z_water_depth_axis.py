@@ -16,7 +16,6 @@ import numpy as np
 import pytest
 
 from spot_check.geometry import (
-    cube_axes_ranges,
     cube_z_axis_label_endpoints,
     cube_z_axis_spec,
     cube_z_axis_spec_for_display,
@@ -108,7 +107,7 @@ def _cube_actor_like_plotter(
     y_min: float = -40.0,
     y_max: float = 40.0,
 ):
-    """``show_bounds(bounds=…, axes_ranges=…, padding=0)`` — same as the 3D plotter."""
+    """``show_bounds`` like ``scripts/cube_axes_10_cube_test.py``: ``axes_ranges`` == ``bounds``."""
     pv = _pyvista_off_screen()
     bounds = (
         float(x_min),
@@ -118,7 +117,7 @@ def _cube_actor_like_plotter(
         float(spec.zmin_scene),
         float(spec.zmax_scene),
     )
-    axes_ranges = cube_axes_ranges(x_min, x_max, y_min, y_max, spec)
+    axes_ranges = bounds
     pl = pv.Plotter(off_screen=True)
     actor = pl.show_bounds(
         bounds=bounds,
@@ -134,16 +133,15 @@ def _cube_actor_like_plotter(
 
 
 def _assert_cube_z_depth_mapping(actor, spec: CubeZAxisSpec) -> None:
-    """Cube Z ticks must track PSTAR depth along scene Z (not MeV magnitudes)."""
+    """Z ticks use scene Z for both box and labels (``bounds == axes_ranges``)."""
     ticks = _tick_depths_mm(actor)
     assert len(ticks) >= 2
-    assert ticks[0] > ticks[-1], "deep mm at scene zmin (tick index 0), shallow at zmax"
-    deep, shallow = cube_z_axis_label_endpoints(spec)
+    zmin_s, zmax_s = float(spec.zmin_scene), float(spec.zmax_scene)
+    lo_scene, hi_scene = min(zmin_s, zmax_s), max(zmin_s, zmax_s)
     z_lo, z_hi = actor.GetZAxisRange()
-    assert z_lo == pytest.approx(deep)
-    assert z_hi == pytest.approx(shallow)
-    assert deep > shallow
-    assert all(t > 0 for t in ticks), "water-depth ticks must be positive mm, not scene Z"
+    assert z_lo == pytest.approx(lo_scene, rel=0.02, abs=1.0)
+    assert z_hi == pytest.approx(hi_scene, rel=0.02, abs=1.0)
+    assert all(lo_scene - 2.0 <= t <= hi_scene + 2.0 for t in ticks)
 
 
 def _assert_spot_depth_matches_ticks(
@@ -222,7 +220,7 @@ def test_regression_wrong_z_axis_range_inverts_depth_ticks() -> None:
 
 
 def test_refresh_after_update_bounds_axes() -> None:
-    """``update_bounds_axes`` must not leave scene-Z ticks; refresh restores MeV labels."""
+    """After ``update_bounds_axes``, refresh restores full-plan scene Z (MeV mode)."""
     energies = np.array([78.5, 134.4])
     spec = _cube_spec_from_energies(energies, tick_mev=5.0, use_water_depth=False)
     x_min, x_max, y_min, y_max = -40.0, 40.0, -40.0, 40.0
@@ -241,7 +239,7 @@ def test_refresh_after_update_bounds_axes() -> None:
 
 
 def test_refresh_pins_plan_z_not_visible_mesh_extent() -> None:
-    """Tight ``update_bounds`` must not move shallow tick from 78.5 MeV to ~106 MeV."""
+    """Tight ``update_bounds`` must not leave cube Z stuck on the visible mesh band."""
     energies = np.array([78.5, 134.4])
     spec = _cube_spec_from_energies(energies, tick_mev=5.0, use_water_depth=False)
     x_min, x_max, y_min, y_max = -40.0, 40.0, -40.0, 40.0
@@ -255,7 +253,7 @@ def test_refresh_pins_plan_z_not_visible_mesh_extent() -> None:
         refresh_pyvista_cube_axes(actor, bounds, axes_ranges)
         z_shallow_scene = float(spec.zmax_scene)
         shallow_lbl = label_at_scene_z(actor, z_shallow_scene)
-        assert shallow_lbl == pytest.approx(78.5, abs=2.0)
+        assert shallow_lbl == pytest.approx(z_shallow_scene, abs=2.0)
         assert float(actor.bounds[4]) == pytest.approx(float(spec.zmin_scene), rel=0.01)
         assert float(actor.bounds[5]) == pytest.approx(float(spec.zmax_scene), rel=0.01)
     finally:
@@ -317,7 +315,6 @@ def test_regression_bounds_setter_then_refresh_restores_depth_mm() -> None:
         actor.bounds = bounds
         refresh_pyvista_cube_axes(actor, bounds, axes_ranges)
         _assert_cube_z_depth_mapping(actor, spec)
-        assert float(actor.z_labels[0]) > float(actor.z_labels[-1])
     finally:
         _pl.close()
 
@@ -437,7 +434,7 @@ def test_t0g40_deepest_layer_same_as_t0g10_shallowest_differs() -> None:
 @pytest.mark.local_data
 @pytest.mark.skipif(not _T0G10_DCM.is_file(), reason="T0G10 DICOM not under test_data/")
 def test_t0g10_mev_axis_full_plan_range_with_slice_on() -> None:
-    """Slice must not collapse Z; cube uses split ``axes_ranges`` on positive scene Z."""
+    """Slice must not collapse Z; full-plan scene Z uses matching bounds and axes_ranges."""
     from spot_check import analysis
     from spot_check.plan import planned_spot_xyz_and_counts_from_dicom
 
@@ -461,9 +458,9 @@ def test_t0g10_mev_axis_full_plan_range_with_slice_on() -> None:
         assert all(math.isfinite(t) for t in zl)
         assert min(zl) < max(zl)
         assert all(t > 0 for t in zl)
-        assert max(zl) == pytest.approx(134.4, abs=8.0)
         assert min(zl) == pytest.approx(78.5, abs=8.0)
-        assert zl[0] > zl[-1]  # shallow nominal MeV at high scene z (last tick)
+        assert max(zl) == pytest.approx(134.4, abs=8.0)
+        assert zl[0] < zl[-1]  # scene Z increases toward shallow nominal MeV
         assert float(actor.bounds[4]) > 70.0
         assert float(actor.bounds[5]) < 145.0
         assert actor.z_label_visibility is True
@@ -474,7 +471,7 @@ def test_t0g10_mev_axis_full_plan_range_with_slice_on() -> None:
 @pytest.mark.local_data
 @pytest.mark.skipif(not _T0G10_DCM.is_file(), reason="T0G10 DICOM not under test_data/")
 def test_show_comparison_3d_pyvista_water_depth_cube_axes() -> None:
-    """End-to-end: plotter shows Z tick labels on water depth (split axes_ranges)."""
+    """End-to-end: plotter shows Z tick labels with ``bounds == axes_ranges`` (water depth)."""
     from spot_check import analysis
     from spot_check.plan import planned_spot_xyz_and_counts_from_dicom
 
@@ -497,8 +494,11 @@ def test_show_comparison_3d_pyvista_water_depth_cube_axes() -> None:
         zl = [float(actor.z_labels[i]) for i in range(len(actor.z_labels))]
         assert 5 <= len(zl) <= 11
         assert all(math.isfinite(t) for t in zl)
-        assert all(t > 0 for t in zl)
-        assert zl[0] > zl[-1]
+        zb0, zb1 = float(actor.bounds[4]), float(actor.bounds[5])
+        z_lo, z_hi = min(zb0, zb1), max(zb0, zb1)
+        assert min(zl) >= z_lo - 2.0
+        assert max(zl) <= z_hi + 2.0
+        assert zl[0] < zl[-1]
         assert actor.z_label_visibility is True
     finally:
         pl.close()

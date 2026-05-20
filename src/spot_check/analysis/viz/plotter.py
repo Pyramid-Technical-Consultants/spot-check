@@ -62,6 +62,21 @@ def _set_actor_polydata(actor: Any | None, mesh: Any) -> None:
     mapper.dataset = mesh
 
 
+def _maybe_show_pyvista_plotter(pl: Any) -> None:
+    """Interactive ``show()`` only when a display is expected; headless CI segfaults otherwise."""
+    off = bool(getattr(pl, "off_screen", False))
+    if not off:
+        env = os.environ.get("PYVISTA_OFF_SCREEN", "").strip().lower()
+        off = env in ("1", "true", "yes", "on")
+    if off:
+        try:
+            pl.render()
+        except Exception:
+            pass
+        return
+    pl.show()
+
+
 def show_comparison_3d_pyvista(
     planned_xyz: list[tuple[float, float, float]],
     measured_abc: list[tuple[float, ...]],
@@ -595,10 +610,9 @@ def show_comparison_3d_pyvista(
                 return
             actor = pl.renderer.cube_axes_actor
             sb = _cube_axes.get("scene_bounds")
-            ar = _cube_axes.get("axes_ranges")
-            if actor is None or sb is None or ar is None:
+            if actor is None or sb is None:
                 return
-            refresh_pyvista_cube_axes(actor, sb, ar)
+            pin_pyvista_cube_bounds(actor, sb)
 
         def _guarded_pl_update_bounds_axes() -> None:
             _orig_pl_ub()
@@ -649,7 +663,7 @@ def show_comparison_3d_pyvista(
         return np.zeros(0, dtype=np.float64)
 
     def _plan_cube_bounds() -> tuple[tuple[float, float, float, float, float, float], str, str]:
-        """Scene box for cube axes; ``axes_ranges`` from :func:`cube_axes_ranges` unless sanity."""
+        """Scene box for cube axes; ticks use the same numeric range as the box corners."""
         if _cube_axes.get("sanity"):
             _cube_axes["z_spec"] = None
             b = (0.0, 10.0, 0.0, 10.0, 0.0, 10.0)
@@ -671,17 +685,21 @@ def show_comparison_3d_pyvista(
         return b, str(z_spec.ztitle), "%.0f"
 
     def _show_plan_cube_bounds() -> None:
-        """Cube axes: scene ``bounds`` plus label ``axes_ranges`` (matches VTK regression tests)."""
+        """Cube axes: same as ``scripts/cube_axes_10_cube_test.py`` — ``axes_ranges`` == ``bounds``.
+
+        PyVista expands ``bounds`` when padding is non-zero but not ``axes_ranges``, which skews
+        ticks; split Z (scene box vs depth/mm tick corners) also breaks label placement. Keep one
+        range for both so corner coords match tick numbers.
+        """
         bounds_axes, cube_ztitle, _fmt = _plan_cube_bounds()
         _cube_axes["scene_bounds"] = bounds_axes
         if _cube_axes.get("sanity"):
-            axes_ranges = bounds_axes
             n_z = 6
         else:
             z_spec = _cube_axes["z_spec"]
             assert z_spec is not None
-            axes_ranges = cube_axes_ranges(x_min, x_max, y_min, y_max, z_spec)
             n_z = int(z_spec.n_zlabels)
+        axes_ranges = bounds_axes
         _cube_axes["axes_ranges"] = axes_ranges
         pl.show_bounds(
             mesh=None,
@@ -1019,8 +1037,8 @@ def show_comparison_3d_pyvista(
     pl.add_text(title, position="upper_left", font_size=11, color="#f0f6fc", shadow=True)
     pl.add_text(caption, position="lower_left", font_size=9, color="#8b949e")
 
-    # Cube axes last: same call as ``scripts/cube_axes_10_cube_test.py`` (``mesh=None``,
-    # ``location='outer'``, ``padding=0``). ``SPOT_CHECK_CUBE_AXES_SANITY=1`` → 0..10 box.
+    # Cube axes last: same as ``scripts/cube_axes_10_cube_test.py`` — ``bounds`` and
+    # ``axes_ranges`` are identical, ``mesh=None``, ``location='outer'``, ``padding=0``.
     _sanity_env = os.environ.get("SPOT_CHECK_CUBE_AXES_SANITY", "").strip().lower()
     use_cube_sanity = (
         bool(cube_axes_sanity)
@@ -1088,7 +1106,7 @@ def show_comparison_3d_pyvista(
                 idle_slice_band_controls_qt(slice_qt)
     elif embed_parent is not None:
         if tk is None:
-            pl.show()
+            _maybe_show_pyvista_plotter(pl)
             idle_slice_band_controls(slice_tk)
         else:
             for _child in embed_parent.winfo_children():
@@ -1119,5 +1137,5 @@ def show_comparison_3d_pyvista(
                 else:
                     idle_slice_band_controls(slice_tk)
     else:
-        pl.show()
+        _maybe_show_pyvista_plotter(pl)
     return pl

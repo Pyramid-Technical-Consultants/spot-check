@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Bare-bones 10×10×10 cube + cube axes. PyVista only — no spot_check.
 
+Production 3D view uses the same rule: pass the same 6-tuple for ``bounds`` and
+``axes_ranges`` (see ``show_comparison_3d_pyvista``).
+
     python scripts/cube_axes_10_cube_test.py
 """
 
