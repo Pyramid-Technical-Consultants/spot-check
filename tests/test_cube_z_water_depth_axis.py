@@ -19,12 +19,14 @@ from spot_check.geometry import (
     cube_axes_ranges,
     cube_z_axis_label_endpoints,
     cube_z_axis_spec,
-    nominal_mev_to_plot_z,
+    cube_z_axis_spec_for_display,
+    nominal_energy_to_scene_z,
+    plan_depth_bounds_mm,
     refresh_pyvista_cube_axes,
 )
 from spot_check.geometry.proton_csda_water import proton_water_depth_mm
 from spot_check.geometry.z_axis import label_at_scene_z
-from spot_check.models import CubeZAxisSpec
+from spot_check.models import CubeZAxisSpec, ZAxisDisplayConfig
 
 _T0G10_DCM = Path("test_data/RN.15186535.T0G10.dcm")
 _T0G40_DCM = Path("test_data/RN.15186535.T0G40.dcm")
@@ -54,21 +56,32 @@ def _cube_spec_from_energies(
     z_depth_metric: str = "csda",
 ) -> CubeZAxisSpec:
     e = np.asarray(energies_mev, dtype=np.float64).reshape(-1)
-    z = nominal_mev_to_plot_z(
-        e,
-        use_proton_water_depth_mm=use_water_depth,
+    e_lo, e_hi = float(np.min(e)), float(np.max(e))
+    cfg = ZAxisDisplayConfig(
+        use_water_depth_mm=use_water_depth,
         upstream_wet_mm=upstream_wet_mm,
         z_depth_metric=z_depth_metric,
-    )
-    return cube_z_axis_spec(
-        z,
-        use_proton_water_depth_mm=use_water_depth,
         tick_mm=tick_mm,
         tick_mev=tick_mev,
-        nominal_energy_mev=e,
-        upstream_wet_mm=upstream_wet_mm,
-        z_depth_metric=z_depth_metric,
     )
+    if use_water_depth:
+        d_lo, d_hi = plan_depth_bounds_mm(
+            e_lo,
+            e_hi,
+            upstream_wet_mm=upstream_wet_mm,
+            z_depth_metric=z_depth_metric,
+        )
+        z = nominal_energy_to_scene_z(
+            e,
+            plan_e_lo=e_lo,
+            plan_e_hi=e_hi,
+            config=cfg,
+            depth_lo_mm=d_lo,
+            depth_hi_mm=d_hi,
+        )
+    else:
+        z = nominal_energy_to_scene_z(e, plan_e_lo=e_lo, plan_e_hi=e_hi, config=cfg)
+    return cube_z_axis_spec_for_display(z, e, cfg)
 
 
 def _interpolate_tick_depth_mm(
@@ -78,13 +91,13 @@ def _interpolate_tick_depth_mm(
 ) -> float:
     """Depth (mm) implied by tick strings (deep at index 0, shallow at last)."""
     deep_lbl, shallow_lbl = cube_z_axis_label_endpoints(spec)
-    depth = -float(z_scene)
-    span = shallow_lbl - deep_lbl
-    if span == 0.0:
+    zmin_s, zmax_s = float(spec.zmin_scene), float(spec.zmax_scene)
+    span_s = zmax_s - zmin_s
+    if span_s == 0.0:
         return float(tick_depth_mm[0])
-    frac = (depth - deep_lbl) / span
+    frac = (float(z_scene) - zmin_s) / span_s
     frac = float(np.clip(frac, 0.0, 1.0))
-    return float(tick_depth_mm[0]) + frac * (float(tick_depth_mm[-1]) - float(tick_depth_mm[0]))
+    return float(deep_lbl + frac * (shallow_lbl - deep_lbl))
 
 
 def _cube_actor_like_plotter(
@@ -140,9 +153,20 @@ def _assert_spot_depth_matches_ticks(
     *,
     atol_mm: float = 1.5,
 ) -> None:
-    z_scene = nominal_mev_to_plot_z(energies_mev, use_proton_water_depth_mm=True)
+    e = np.asarray(energies_mev, dtype=np.float64).reshape(-1)
+    e_lo, e_hi = float(np.min(e)), float(np.max(e))
+    cfg = ZAxisDisplayConfig(use_water_depth_mm=True, tick_mm=5.0)
+    d_lo, d_hi = plan_depth_bounds_mm(e_lo, e_hi)
+    z_scene = nominal_energy_to_scene_z(
+        e,
+        plan_e_lo=e_lo,
+        plan_e_hi=e_hi,
+        config=cfg,
+        depth_lo_mm=d_lo,
+        depth_hi_mm=d_hi,
+    )
     depth = proton_water_depth_mm(energies_mev, metric="csda")
-    np.testing.assert_allclose(-z_scene, depth, rtol=0, atol=0.05)
+    np.testing.assert_allclose(float(d_hi) + float(d_lo) - z_scene, depth, rtol=0, atol=0.05)
     for zs, d_mm in zip(z_scene, depth, strict=True):
         tick_lbl = _interpolate_tick_depth_mm(float(zs), spec, tick_depth_mm)
         assert tick_lbl == pytest.approx(float(d_mm), abs=atol_mm), (
@@ -171,14 +195,20 @@ def test_cube_ticks_track_pstar_depth_for_synthetic_energies(
 
 
 def test_regression_wrong_z_axis_range_inverts_depth_ticks() -> None:
-    """Assigning ascending MeV-style range to depth corners swaps deep/shallow (~50 vs ~130)."""
-    from pyvista.plotting.cube_axes_actor import make_axis_labels
-
+    """Depth cube maps deep nominal MeV to deep mm at the scene-zmin tick."""
     energies = np.array([78.5, 134.4])
-    z = nominal_mev_to_plot_z(energies, use_proton_water_depth_mm=True)
+    e_lo, e_hi = float(np.min(energies)), float(np.max(energies))
+    cfg = ZAxisDisplayConfig(use_water_depth_mm=True, tick_mm=5.0)
+    d_lo, d_hi = plan_depth_bounds_mm(e_lo, e_hi)
+    z = nominal_energy_to_scene_z(
+        energies,
+        plan_e_lo=e_lo,
+        plan_e_hi=e_hi,
+        config=cfg,
+        depth_lo_mm=d_lo,
+        depth_hi_mm=d_hi,
+    )
     spec = _cube_spec_from_energies(energies, tick_mm=5.0)
-    deep, shallow = cube_z_axis_label_endpoints(spec)
-    depth_lo = float(proton_water_depth_mm(78.5))
     depth_hi = float(proton_water_depth_mm(134.4))
 
     _pl, actor, _b, _a = _cube_actor_like_plotter(spec)
@@ -187,19 +217,6 @@ def test_regression_wrong_z_axis_range_inverts_depth_ticks() -> None:
         ticks_ok = _tick_depths_mm(actor)
         lbl_deep_ok = _interpolate_tick_depth_mm(float(z[1]), spec, ticks_ok)
         assert lbl_deep_ok == pytest.approx(depth_hi, abs=2.0)
-
-        actor.z_axis_range = (shallow, deep)
-        actor.SetAxisLabels(
-            2,
-            make_axis_labels(vmin=shallow, vmax=deep, n=spec.n_zlabels, fmt="%.4g"),
-        )
-        ticks_bad = _tick_depths_mm(actor)
-        lbl_deep_bad = _interpolate_tick_depth_mm(float(z[1]), spec, ticks_bad)
-        lbl_shallow_bad = _interpolate_tick_depth_mm(float(z[0]), spec, ticks_bad)
-        assert abs(lbl_deep_bad - depth_hi) > 20.0
-        assert abs(lbl_shallow_bad - depth_lo) > 20.0
-        assert lbl_deep_bad == pytest.approx(depth_lo, abs=2.0)
-        assert lbl_shallow_bad == pytest.approx(depth_hi, abs=2.0)
     finally:
         _pl.close()
 
@@ -306,9 +323,9 @@ def test_regression_bounds_setter_then_refresh_restores_depth_mm() -> None:
 
 
 def test_water_depth_labels_from_mev_not_negated_scene_z() -> None:
-    """Using ``-scene_z`` on raw MeV positions used to print ~78–134 on the axis."""
+    """Using raw MeV as scene Z used to print MeV magnitudes on a depth axis."""
     energies = np.array([78.5, 134.4])
-    z_mev_scene = -energies  # bug class: nominal MeV stored as scene Z
+    z_mev_scene = energies.copy()
     spec_bad = cube_z_axis_spec(
         z_mev_scene,
         use_proton_water_depth_mm=True,
@@ -320,19 +337,39 @@ def test_water_depth_labels_from_mev_not_negated_scene_z() -> None:
     deep_bad, shallow_bad = cube_z_axis_label_endpoints(spec_bad)
     assert shallow_ok == pytest.approx(float(proton_water_depth_mm(78.5)), abs=1.0)
     assert deep_ok == pytest.approx(float(proton_water_depth_mm(134.4)), abs=1.5)
-    assert shallow_bad == pytest.approx(78.5, abs=2.5)
-    assert deep_bad == pytest.approx(134.4, abs=2.5)
     assert abs(shallow_bad - shallow_ok) > 15.0
+    assert abs(deep_bad - deep_ok) > 15.0
 
 
-def test_scene_z_not_raw_negative_mev_when_water_depth_on() -> None:
-    for e in (78.5, 100.0, 134.4, 70.0):
-        z_depth = float(nominal_mev_to_plot_z(np.array([e]), use_proton_water_depth_mm=True)[0])
-        z_mev_axis = float(nominal_mev_to_plot_z(np.array([e]), use_proton_water_depth_mm=False)[0])
+def test_scene_z_positive_water_depth_matches_affine() -> None:
+    e_lo, e_hi = 50.0, 230.0
+    cfg_d = ZAxisDisplayConfig(use_water_depth_mm=True)
+    cfg_m = ZAxisDisplayConfig(use_water_depth_mm=False)
+    d_lo, d_hi = plan_depth_bounds_mm(e_lo, e_hi)
+    for e in (78.5, 100.0, 134.4, 180.0):
+        z_depth = float(
+            nominal_energy_to_scene_z(
+                np.array([e], dtype=np.float64),
+                plan_e_lo=e_lo,
+                plan_e_hi=e_hi,
+                config=cfg_d,
+                depth_lo_mm=d_lo,
+                depth_hi_mm=d_hi,
+            )[0]
+        )
+        z_mev_axis = float(
+            nominal_energy_to_scene_z(
+                np.array([e], dtype=np.float64),
+                plan_e_lo=e_lo,
+                plan_e_hi=e_hi,
+                config=cfg_m,
+            )[0]
+        )
         depth = float(proton_water_depth_mm(e))
-        assert z_depth == pytest.approx(-depth, abs=0.05)
-        assert z_mev_axis == pytest.approx(-2.0 * e, abs=0.01)
-        assert abs(z_depth + depth) < abs(z_depth + e)
+        assert z_depth == pytest.approx(float(d_hi) + float(d_lo) - depth, abs=0.05)
+        assert z_mev_axis == pytest.approx(e_hi + e_lo - e, abs=0.01)
+        recon = float(d_hi) + float(d_lo) - z_depth
+        assert abs(recon - depth) < abs(recon - e)
         assert abs(z_depth - z_mev_axis) > _MEV_DEPTH_CONFUSION_MM
 
 
@@ -355,10 +392,22 @@ def test_t0g10_plan_spots_and_cube_ticks_use_csda_mm_not_mev() -> None:
         _assert_spot_depth_matches_ticks(
             np.array([78.5, 134.4]), spec, _tick_depths_mm(actor), atol_mm=1.5
         )
+        e_lo, e_hi = float(np.min(e_all)), float(np.max(e_all))
+        cfg = ZAxisDisplayConfig(use_water_depth_mm=True)
+        d_lo, d_hi = plan_depth_bounds_mm(e_lo, e_hi)
         for e_nom in layer_e[:: max(1, len(layer_e) // 8)]:
-            zs = float(nominal_mev_to_plot_z(np.array([e_nom]), use_proton_water_depth_mm=True)[0])
+            zs = float(
+                nominal_energy_to_scene_z(
+                    np.array([e_nom], dtype=np.float64),
+                    plan_e_lo=e_lo,
+                    plan_e_hi=e_hi,
+                    config=cfg,
+                    depth_lo_mm=d_lo,
+                    depth_hi_mm=d_hi,
+                )[0]
+            )
             d_nom = float(proton_water_depth_mm(e_nom))
-            assert abs(zs + d_nom) < abs(zs + e_nom)
+            assert abs(zs - (d_hi + d_lo - d_nom)) < abs(zs - e_nom)
     finally:
         _pl.close()
 
@@ -385,7 +434,7 @@ def test_t0g40_deepest_layer_same_as_t0g10_shallowest_differs() -> None:
 
 @pytest.mark.skipif(not _T0G10_DCM.is_file(), reason="T0G10 DICOM not under test_data/")
 def test_t0g10_mev_axis_full_plan_range_with_slice_on() -> None:
-    """Slice must not collapse Z; MeV cube uses ``bounds == axes_ranges`` (positive scene Z)."""
+    """Slice must not collapse Z; cube uses split ``axes_ranges`` on positive scene Z."""
     from spot_check import analysis
     from spot_check.plan import planned_spot_xyz_and_counts_from_dicom
 
@@ -405,13 +454,13 @@ def test_t0g10_mev_axis_full_plan_range_with_slice_on() -> None:
         )
         actor = pl.renderer.cube_axes_actor
         zl = [float(actor.z_labels[i]) for i in range(len(actor.z_labels))]
-        assert len(zl) == 6
+        assert 5 <= len(zl) <= 11
         assert all(math.isfinite(t) for t in zl)
         assert min(zl) < max(zl)
         assert all(t > 0 for t in zl)
         assert max(zl) == pytest.approx(134.4, abs=8.0)
         assert min(zl) == pytest.approx(78.5, abs=8.0)
-        assert zl[0] < zl[-1]  # deep/high energy at scene zmin (axis origin)
+        assert zl[0] > zl[-1]  # shallow nominal MeV at high scene z (last tick)
         assert float(actor.bounds[4]) > 70.0
         assert float(actor.bounds[5]) < 145.0
         assert actor.z_label_visibility is True
@@ -421,7 +470,7 @@ def test_t0g10_mev_axis_full_plan_range_with_slice_on() -> None:
 
 @pytest.mark.skipif(not _T0G10_DCM.is_file(), reason="T0G10 DICOM not under test_data/")
 def test_show_comparison_3d_pyvista_water_depth_cube_axes() -> None:
-    """End-to-end: plotter shows six Z tick labels (``bounds == axes_ranges``)."""
+    """End-to-end: plotter shows Z tick labels on water depth (split axes_ranges)."""
     from spot_check import analysis
     from spot_check.plan import planned_spot_xyz_and_counts_from_dicom
 
@@ -442,9 +491,10 @@ def test_show_comparison_3d_pyvista_water_depth_cube_axes() -> None:
         actor = pl.renderer.cube_axes_actor
         assert actor is not None
         zl = [float(actor.z_labels[i]) for i in range(len(actor.z_labels))]
-        assert len(zl) == 6
+        assert 5 <= len(zl) <= 11
         assert all(math.isfinite(t) for t in zl)
         assert all(t > 0 for t in zl)
+        assert zl[0] > zl[-1]
         assert actor.z_label_visibility is True
     finally:
         pl.close()

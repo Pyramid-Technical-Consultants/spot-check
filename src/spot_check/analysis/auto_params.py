@@ -176,7 +176,6 @@ def infer_auto_layer_params(
         cols, n_plan, min_episode_rows=min_rows, tiny_merge_rows=tiny_merge
     )
     plan_list = list(planned_xyz)
-    energies = nominal_layer_energies_mev(plan_list)
     plan_xy2 = np.asarray([(float(px), float(py)) for px, py, _ in plan_list], dtype=np.float64)
     params = AutoLayerParams(
         episode_gap_s=_infer_episode_gap_s(cols.t, n_plan),

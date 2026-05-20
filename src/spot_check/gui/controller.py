@@ -53,7 +53,6 @@ from spot_check.gui.layer_assign import (
 )
 from spot_check.gui.parsers import (
     normalize_z_depth_metric,
-    parse_aggregate_even_tail_n,
     parse_bounds_xy_tick_mm,
     parse_plan_qa_thresholds,
     parse_upstream_wet_shifter_mm,
@@ -156,16 +155,6 @@ class SpotCheckController:
 
         e_dcm = QLineEdit(str(saved.get("dcm_path") or ""))
         e_csv = QLineEdit(str(saved.get("csv_path") or ""))
-        e_agg_even = QLineEdit(
-            str(
-                int(
-                    saved.get(
-                        "aggregate_even_rows_after_odd",
-                        sc_const.AGGREGATE_EVEN_ROWS_AFTER_ODD_DEFAULT,
-                    )
-                )
-            )
-        )
         raw_bxy = saved.get("bounds_xy_tick_mm", sc_const.BOUNDS_XY_TICK_MM_DEFAULT)
         try:
             bxy0 = float(raw_bxy)
@@ -269,8 +258,19 @@ class SpotCheckController:
         )
         cb_align = QCheckBox("Rigid XY align measured → plan (any rotation / A↔B)")
         cb_align.setChecked(_bool_saved("auto_align_detector_xy", True))
-        cb_agg = QCheckBox("One measured point per odd gate phase (weighted mean)")
+        cb_agg = QCheckBox("Aggregate rows per assigned spot (weighted mean)")
         cb_agg.setChecked(_bool_saved("aggregate_spots_by_gate", True))
+        cb_agg.setToolTip(
+            "On: merge all CSV rows assigned to the same plan spot into one weighted-mean point. "
+            "Off: keep every assigned row as its own point."
+        )
+        cb_heal_partial = QCheckBox("Heal one-axis fits from plan (keep partial A/B rows)")
+        cb_heal_partial.setChecked(_bool_saved("heal_partial_fit_axes", False))
+        cb_heal_partial.setToolTip(
+            "Off (default): drop rows missing Fit Mean Position A or B. "
+            "On: keep rows with exactly one missing axis; fill the gap from the nearest plan "
+            "spot at the assigned layer (shown gold in 3D when QA coloring is off)."
+        )
         cb_pqa = QCheckBox("Color measured spots by plan QA (pass / warn / fail)")
         cb_pqa.setChecked(_bool_saved("plan_qa_coloring", True))
         rb_qa_pos = QRadioButton("Position (XY mm vs plan)")
@@ -407,10 +407,6 @@ class SpotCheckController:
             qa_mode_sv = _current_plan_qa_mode()
             pos_thr = _qa_thr_by_mode["position"]
             dose_thr = _qa_thr_by_mode["dose"]
-            tail_n = parse_aggregate_even_tail_n(e_agg_even.text())
-            if tail_n is None:
-                tail_n = int(sc_const.AGGREGATE_EVEN_ROWS_AFTER_ODD_DEFAULT)
-                e_agg_even.setText(str(tail_n))
             sw_lbl = combo_sw.currentText().strip()
             sw_internal = _SW_MODE_BY_LABEL.get(sw_lbl)
             if sw_internal is None:
@@ -434,7 +430,7 @@ class SpotCheckController:
                 weight_measured_by_channel_sum=cb_weight_ch.isChecked(),
                 spot_weight_mode=sw_mode_norm,
                 aggregate_spots_by_gate=cb_agg.isChecked(),
-                aggregate_even_rows_after_odd=int(tail_n),
+                heal_partial_fit_axes=cb_heal_partial.isChecked(),
                 auto_align_detector_xy=cb_align.isChecked(),
                 bounds_xy_tick_mm=float(xy_tick_save),
                 plan_qa_coloring=cb_pqa.isChecked(),
@@ -504,16 +500,8 @@ class SpotCheckController:
             cb_qa_lines.setEnabled(en and not dose)
             cb_qa_hide.setEnabled(en)
 
-        def _sync_agg_even() -> None:
-            gate_only = rb_gate.isChecked()
-            e_agg_even.setEnabled(gate_only and cb_agg.isChecked())
-
-        def _sync_layer_mode_ui() -> None:
-            _sync_agg_even()
-
         def _update_help() -> None:
             lam = _layer_assign_mode_from_ui()
-            _sync_layer_mode_ui()
             if lam == "auto_plan_sequential":
                 help_lbl.setText(
                     "Auto plan-sequential: assign from the first plan spot (highest energy "
@@ -524,8 +512,8 @@ class SpotCheckController:
                     "Advance one plan slot per deadtime break after rows on the current spot."
                 )
                 agg_intro_lbl.setText(
-                    "Merge rows within each assigned plan spot to one weighted-mean row "
-                    "(per-row when unchecked)."
+                    "Checked: one weighted-mean row per plan spot assigned above. "
+                    "Unchecked: every on-spot CSV row is kept."
                 )
             elif lam == "auto":
                 help_lbl.setText(
@@ -537,8 +525,8 @@ class SpotCheckController:
                     "Tuning: inferred per load — see status line after refresh."
                 )
                 agg_intro_lbl.setText(
-                    "Merge rows within each signal episode to one weighted-mean spot "
-                    "(per-row when unchecked)."
+                    "Checked: one weighted-mean row per signal episode (assigned plan spot). "
+                    "Unchecked: every on-spot CSV row is kept."
                 )
             else:
                 help_lbl.setText(
@@ -546,8 +534,8 @@ class SpotCheckController:
                     "new odd advances."
                 )
                 agg_intro_lbl.setText(
-                    f"Many rows per counter value — merge below for one XY per odd phase "
-                    f"({sc_const.GATE_COUNTER_KEY})."
+                    f"Checked: one weighted-mean row per odd {sc_const.GATE_COUNTER_KEY} phase "
+                    "(assigned plan spot). Unchecked: every on-spot CSV row is kept."
                 )
 
         def _path_clear_button(edit: QLineEdit) -> QPushButton:
@@ -608,6 +596,9 @@ class SpotCheckController:
         lbl_auto_tuning.setStyleSheet(f"color: {MUTED_HINT}; font-size: 9pt;")
         vl_layer.addWidget(lbl_auto_tuning)
         vl_layer.addWidget(help_lbl)
+        vl_layer.addWidget(agg_intro_lbl)
+        vl_layer.addWidget(cb_agg)
+        vl_layer.addWidget(cb_heal_partial)
 
         gb_disp = QGroupBox("Display")
         vdisp = QVBoxLayout(gb_disp)
@@ -729,31 +720,12 @@ class SpotCheckController:
         view_proj_row.addWidget(btn_view_right)
         vview3d.addLayout(view_proj_row)
 
-        gb_agg = QGroupBox("Aggregation")
-        vag = QVBoxLayout(gb_agg)
-        vag.addWidget(agg_intro_lbl)
-        vag.addWidget(cb_agg)
-        erow = QHBoxLayout()
-        erow.addWidget(QLabel("Merge ≤ even rows"))
-        erow.addWidget(e_agg_even)
-        erow.addWidget(
-            _add_hint_lbl(
-                "Even rows after odd→even, good fits; 0=off; max "
-                f"{sc_const.AGGREGATE_EVEN_TAIL_MAX}"
-            ),
-            1,
-        )
-        we = QWidget()
-        we.setLayout(erow)
-        vag.addWidget(we)
-
         drawer_layout.addWidget(gb_files)
         drawer_layout.addWidget(gb_layer)
         drawer_layout.addWidget(gb_disp)
         drawer_layout.addWidget(gb_qa)
         drawer_layout.addWidget(gb_slice)
         drawer_layout.addWidget(gb_view3d)
-        drawer_layout.addWidget(gb_agg)
 
         auto_hint = QLabel(
             "3D refreshes when inputs validate. Numbers debounce briefly after typing."
@@ -805,6 +777,7 @@ class SpotCheckController:
             "csv_display_name": "",
             "layer_mode_run": "",
             "auto_assign_method": "episodes",
+            "aggregate_run": False,
             "plotter": None,
             "aligned": None,
             "z_water_depth": False,
@@ -1023,7 +996,7 @@ class SpotCheckController:
 
             layer_mode_req, _, _ = resolve_layer_assign_mode(ctx.layer_assign_mode)
             layer_mode_plot = str(_plot_cache.get("layer_mode_run") or layer_mode_req)
-            aggregate_plot = ctx.aggregate_spots and layer_mode_plot in ("auto", "gate_counter")
+            aggregate_plot = bool(_plot_cache.get("aggregate_run", False))
 
             auto_gap: float | None = None
             auto_xy: float | None = None
@@ -1078,7 +1051,6 @@ class SpotCheckController:
                 viterbi_advance_penalty_mm2=auto_vp,
                 weight_measured_by_channel=cb_weight_ch.isChecked(),
                 aggregate_spots=aggregate_plot,
-                aggregate_even_rows_after_odd=int(ctx.agg_even_n),
                 spot_weight_mode=ctx.spot_weight_mode_run,
                 detector_align_caption=detector_align_caption,
                 bounds_xy_tick_mm=ctx.xy_tick_use,
@@ -1173,17 +1145,9 @@ class SpotCheckController:
                                 meas_line += " (spot-count align incomplete)"
             if measured and aggregate_plot:
                 _cap = p.measured_spot_weight_caption(ctx.spot_weight_mode_run)
-                if layer_mode_plot == "auto":
-                    if assign_plot == "plan_sequential":
-                        meas_line += f" (one {_cap}-weighted mean per plan spot)"
-                    else:
-                        meas_line += f" (one {_cap}-weighted mean per signal episode)"
-                else:
-                    meas_line += f" (one {_cap}-weighted mean per odd gate spot)"
-                if ctx.agg_even_n > 0 and layer_mode_plot == "gate_counter":
-                    meas_line += (
-                        f"; up to {ctx.agg_even_n} good even-phase row(s) merged after odd→even"
-                    )
+                meas_line += f" (one {_cap}-weighted mean per assigned plan spot)"
+            elif measured and ctx.aggregate_spots and not aggregate_plot:
+                meas_line += " (aggregation requested but not applied — see layer assignment mode)"
             if cb_align.isChecked() and detector_align_caption:
                 meas_line += f". {detector_align_caption}"
             if cb_pqa.isChecked():
@@ -1248,6 +1212,7 @@ class SpotCheckController:
             _plot_cache["csv_display_name"] = ld.csv_display_name
             _plot_cache["layer_mode_run"] = ld.layer_mode_run
             _plot_cache["auto_assign_method"] = ld.auto_assign_method
+            _plot_cache["aggregate_run"] = ld.aggregate_run
             build_target = ld.csv_display_name or ld.label or "plan"
             build_note = f"Building 3D view — {build_target}…"
             load_overlay_msg.setText(build_note)
@@ -1284,6 +1249,7 @@ class SpotCheckController:
             _plot_cache["plan_mu"] = None
             _plot_cache["layer_mode_run"] = ""
             _plot_cache["auto_assign_method"] = "episodes"
+            _plot_cache["aggregate_run"] = False
             _plot_cache["plotter"] = None
             analysis.idle_slice_band_controls_qt(slice_qt_bindings)
             short = msg if len(msg) < 160 else f"{msg[:157]}…"
@@ -1310,13 +1276,6 @@ class SpotCheckController:
             layer_mode_req, auto_assign_method, auto_infer = resolve_layer_assign_mode(
                 layer_assign_mode
             )
-
-            agg_even_n = parse_aggregate_even_tail_n(e_agg_even.text())
-            if agg_even_n is None:
-                status_lbl.setText(
-                    f"Export: even-row merge must be 0–{sc_const.AGGREGATE_EVEN_TAIL_MAX}."
-                )
-                return
 
             sw_lbl_run = combo_sw.currentText().strip()
             sw_internal_run = _SW_MODE_BY_LABEL.get(sw_lbl_run, sc_const.SPOT_WEIGHT_MODE_DEFAULT)
@@ -1346,10 +1305,10 @@ class SpotCheckController:
                     a_is_x=False,
                     layer_mode=layer_mode_run,
                     aggregate_spots=aggregate_run,
-                    aggregate_even_rows_after_odd=int(agg_even_n),
                     spot_weight_mode=spot_weight_mode_run,
                     auto_infer_params=auto_infer and layer_mode_run == "auto",
                     auto_assign_method=auto_assign_method,
+                    heal_partial_fit_axes=bool(cb_heal_partial.isChecked()),
                 )
                 if not measured:
                     status_lbl.setText("Export: no measured rows.")
@@ -1469,16 +1428,6 @@ class SpotCheckController:
                     qa_pass_f, qa_warn_f = qa_pair
                     _qa_thr_by_mode[qa_mode_run] = (float(qa_pass_f), float(qa_warn_f))
             layer_assign_mode = _layer_assign_mode_from_ui()
-            agg_even_n = parse_aggregate_even_tail_n(e_agg_even.text())
-            if agg_even_n is None:
-                _bump_load_generation_invalidate_async()
-                analysis.idle_slice_band_controls_qt(slice_qt_bindings)
-                _vtk_placeholder_message(
-                    f"Even merge: integer 0–{sc_const.AGGREGATE_EVEN_TAIL_MAX}.",
-                    error=True,
-                )
-                status_lbl.setText("Fix even-row merge count.")
-                return
             try:
                 sw_lbl_run = combo_sw.currentText().strip()
                 sw_internal_run = _SW_MODE_BY_LABEL.get(
@@ -1493,8 +1442,8 @@ class SpotCheckController:
                     file_mtime(csv_path) if has_csv and csv_path else -1.0,
                     layer_assign_mode,
                     bool(cb_agg.isChecked()),
-                    int(agg_even_n),
                     spot_weight_mode_run,
+                    bool(cb_heal_partial.isChecked()),
                 )
                 ctx = GuiRefreshContext(
                     plan_path=plan_path if has_plan else None,
@@ -1505,7 +1454,6 @@ class SpotCheckController:
                     qa_warn_f=qa_warn_f,
                     layer_assign_mode=layer_assign_mode,
                     aggregate_spots=bool(cb_agg.isChecked()),
-                    agg_even_n=int(agg_even_n),
                     spot_weight_mode_run=spot_weight_mode_run,
                     pipeline_key=pipeline_key,
                 )
@@ -1539,9 +1487,9 @@ class SpotCheckController:
                             ctx.csv_path,
                             layer_assign_mode=ctx.layer_assign_mode,
                             aggregate_spots=ctx.aggregate_spots,
-                            aggregate_even_rows_after_odd=ctx.agg_even_n,
                             spot_weight_mode=ctx.spot_weight_mode_run,
                             auto_align=bool(cb_align.isChecked()),
+                            heal_partial_fit_axes=bool(cb_heal_partial.isChecked()),
                         )
 
                     load_pool.start(PipelineLoadRunnable(_job, load_signals, gen))
@@ -1596,7 +1544,6 @@ class SpotCheckController:
             e_csv,
             e_bxy,
             e_wet,
-            e_agg_even,
         ):
             w.textChanged.connect(_schedule_refresh)
             w.editingFinished.connect(_commit_field_refresh)
@@ -1611,7 +1558,8 @@ class SpotCheckController:
         cb_meas_sigma.toggled.connect(_do_refresh)
         cb_z_water.toggled.connect(lambda _c: (_sync_wet_shifter_ui(), _do_refresh()))
         cb_align.toggled.connect(_do_refresh)
-        cb_agg.toggled.connect(lambda _c: (_sync_layer_mode_ui(), _do_refresh()))
+        cb_agg.toggled.connect(lambda _c: (_update_help(), _do_refresh()))
+        cb_heal_partial.toggled.connect(_do_refresh)
         cb_pqa.toggled.connect(lambda _c: (_sync_qa_lines(), _do_refresh()))
 
         def _on_qa_mode_changed() -> None:

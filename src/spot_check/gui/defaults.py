@@ -13,7 +13,7 @@ DEFAULT_GUI_STATE: dict[str, object] = {
     "weight_measured_by_channel_sum": True,
     "spot_weight_mode": sc_const.SPOT_WEIGHT_MODE_DEFAULT,
     "aggregate_spots_by_gate": True,
-    "aggregate_even_rows_after_odd": sc_const.AGGREGATE_EVEN_ROWS_AFTER_ODD_DEFAULT,
+    "heal_partial_fit_axes": False,
     "auto_align_detector_xy": True,
     "bounds_xy_tick_mm": sc_const.BOUNDS_XY_TICK_MM_DEFAULT,
     "plan_qa_coloring": True,

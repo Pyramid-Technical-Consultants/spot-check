@@ -1,4 +1,11 @@
-"""Z-axis mapping and cube-axes tick density for 3D views."""
+"""Z-axis mapping and cube-axes tick density for 3D views.
+
+Scene Z for the PyVista comparison view uses a **positive** affine map (see
+:func:`nominal_energy_to_scene_z`): deep layers / high nominal MeV sit at low
+scene ``z`` (cube ``zmin``), shallow at high ``z``. Cube tick *labels* are mm
+or MeV via :class:`~spot_check.models.CubeZAxisSpec` and
+:func:`spot_check.geometry.cube_axes_style.cube_axes_ranges`.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +23,7 @@ from spot_check.geometry.proton_csda_water import (
     normalize_z_depth_metric,
     proton_water_depth_mm,
 )
-from spot_check.models import CubeZAxisSpec
+from spot_check.models import CubeZAxisSpec, ZAxisDisplayConfig
 
 
 def label_at_scene_z(actor: object, z_scene: float) -> float | None:
@@ -39,38 +46,131 @@ def label_at_scene_z(actor: object, z_scene: float) -> float | None:
     return float(lbl_at_zmin + (lbl_at_zmax - lbl_at_zmin) * frac)
 
 
-def _label_at_scene_z(actor: object, z_scene: float) -> float | None:
-    """Alias for :func:`label_at_scene_z` (tests and internal callers)."""
-    return label_at_scene_z(actor, z_scene)
-
-
 def cube_z_axis_label_endpoints(z_spec: CubeZAxisSpec) -> tuple[float, float]:
     """Tick label at scene ``zmin`` then ``zmax`` (VTK index 0 is at scene zmin)."""
     return float(z_spec.z_label_at_min), float(z_spec.z_label_at_max)
 
 
-def nominal_mev_to_plot_z(
+def nominal_energy_to_scene_z(
     energy_mev: np.ndarray,
     *,
-    use_proton_water_depth_mm: bool,
-    upstream_wet_mm: float = 0.0,
-    z_depth_metric: str = "csda",
+    plan_e_lo: float,
+    plan_e_hi: float,
+    config: ZAxisDisplayConfig,
+    depth_lo_mm: float | None = None,
+    depth_hi_mm: float | None = None,
 ) -> np.ndarray:
-    """Map nominal energy (MeV) to scene Z for 3D display (mm depth or scaled MeV).
+    """Map nominal energy (MeV) to comparison-view scene Z (positive depth or MeV affine).
 
-    Scene Z is **negative** depth (shallow / low energy toward +Z, i.e. top of the view).
-    Cube tick labels use positive mm via :func:`cube_z_axis_spec`.
-
-    When ``use_proton_water_depth_mm`` is true, depth uses ``z_depth_metric`` (CSDA / R90 / R80)
-    minus ``upstream_wet_mm`` water-equivalent shifter thickness (beam stops shallower).
+    With ``use_water_depth_mm``, optional ``depth_lo_mm`` / ``depth_hi_mm`` pin the
+    affine to the **plan** span (required when measured rows are a subset of layers).
     """
     e = np.asarray(energy_mev, dtype=np.float64)
-    if use_proton_water_depth_mm:
-        wet = max(0.0, float(upstream_wet_mm))
-        metric = normalize_z_depth_metric(z_depth_metric)
-        depth_mm = proton_water_depth_mm(e, metric=metric) - wet
-        return -np.maximum(depth_mm, 0.0)
-    return -e * float(_ENERGY_AXIS_VIEW_SCALE)
+    if config.use_water_depth_mm:
+        wet = max(0.0, float(config.upstream_wet_mm))
+        metric = normalize_z_depth_metric(config.z_depth_metric)
+        depth = np.maximum(proton_water_depth_mm(e, metric=metric) - wet, 0.0)
+        if depth.size == 0:
+            return depth
+        if depth_lo_mm is not None and depth_hi_mm is not None:
+            d_lo = float(depth_lo_mm)
+            d_hi = float(depth_hi_mm)
+        else:
+            d_lo = float(np.min(depth))
+            d_hi = float(np.max(depth))
+        if d_hi <= d_lo:
+            d_hi = d_lo + 1.0
+        return float(d_hi) + float(d_lo) - depth
+    return float(plan_e_hi) + float(plan_e_lo) - e
+
+
+def plan_depth_bounds_mm_config(
+    e_lo_mev: float,
+    e_hi_mev: float,
+    config: ZAxisDisplayConfig,
+) -> tuple[float, float]:
+    """Shallow and deep plan water-depth bounds (mm) for scene-Z mapping."""
+    if not config.use_water_depth_mm:
+        raise ValueError("plan_depth_bounds_mm_config requires use_water_depth_mm")
+    return plan_depth_bounds_mm(
+        e_lo_mev,
+        e_hi_mev,
+        upstream_wet_mm=config.upstream_wet_mm,
+        z_depth_metric=config.z_depth_metric,
+    )
+
+
+def apply_z_display_to_comparison_clouds(
+    plan_xyz_mev: np.ndarray,
+    meas_xyz_mev: np.ndarray,
+    *,
+    plan_e_lo: float,
+    plan_e_hi: float,
+    config: ZAxisDisplayConfig,
+) -> tuple[np.ndarray, np.ndarray, tuple[float, float] | None]:
+    """Return plan/measured copies with ``[:,2]`` in scene Z; depth bounds when depth mode.
+
+    Both clouds must already carry **nominal MeV** in column 2 (see
+    :func:`spot_check.analysis.viz.data.prepare_comparison_3d_data`).
+    """
+    plan_out = np.asarray(plan_xyz_mev, dtype=np.float64).copy()
+    meas_out = np.asarray(meas_xyz_mev, dtype=np.float64).copy()
+    depth_bounds: tuple[float, float] | None = None
+    if config.use_water_depth_mm:
+        d_lo, d_hi = plan_depth_bounds_mm(
+            float(plan_e_lo),
+            float(plan_e_hi),
+            upstream_wet_mm=config.upstream_wet_mm,
+            z_depth_metric=config.z_depth_metric,
+        )
+        depth_bounds = (d_lo, d_hi)
+        plan_out[:, 2] = nominal_energy_to_scene_z(
+            plan_out[:, 2],
+            plan_e_lo=plan_e_lo,
+            plan_e_hi=plan_e_hi,
+            config=config,
+            depth_lo_mm=d_lo,
+            depth_hi_mm=d_hi,
+        )
+        meas_out[:, 2] = nominal_energy_to_scene_z(
+            meas_out[:, 2],
+            plan_e_lo=plan_e_lo,
+            plan_e_hi=plan_e_hi,
+            config=config,
+            depth_lo_mm=d_lo,
+            depth_hi_mm=d_hi,
+        )
+    else:
+        plan_out[:, 2] = nominal_energy_to_scene_z(
+            plan_out[:, 2],
+            plan_e_lo=plan_e_lo,
+            plan_e_hi=plan_e_hi,
+            config=config,
+        )
+        meas_out[:, 2] = nominal_energy_to_scene_z(
+            meas_out[:, 2],
+            plan_e_lo=plan_e_lo,
+            plan_e_hi=plan_e_hi,
+            config=config,
+        )
+    return plan_out, meas_out, depth_bounds
+
+
+def cube_z_axis_spec_for_display(
+    z_scene: np.ndarray,
+    nominal_energy_mev: np.ndarray | None,
+    config: ZAxisDisplayConfig,
+) -> CubeZAxisSpec:
+    """Build :class:`CubeZAxisSpec` from scene Z and optional nominal MeV, using ``config``."""
+    return cube_z_axis_spec(
+        z_scene,
+        use_proton_water_depth_mm=config.use_water_depth_mm,
+        tick_mm=config.tick_mm,
+        tick_mev=config.tick_mev,
+        nominal_energy_mev=nominal_energy_mev,
+        upstream_wet_mm=config.upstream_wet_mm,
+        z_depth_metric=config.z_depth_metric,
+    )
 
 
 def nominal_mev_to_scene_z_mev_cube(
@@ -80,8 +180,10 @@ def nominal_mev_to_scene_z_mev_cube(
     e_hi: float,
 ) -> np.ndarray:
     """Positive scene Z: high nominal MeV (deep) at ``zmin`` (``bounds == axes_ranges`` ticks)."""
-    e = np.asarray(energy_mev, dtype=np.float64)
-    return float(e_hi) + float(e_lo) - e
+    cfg = ZAxisDisplayConfig(use_water_depth_mm=False)
+    return nominal_energy_to_scene_z(
+        energy_mev, plan_e_lo=float(e_lo), plan_e_hi=float(e_hi), config=cfg
+    )
 
 
 def plan_depth_bounds_mm(
@@ -116,23 +218,24 @@ def nominal_depth_to_scene_z_cube(
     """Positive scene Z: deep layers (large mm) at ``zmin``; ``bounds == axes_ranges`` ticks.
 
     When ``depth_lo_mm`` / ``depth_hi_mm`` are set, use those plan-wide bounds instead of
-    min/max from ``energy_mev`` alone (required for per-spot QA error lines).
+    min/max from ``energy_mev`` alone (required for per-spot QA error lines and partial meas).
     """
     e = np.asarray(energy_mev, dtype=np.float64)
-    wet = max(0.0, float(upstream_wet_mm))
-    metric = normalize_z_depth_metric(z_depth_metric)
-    depth = np.maximum(proton_water_depth_mm(e, metric=metric) - wet, 0.0)
-    if depth.size == 0:
-        return depth
-    if depth_lo_mm is not None and depth_hi_mm is not None:
-        d_lo = float(depth_lo_mm)
-        d_hi = float(depth_hi_mm)
-    else:
-        d_lo = float(np.min(depth))
-        d_hi = float(np.max(depth))
-    if d_hi <= d_lo:
-        d_hi = d_lo + 1.0
-    return float(d_hi) + float(d_lo) - depth
+    el = float(np.min(e)) if e.size else 0.0
+    eh = float(np.max(e)) if e.size else 1.0
+    cfg = ZAxisDisplayConfig(
+        use_water_depth_mm=True,
+        upstream_wet_mm=upstream_wet_mm,
+        z_depth_metric=z_depth_metric,
+    )
+    return nominal_energy_to_scene_z(
+        e,
+        plan_e_lo=el,
+        plan_e_hi=eh,
+        config=cfg,
+        depth_lo_mm=depth_lo_mm,
+        depth_hi_mm=depth_hi_mm,
+    )
 
 
 def n_cube_axis_labels_for_mm_step(

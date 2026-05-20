@@ -88,14 +88,13 @@ def test_measured_spot_abc_from_csv_layer_modes(
         assert float(row[3]) > 0
 
 
-def test_measured_spot_abc_gate_counter_aggregate_even_tail(tmp_path: Path) -> None:
+def test_measured_spot_abc_gate_counter_aggregate(tmp_path: Path) -> None:
     csv_path = write_measured_csv(tmp_path / "gc.csv", minimal_measured_rows())
     rows = analysis.measured_spot_abc_from_csv(
         csv_path,
         planned_xyz=list(MINIMAL_PLANNED_XYZ),
         layer_mode="gate_counter",
         aggregate_spots=True,
-        aggregate_even_rows_after_odd=1,
         a_is_x=False,
     )
     assert len(rows) >= 1

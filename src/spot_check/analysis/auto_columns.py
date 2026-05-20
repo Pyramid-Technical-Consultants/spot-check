@@ -110,6 +110,23 @@ def _plan_xy_partial_arrays(
     return mx_p, my_p, pcd
 
 
+def _position_row_keep_mask(
+    pcd: np.ndarray,
+    *,
+    heal_partial_fit_axes: bool,
+    include_deadtime_rows: bool,
+) -> np.ndarray:
+    """Row mask for auto column load: full fits; optional partial heal; plan-seq deadtime."""
+    pc = np.asarray(pcd, dtype=np.int32)
+    if heal_partial_fit_axes:
+        pos_ok = pc >= 0
+    else:
+        pos_ok = pc == 0
+    if include_deadtime_rows:
+        return pos_ok | (pc < 0)
+    return pos_ok
+
+
 def position_fit_deadtime_mask(cols: AutoFitColumns) -> np.ndarray:
     """True when neither Fit Mean Position A nor B has a finite value (deadtime).
 
@@ -261,11 +278,13 @@ def load_auto_fit_columns_from_csv(
     spot_weight_mode: str,
     max_points: int | None = None,
     include_deadtime_rows: bool = False,
+    heal_partial_fit_axes: bool = False,
 ) -> AutoFitColumns:
     """Read CSV into column arrays; skips rows without fit amplitude.
 
     Rows with fit amplitude but no position on either A/B axis are kept as deadtime
-    (``position_fit_deadtime_mask``); they are not imputed to a plan XY.
+    (``position_fit_deadtime_mask``) only when ``include_deadtime_rows``; they are not imputed
+    to a plan XY. Partial one-axis rows are dropped unless ``heal_partial_fit_axes``.
     """
     with open_acquisition_csv(csv_path) as f:
         header = f.readline()
@@ -289,6 +308,25 @@ def load_auto_fit_columns_from_csv(
         return _empty_columns()
 
     mx_p, my_p, pcd = _plan_xy_partial_arrays(a_mm, b_mm, a_is_x=a_is_x)
+    keep = _position_row_keep_mask(
+        pcd,
+        heal_partial_fit_axes=heal_partial_fit_axes,
+        include_deadtime_rows=include_deadtime_rows,
+    )
+    if not np.all(keep):
+        t = t[keep]
+        a_mm = a_mm[keep]
+        b_mm = b_mm[keep]
+        w_arr = w_arr[keep]
+        ch_arr = ch_arr[keep]
+        fa_arr = fa_arr[keep]
+        sa = sa[keep]
+        sb = sb[keep]
+        mx_p = mx_p[keep]
+        my_p = my_p[keep]
+        pcd = pcd[keep]
+    if t.shape[0] == 0:
+        return _empty_columns()
     has_pos = np.isfinite(mx_p) | np.isfinite(my_p)
 
     mx_i, my_i = global_lk.impute_xy_arrays(mx_p, my_p)

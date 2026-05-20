@@ -86,17 +86,6 @@ def parse_bounds_xy_tick_mm(raw: str) -> float | None:
     return None
 
 
-def parse_aggregate_even_tail_n(raw: str) -> int | None:
-    try:
-        v = int(float(str(raw).strip()))
-        mx = int(sc_const.AGGREGATE_EVEN_TAIL_MAX)
-        if 0 <= v <= mx:
-            return v
-    except (ValueError, TypeError):
-        pass
-    return None
-
-
 def plan_qa_thresholds_input_in_progress(pass_raw: str, warn_raw: str) -> bool:
     """True while the user is mid-edit (e.g. ``0`` or ``0.`` before ``0.5``)."""
 

@@ -139,10 +139,6 @@ _SPOT_WEIGHT_MODES: Final[frozenset[str]] = frozenset(
     {"channel_sum", "fit_amplitude_a", "fit_amplitude_b"}
 )
 
-AGGREGATE_EVEN_ROWS_AFTER_ODD_DEFAULT: Final[int] = 0
-AGGREGATE_EVEN_TAIL_MAX: Final[int] = 32
-
-
 # --- Repository / project root (directory containing ``pyproject.toml``) ------------
 def project_root() -> Path:
     """Project root in dev; directory containing the executable when frozen."""

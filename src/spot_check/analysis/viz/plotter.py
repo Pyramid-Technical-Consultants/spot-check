@@ -76,7 +76,6 @@ def show_comparison_3d_pyvista(
     viterbi_advance_penalty_mm2: float | None = None,
     weight_measured_by_channel: bool = True,
     aggregate_spots: bool = False,
-    aggregate_even_rows_after_odd: int = 0,
     spot_weight_mode: str = SPOT_WEIGHT_MODE_DEFAULT,
     detector_align_caption: str | None = None,
     bounds_xy_tick_mm: float | None = None,
@@ -133,31 +132,25 @@ def show_comparison_3d_pyvista(
         plan_fwhm_xy_mm=plan_fwhm_xy_mm,
     )
 
-    plan_pts = prep.plan_xyz.copy()
-    meas_pts = prep.meas_xyz.copy()
+    eff_tick = (
+        float(BOUNDS_XY_TICK_MM_DEFAULT) if bounds_xy_tick_mm is None else float(bounds_xy_tick_mm)
+    )
     use_depth_z = bool(z_axis_use_proton_water_depth_mm)
     wet_mm = max(0.0, float(upstream_wet_shifter_mm)) if use_depth_z else 0.0
     depth_metric = str(z_depth_metric).strip().lower() if use_depth_z else "csda"
-    if use_depth_z:
-        plan_pts[:, 2] = nominal_depth_to_scene_z_cube(
-            plan_pts[:, 2],
-            upstream_wet_mm=wet_mm,
-            z_depth_metric=depth_metric,
-        )
-        meas_pts[:, 2] = nominal_depth_to_scene_z_cube(
-            meas_pts[:, 2],
-            upstream_wet_mm=wet_mm,
-            z_depth_metric=depth_metric,
-        )
-    else:
-        _e_lo = float(prep.e_lo)
-        _e_hi = float(prep.e_hi)
-        plan_pts[:, 2] = nominal_mev_to_scene_z_mev_cube(
-            plan_pts[:, 2], e_lo=_e_lo, e_hi=_e_hi
-        )
-        meas_pts[:, 2] = nominal_mev_to_scene_z_mev_cube(
-            meas_pts[:, 2], e_lo=_e_lo, e_hi=_e_hi
-        )
+    z_display_cfg = ZAxisDisplayConfig(
+        use_water_depth_mm=use_depth_z,
+        upstream_wet_mm=wet_mm,
+        z_depth_metric=depth_metric,
+        tick_mm=eff_tick,
+    )
+    plan_pts, meas_pts, _ = apply_z_display_to_comparison_clouds(
+        prep.plan_xyz,
+        prep.meas_xyz,
+        plan_e_lo=float(prep.e_lo),
+        plan_e_hi=float(prep.e_hi),
+        config=z_display_cfg,
+    )
 
     n_m = meas_pts.shape[0]
     _POINT_SIZE_3D = 9
@@ -386,9 +379,6 @@ def show_comparison_3d_pyvista(
         y_all = meas_pts[:, 1]
     x_min, x_max = float(np.min(x_all)), float(np.max(x_all))
     y_min, y_max = float(np.min(y_all)), float(np.max(y_all))
-    eff_tick = (
-        float(BOUNDS_XY_TICK_MM_DEFAULT) if bounds_xy_tick_mm is None else float(bounds_xy_tick_mm)
-    )
 
     plan_cloud = pv.PolyData(plan_pts)
 
@@ -605,9 +595,10 @@ def show_comparison_3d_pyvista(
                 return
             actor = pl.renderer.cube_axes_actor
             sb = _cube_axes.get("scene_bounds")
-            if actor is None or sb is None:
+            ar = _cube_axes.get("axes_ranges")
+            if actor is None or sb is None or ar is None:
                 return
-            pin_pyvista_cube_bounds(actor, sb)
+            refresh_pyvista_cube_axes(actor, sb, ar)
 
         def _guarded_pl_update_bounds_axes() -> None:
             _orig_pl_ub()
@@ -658,17 +649,15 @@ def show_comparison_3d_pyvista(
         return np.zeros(0, dtype=np.float64)
 
     def _plan_cube_bounds() -> tuple[tuple[float, float, float, float, float, float], str, str]:
-        """Scene box for cube axes; ``bounds == axes_ranges`` (``cube_axes_10_cube_test``)."""
+        """Scene box for cube axes; ``axes_ranges`` from :func:`cube_axes_ranges` unless sanity."""
         if _cube_axes.get("sanity"):
+            _cube_axes["z_spec"] = None
             b = (0.0, 10.0, 0.0, 10.0, 0.0, 10.0)
             return b, "Z", "%.0f"
-        z_spec = _cube_z_axis_spec(
+        z_spec = _cube_z_axis_spec_for_display(
             _plan_scene_z_for_cube_axis(),
-            use_proton_water_depth_mm=use_depth_z,
-            tick_mm=eff_tick,
-            nominal_energy_mev=_plan_energies_mev_for_cube_axis(),
-            upstream_wet_mm=wet_mm,
-            z_depth_metric=depth_metric,
+            _plan_energies_mev_for_cube_axis(),
+            z_display_cfg,
         )
         _cube_axes["z_spec"] = z_spec
         b = (
@@ -682,14 +671,22 @@ def show_comparison_3d_pyvista(
         return b, str(z_spec.ztitle), "%.0f"
 
     def _show_plan_cube_bounds() -> None:
-        """Bare cube test: ``bounds == axes_ranges`` only (split Z drops labels in Qt)."""
+        """Cube axes: scene ``bounds`` plus label ``axes_ranges`` (matches VTK regression tests)."""
         bounds_axes, cube_ztitle, _fmt = _plan_cube_bounds()
         _cube_axes["scene_bounds"] = bounds_axes
-        _cube_axes["axes_ranges"] = bounds_axes
+        if _cube_axes.get("sanity"):
+            axes_ranges = bounds_axes
+            n_z = 6
+        else:
+            z_spec = _cube_axes["z_spec"]
+            assert z_spec is not None
+            axes_ranges = cube_axes_ranges(x_min, x_max, y_min, y_max, z_spec)
+            n_z = int(z_spec.n_zlabels)
+        _cube_axes["axes_ranges"] = axes_ranges
         pl.show_bounds(
             mesh=None,
             bounds=bounds_axes,
-            axes_ranges=bounds_axes,
+            axes_ranges=axes_ranges,
             location="outer",
             padding=0.0,
             xtitle=prep.xlab,
@@ -697,7 +694,7 @@ def show_comparison_3d_pyvista(
             ztitle=cube_ztitle,
             n_xlabels=6,
             n_ylabels=6,
-            n_zlabels=6,
+            n_zlabels=n_z,
             fmt="%.0f",
             color="white",
         )
@@ -950,20 +947,9 @@ def show_comparison_3d_pyvista(
             )
     if aggregate_spots and _lm in ("auto", "gate_counter"):
         _sw = measured_spot_weight_caption(spot_weight_mode)
-        if _lm == "auto":
-            caption += (
-                f" Measured spots aggregated: {_sw}-weighted mean XY + σ per signal episode."
-            )
-        else:
-            caption += (
-                f" Measured spots aggregated: {_sw}-weighted mean XY + σ per odd "
-                f"{GATE_COUNTER_KEY} phase."
-            )
-            if aggregate_even_rows_after_odd > 0:
-                caption += (
-                    f" Gate-counter: up to {aggregate_even_rows_after_odd} even-phase row(s) "
-                    "with good fits merged after each odd→even switch."
-                )
+        caption += (
+            f" Measured spots aggregated: {_sw}-weighted mean XY + σ per assigned plan spot."
+        )
     if plan_rendered_fwhm_glyphs:
         caption += (
             " Plan: FWHM ellipsoids from DICOM Scanning Spot Size (300A,0398); "

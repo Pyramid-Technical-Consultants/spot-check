@@ -26,6 +26,16 @@ def _plan_xy_from_optional_ab(
         return float(b_opt), None, 1
     return None, float(a_opt), 2
 
+
+def fit_position_row_ok(pcd: int, *, heal_partial_fit_axes: bool) -> bool:
+    """True when a fit row should be kept (both axes, or partial when healing is enabled)."""
+    if pcd < 0:
+        return False
+    if pcd == 0:
+        return True
+    return heal_partial_fit_axes
+
+
 def _ab_from_plan_xy(mx: float, my: float, *, a_is_x: bool) -> tuple[float, float]:
     return (mx, my) if a_is_x else (my, mx)
 

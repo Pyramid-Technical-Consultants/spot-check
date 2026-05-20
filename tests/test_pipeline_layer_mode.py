@@ -4,8 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from spot_check.gui.pipeline import resolve_csv_load_layer_mode
+from spot_check.gui.pipeline import aggregation_applies, resolve_csv_load_layer_mode
 from tests.conftest import MINIMAL_PLANNED_XYZ, minimal_measured_rows, write_measured_csv
+
+
+def test_aggregation_applies() -> None:
+    assert aggregation_applies(layer_mode="auto", aggregate_spots=True) is True
+    assert aggregation_applies(layer_mode="gate_counter", aggregate_spots=True) is True
+    assert aggregation_applies(layer_mode="time_gap", aggregate_spots=True) is False
+    assert aggregation_applies(layer_mode="auto", aggregate_spots=False) is False
 
 
 def test_resolve_csv_auto_honors_aggregate(tmp_path: Path) -> None:

@@ -40,9 +40,7 @@ otherwise a step may occur when the next slice explains XY better
 (``_layer_advance_plausible_vs_refill``).
 
 **Spot aggregation (optional):** when ``aggregate_spots=True``, each run of consecutive rows with
-the same **odd** ``Gate Counter`` value is one delivered spot (**even** gate ends the spot), or
-with ``aggregate_even_rows_after_odd`` > 0 in **gate_counter** mode, up to that many **even-phase**
-rows with valid fits after each odd→even transition are merged into the same weighted mean.
+the same **odd** ``Gate Counter`` value is one delivered spot (**even** gate ends the spot).
 Rows in that run collapse to one point: **weighted means** of fit mean positions
 (after imputation), nominal layer index, and fit σ_A / σ_B when present. Weights come from
 ``spot_weight_mode``: IX512 channel sum and/or Fit Amplitude A/B columns (see

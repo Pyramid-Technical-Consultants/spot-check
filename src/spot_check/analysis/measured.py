@@ -20,6 +20,7 @@ from spot_check.analysis.spatial import (
     _emit_sqdist_to_layers_mm2,
     _plan_xy_by_energy_layer,
     _plan_xy_from_optional_ab,
+    fit_position_row_ok,
     nominal_layer_energies_mev,
 )
 
@@ -232,7 +233,6 @@ def gate_counter_aggregated_layer_indices_from_csv(
     a_is_x: bool,
     spot_weight_mode: str,
     max_points: int | None = None,
-    aggregate_even_rows_after_odd: int = 0,
 ) -> np.ndarray:
     """Nominal layer index per gate_counter spot (``aggregate_spots=True`` semantics).
 
@@ -243,12 +243,10 @@ def gate_counter_aggregated_layer_indices_from_csv(
     for c in spots_per_layer:
         cumul.append(cumul[-1] + int(c))
     hi = int(max_layer)
-    even_tail_max = int(aggregate_even_rows_after_odd)
     swm = normalize_measured_spot_weight_mode(spot_weight_mode)
     layers: list[int] = []
     spot_buf: list[_GateSpotBufRow] = []
     prev_gate: int | None = None
-    pending_even_tail = 0
     i_spot = 0
     eff_li = 0
     n_raw = 0
@@ -275,48 +273,27 @@ def gate_counter_aggregated_layer_indices_from_csv(
             except ValueError:
                 continue
             if g != prev_gate:
-                if even_tail_max > 0:
-                    if g % 2 == 1:
-                        if spot_buf:
-                            flush_layer()
-                        pending_even_tail = 0
-                        eff_li = max(0, min(bisect.bisect_right(cumul, i_spot) - 1, hi))
-                        i_spot += 1
-                    elif prev_gate is not None and prev_gate % 2 == 1 and g % 2 == 0:
-                        pending_even_tail = even_tail_max
-                    else:
-                        if spot_buf:
-                            flush_layer()
-                        pending_even_tail = 0
-                        if g % 2 == 1:
-                            eff_li = max(0, min(bisect.bisect_right(cumul, i_spot) - 1, hi))
-                            i_spot += 1
-                else:
-                    if prev_gate is not None and prev_gate % 2 == 1 and spot_buf:
-                        flush_layer()
-                    pending_even_tail = 0
-                    if g % 2 == 1:
-                        eff_li = max(0, min(bisect.bisect_right(cumul, i_spot) - 1, hi))
-                        i_spot += 1
+                if prev_gate is not None and prev_gate % 2 == 1 and spot_buf:
+                    flush_layer()
+                if g % 2 == 1:
+                    eff_li = max(0, min(bisect.bisect_right(cumul, i_spot) - 1, hi))
+                    i_spot += 1
                 prev_gate = g
-            allow_even_slurp = even_tail_max > 0 and g % 2 == 0 and pending_even_tail > 0
-            if g % 2 == 0 and not allow_even_slurp:
+            if g % 2 == 0:
                 continue
             if not (row.get(fa_key) or "").strip():
                 continue
             a_opt = _opt_float_cell(row, a_key)
             b_opt = _opt_float_cell(row, b_key)
             _, _, pcd = _plan_xy_from_optional_ab(a_opt, b_opt, a_is_x=a_is_x)
+            # Gate-counter aggregation matches legacy CSV semantics: keep partial one-axis fits;
+            # only rows with both position axes missing are skipped.
             if pcd < 0:
                 continue
             w_ch = measured_spot_weight_from_row(row, swm)
             ch_n = _channel_sum_na_from_row(row)
             spot_buf.append((0.0, 0.0, float(eff_li), w_ch, 0, None, None, ch_n))
             n_raw += 1
-            if allow_even_slurp:
-                pending_even_tail -= 1
-                if pending_even_tail == 0 and spot_buf:
-                    flush_layer()
             if max_points is not None and n_raw >= max_points:
                 if spot_buf:
                     flush_layer()
@@ -391,7 +368,6 @@ def measured_spot_abc_from_csv(
     planned_xyz: list[tuple[float, float, float]] | None = None,
     a_is_x: bool = False,
     aggregate_spots: bool = True,
-    aggregate_even_rows_after_odd: int = AGGREGATE_EVEN_ROWS_AFTER_ODD_DEFAULT,
     spot_weight_mode: str = SPOT_WEIGHT_MODE_DEFAULT,
     auto_episode_gap_s: float = TIME_LAYER_GAP_S_DEFAULT,
     auto_min_on_spot_weight_na: float = AUTO_MIN_ON_SPOT_WEIGHT_NA_DEFAULT,
@@ -399,6 +375,7 @@ def measured_spot_abc_from_csv(
     auto_min_episode_rows: int = AUTO_MIN_EPISODE_ROWS_DEFAULT,
     auto_infer_params: bool = True,
     auto_assign_method: str = "episodes",
+    heal_partial_fit_axes: bool = False,
 ) -> list[tuple[float, ...]]:
     """Measured rows as (A mm, B mm, layer index, spot weight, partial code).
 
@@ -406,6 +383,11 @@ def measured_spot_abc_from_csv(
     A/B; see :func:`measured_spot_weight_from_row`) for aggregation and optional 3D opacity.
 
     Returns 8-tuples ``(A, B, layer, weight, partial, σ_A, σ_B, channel_sum_nA)`` (σ may be NaN).
+
+    By default, rows missing Fit Mean Position A or B are dropped. Set
+    ``heal_partial_fit_axes=True`` to keep rows with exactly one missing axis and fill the gap
+    from the nearest plan spot at the assigned layer (partial code 1 or 2). Rows with both axes
+    missing are always dropped.
 
     **auto** never reads ``Gate Counter``. With ``auto_assign_method='episodes'``, deadtime
     segmentation aligns spot count to the plan and layers follow **acquisition time** (earliest
@@ -415,7 +397,6 @@ def measured_spot_abc_from_csv(
     plan slot once the current spot has at least one row (no skipped plan indices).
     Layers then match gate_counter plan-slot indexing. With ``aggregate_spots=True``, each spot
     span becomes one **weighted-mean** row; when False, every on-spot CSV row is kept.
-    ``aggregate_even_rows_after_odd`` applies only in **gate_counter** mode.
 
     When ``auto_infer_params`` is True (default), episode gap, XY jump, on-spot weight floor,
     min episode rows, and Viterbi advance penalty are derived from the CSV timing/weights and
@@ -424,8 +405,7 @@ def measured_spot_abc_from_csv(
 
     In **gate_counter** mode with ``aggregate_spots=True``, requires ``Gate Counter`` on the CSV;
     each contiguous run of rows with the same **odd** gate value is one spot (even gate closes a
-    spot), optionally extended by up to ``aggregate_even_rows_after_odd`` **even-phase** rows
-    after each odd→even transition. Aggregated rows use weighted means of position, layer, and σ.
+    spot). Aggregated rows use weighted means of position, layer, and σ.
     """
     mode = layer_mode.strip().lower().replace("-", "_")
     if mode not in ("time_gap", "plan_viterbi", "auto", "gate_counter"):
@@ -434,14 +414,6 @@ def measured_spot_abc_from_csv(
         )
 
     swm = normalize_measured_spot_weight_mode(spot_weight_mode)
-
-    if aggregate_spots and mode == "gate_counter":
-        ne = int(aggregate_even_rows_after_odd)
-        if ne < 0 or ne > AGGREGATE_EVEN_TAIL_MAX:
-            raise ValueError(
-                f"aggregate_even_rows_after_odd must be in [0, {AGGREGATE_EVEN_TAIL_MAX}], "
-                f"got {ne!r}"
-            )
 
     _probe_csv_columns_for_measured_weights(
         csv_path,
@@ -534,7 +506,7 @@ def measured_spot_abc_from_csv(
                 a_opt = _opt_float_cell(row, a_key)
                 b_opt = _opt_float_cell(row, b_key)
                 mx_p, my_p, pcd = _plan_xy_from_optional_ab(a_opt, b_opt, a_is_x=a_is_x)
-                if pcd < 0:
+                if not fit_position_row_ok(pcd, heal_partial_fit_axes=heal_partial_fit_axes):
                     continue
                 mx_i, my_i = _impute_plan_axis_fast(global_lk, mx_p, my_p)
                 a_fin, b_fin = _ab_from_plan_xy(mx_i, my_i, a_is_x=a_is_x)
@@ -624,6 +596,7 @@ def measured_spot_abc_from_csv(
             spot_weight_mode=swm,
             max_points=max_points,
             include_deadtime_rows=assign_m == "plan_sequential",
+            heal_partial_fit_axes=heal_partial_fit_axes,
         )
         if len(cols) == 0:
             return []
@@ -800,8 +773,6 @@ def measured_spot_abc_from_csv(
         out_gc: list[tuple[float, ...]] = []
         spot_buf_gc: list[tuple[float, float, float, float, int, float | None, float | None]] = []
         prev_gate: int | None = None
-        pending_even_tail = 0
-        even_tail_max = int(aggregate_even_rows_after_odd) if aggregate_spots else 0
         i_spot = 0
         eff_li = 0
         n_gc_raw = 0
@@ -827,43 +798,18 @@ def measured_spot_abc_from_csv(
                     continue
                 if g != prev_gate:
                     if aggregate_spots:
-                        if even_tail_max > 0:
-                            if g % 2 == 1:
-                                if spot_buf_gc:
-                                    out_gc.append(_finalize_spot_channel_weighted(spot_buf_gc))
-                                    spot_buf_gc.clear()
-                                pending_even_tail = 0
-                                eff_li = max(0, min(bisect.bisect_right(cumul, i_spot) - 1, hi_gc))
-                                i_spot += 1
-                            elif prev_gate is not None and prev_gate % 2 == 1 and g % 2 == 0:
-                                pending_even_tail = even_tail_max
-                            else:
-                                if spot_buf_gc:
-                                    out_gc.append(_finalize_spot_channel_weighted(spot_buf_gc))
-                                    spot_buf_gc.clear()
-                                pending_even_tail = 0
-                                if g % 2 == 1:
-                                    eff_li = max(
-                                        0, min(bisect.bisect_right(cumul, i_spot) - 1, hi_gc)
-                                    )
-                                    i_spot += 1
-                        else:
-                            if prev_gate is not None and prev_gate % 2 == 1 and spot_buf_gc:
-                                out_gc.append(_finalize_spot_channel_weighted(spot_buf_gc))
-                                spot_buf_gc.clear()
-                            pending_even_tail = 0
-                            if g % 2 == 1:
-                                eff_li = max(0, min(bisect.bisect_right(cumul, i_spot) - 1, hi_gc))
-                                i_spot += 1
+                        if prev_gate is not None and prev_gate % 2 == 1 and spot_buf_gc:
+                            out_gc.append(_finalize_spot_channel_weighted(spot_buf_gc))
+                            spot_buf_gc.clear()
+                        if g % 2 == 1:
+                            eff_li = max(0, min(bisect.bisect_right(cumul, i_spot) - 1, hi_gc))
+                            i_spot += 1
                     else:
                         if g % 2 == 1:
                             eff_li = max(0, min(bisect.bisect_right(cumul, i_spot) - 1, hi_gc))
                             i_spot += 1
                     prev_gate = g
-                allow_even_slurp = (
-                    aggregate_spots and even_tail_max > 0 and g % 2 == 0 and pending_even_tail > 0
-                )
-                if g % 2 == 0 and not allow_even_slurp:
+                if g % 2 == 0:
                     continue
                 if not (row.get(fa_key) or "").strip():
                     continue
@@ -883,11 +829,6 @@ def measured_spot_abc_from_csv(
                 if aggregate_spots:
                     spot_buf_gc.append((a_fin, b_fin, float(eff_li), w_ch, int(pcd), sa, sb, ch_n))
                     n_gc_raw += 1
-                    if allow_even_slurp:
-                        pending_even_tail -= 1
-                        if pending_even_tail == 0 and spot_buf_gc:
-                            out_gc.append(_finalize_spot_channel_weighted(spot_buf_gc))
-                            spot_buf_gc.clear()
                     if max_points is not None and n_gc_raw >= max_points:
                         if spot_buf_gc:
                             out_gc.append(_finalize_spot_channel_weighted(spot_buf_gc))
@@ -954,7 +895,7 @@ def measured_spot_abc_from_csv(
             a_opt = _opt_float_cell(row, a_key)
             b_opt = _opt_float_cell(row, b_key)
             mx_p, my_p, pcd = _plan_xy_from_optional_ab(a_opt, b_opt, a_is_x=a_is_x)
-            if pcd < 0:
+            if not fit_position_row_ok(pcd, heal_partial_fit_axes=heal_partial_fit_axes):
                 continue
 
             li_use = layer if max_layer is None else min(layer, max_layer)

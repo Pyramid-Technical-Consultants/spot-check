@@ -35,8 +35,6 @@ from spot_check.constants import (
     _PLAN_QA_PASS_HEX,
     _PLAN_QA_WARN_HEX,
     _SPOT_WEIGHT_MODES,
-    AGGREGATE_EVEN_ROWS_AFTER_ODD_DEFAULT,
-    AGGREGATE_EVEN_TAIL_MAX,
     AUTO_EPISODE_MERGE_DT_MM2_PER_S,
     AUTO_MIN_EPISODE_ROWS_DEFAULT,
     AUTO_MIN_ON_SPOT_WEIGHT_NA_DEFAULT,
@@ -79,21 +77,30 @@ from spot_check.geometry import (
     PYVISTA_CUBE_AXES_PADDING,
     PYVISTA_CUBE_AXES_TICKS,
     apply_pyvista_cube_axes_style,
+    apply_z_display_to_comparison_clouds,
     cube_axes_ranges,
     disable_pyvista_cube_axes_label_lod,
     n_cube_axis_labels_for_mm_step,
     nominal_depth_to_scene_z_cube,
-    nominal_mev_to_plot_z,
+    nominal_energy_to_scene_z,
     nominal_mev_to_scene_z_mev_cube,
-    plan_depth_bounds_mm,
     pin_pyvista_cube_bounds,
+    plan_depth_bounds_mm,
     pyvista_show_bounds_kwargs,
     refresh_pyvista_cube_axes,
 )
 from spot_check.geometry import (
     cube_z_axis_spec as _cube_z_axis_spec,
 )
-from spot_check.models import Comparison3DData, CubeZAxisSpec, DetectorRigidAlign2D
+from spot_check.geometry import (
+    cube_z_axis_spec_for_display as _cube_z_axis_spec_for_display,
+)
+from spot_check.models import (
+    Comparison3DData,
+    CubeZAxisSpec,
+    DetectorRigidAlign2D,
+    ZAxisDisplayConfig,
+)
 
 try:
     from scipy.spatial import cKDTree as _cKDTree
@@ -106,8 +113,6 @@ logger = logging.getLogger(__name__)
 _CubeZAxisSpec = CubeZAxisSpec
 
 __all__ = [
-    "AGGREGATE_EVEN_ROWS_AFTER_ODD_DEFAULT",
-    "AGGREGATE_EVEN_TAIL_MAX",
     "AcquisitionDataError",
     "Any",
     "AUTO_EPISODE_MERGE_DT_MM2_PER_S",
@@ -118,6 +123,7 @@ __all__ = [
     "CHANNEL_SUM_KEY",
     "Comparison3DData",
     "CubeZAxisSpec",
+    "ZAxisDisplayConfig",
     "DETECTOR_ALIGN_MAX_FIT_SAMPLES",
     "DISPLAY_GLYPH_INSTANCE_CAP",
     "DISPLAY_POINT_MESH_TARGET",
@@ -165,7 +171,9 @@ __all__ = [
     "_SPOT_WEIGHT_MODES",
     "_cKDTree",
     "_cube_z_axis_spec",
+    "_cube_z_axis_spec_for_display",
     "apply_pyvista_cube_axes_style",
+    "apply_z_display_to_comparison_clouds",
     "cube_axes_ranges",
     "disable_pyvista_cube_axes_label_lod",
     "bisect",
@@ -175,7 +183,7 @@ __all__ = [
     "logging",
     "math",
     "n_cube_axis_labels_for_mm_step",
-    "nominal_mev_to_plot_z",
+    "nominal_energy_to_scene_z",
     "nominal_depth_to_scene_z_cube",
     "nominal_mev_to_scene_z_mev_cube",
     "plan_depth_bounds_mm",

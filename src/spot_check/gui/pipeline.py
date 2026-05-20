@@ -22,7 +22,6 @@ class GuiRefreshContext:
     qa_warn_f: float
     layer_assign_mode: str
     aggregate_spots: bool
-    agg_even_n: int
     spot_weight_mode_run: str
     pipeline_key: tuple[Any, ...]
 
@@ -42,6 +41,13 @@ class PipelineLoadOK:
     align_info: Any | None = None
     layer_mode_run: str = "time_gap"
     auto_assign_method: str = "episodes"
+    aggregate_run: bool = False
+
+
+def aggregation_applies(*, layer_mode: str, aggregate_spots: bool) -> bool:
+    """True when ``aggregate_spots`` can merge rows per assigned plan spot for ``layer_mode``."""
+    mode = layer_mode.strip().lower().replace("-", "_")
+    return bool(aggregate_spots) and mode in ("auto", "gate_counter")
 
 
 def resolve_csv_load_layer_mode(
@@ -51,28 +57,24 @@ def resolve_csv_load_layer_mode(
     csv_path: Path,
     aggregate_spots: bool,
 ) -> tuple[str, bool]:
-    """Layer mode and gate aggregation for :func:`measured_spot_abc_from_csv`.
+    """Layer mode and spot aggregation for :func:`measured_spot_abc_from_csv`.
 
-    Aggregation is honored in **auto** (weighted mean per signal episode) and **gate_counter**
-    (odd ``Gate Counter`` phases; requires that column). Gate-counter mode without it falls back
-    to **time_gap** when a plan is loaded.
+    Aggregation merges all CSV rows assigned to the same plan spot into one weighted-mean row.
+    It applies in **auto** (per signal episode or plan-sequential span) and **gate_counter**
+    (per odd ``Gate Counter`` phase; requires that column). Gate-counter mode without it falls
+    back to **time_gap** (per-row; aggregation off).
     """
     mode = layer_mode.strip().lower().replace("-", "_")
     if mode not in ("auto", "gate_counter", "plan_viterbi", "time_gap"):
         mode = "gate_counter"
 
-    agg = bool(aggregate_spots) and mode in ("auto", "gate_counter")
     if mode == "gate_counter" and not acquisition_csv_has_gate_counter(csv_path):
-        if plan_path is not None:
-            mode = "time_gap"
-        agg = False
-    elif mode not in ("auto", "gate_counter"):
-        agg = False
+        mode = "time_gap"
 
     if plan_path is None and mode in ("auto", "gate_counter", "plan_viterbi"):
         mode = "time_gap"
-        agg = False
 
+    agg = aggregation_applies(layer_mode=mode, aggregate_spots=aggregate_spots)
     return mode, agg
 
 
@@ -96,9 +98,9 @@ def pipeline_load_job(
     *,
     layer_assign_mode: str,
     aggregate_spots: bool,
-    aggregate_even_rows_after_odd: int,
     spot_weight_mode: str,
     auto_align: bool = False,
+    heal_partial_fit_axes: bool = False,
 ) -> PipelineLoadOK:
     if plan_path is None and csv_path is None:
         raise ValueError("No plan or acquisition CSV to load.")
@@ -122,6 +124,7 @@ def pipeline_load_job(
         layer_assign_mode
     )
     layer_mode_run = layer_mode_req
+    aggregate_run = False
     if csv_path is not None:
         csv_display_name = csv_path.name
         layer_mode_run, aggregate_run = resolve_csv_load_layer_mode(
@@ -137,10 +140,10 @@ def pipeline_load_job(
             a_is_x=False,
             layer_mode=layer_mode_run,
             aggregate_spots=aggregate_run,
-            aggregate_even_rows_after_odd=int(aggregate_even_rows_after_odd),
             spot_weight_mode=spot_weight_mode,
             auto_infer_params=auto_infer and layer_mode_run == "auto",
             auto_assign_method=auto_assign_method,
+            heal_partial_fit_axes=heal_partial_fit_axes,
         )
         if not measured_unaligned:
             raise ValueError("No measured rows to plot.")
@@ -164,8 +167,8 @@ def pipeline_load_job(
         file_mtime(csv_path) if csv_path is not None else -1.0,
         layer_assign_mode,
         bool(aggregate_spots),
-        int(aggregate_even_rows_after_odd),
         spot_weight_mode,
+        bool(heal_partial_fit_axes),
     )
     return PipelineLoadOK(
         pipeline_key=pipeline_key,
@@ -181,4 +184,5 @@ def pipeline_load_job(
         align_info=align_info,
         layer_mode_run=layer_mode_run,
         auto_assign_method=auto_assign_method,
+        aggregate_run=bool(aggregate_run),
     )

@@ -157,6 +157,11 @@ def _plan_qa_error_line_polylines(
     exp = np.asarray(expected_plan_xyz, dtype=np.float64).reshape(-1, 3)
     meas = np.asarray(meas_pts_view, dtype=np.float64).reshape(-1, 3)
     exp_view = exp.copy()
+    _z_cfg = ZAxisDisplayConfig(
+        use_water_depth_mm=bool(use_proton_water_depth_mm),
+        upstream_wet_mm=float(upstream_wet_mm),
+        z_depth_metric=str(z_depth_metric),
+    )
     if use_proton_water_depth_mm:
         d_lo, d_hi = plan_depth_bounds_mm(
             float(plan_e_lo_mev),
@@ -164,18 +169,20 @@ def _plan_qa_error_line_polylines(
             upstream_wet_mm=upstream_wet_mm,
             z_depth_metric=z_depth_metric,
         )
-        exp_view[:, 2] = nominal_depth_to_scene_z_cube(
+        exp_view[:, 2] = nominal_energy_to_scene_z(
             exp[:, 2],
-            upstream_wet_mm=upstream_wet_mm,
-            z_depth_metric=z_depth_metric,
+            plan_e_lo=float(plan_e_lo_mev),
+            plan_e_hi=float(plan_e_hi_mev),
+            config=_z_cfg,
             depth_lo_mm=d_lo,
             depth_hi_mm=d_hi,
         )
     else:
-        exp_view[:, 2] = nominal_mev_to_scene_z_mev_cube(
+        exp_view[:, 2] = nominal_energy_to_scene_z(
             exp[:, 2],
-            e_lo=float(plan_e_lo_mev),
-            e_hi=float(plan_e_hi_mev),
+            plan_e_lo=float(plan_e_lo_mev),
+            plan_e_hi=float(plan_e_hi_mev),
+            config=_z_cfg,
         )
 
     def _build(idxs: np.ndarray) -> Any:

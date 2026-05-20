@@ -1,5 +1,4 @@
 from spot_check.gui.parsers import (
-    parse_aggregate_even_tail_n,
     parse_bounds_xy_tick_mm,
     parse_layer_gap_s,
     parse_plan_qa_thresholds,
@@ -29,11 +28,6 @@ def test_plan_qa_thresholds_input_in_progress() -> None:
 def test_parse_bounds_xy_tick_mm() -> None:
     assert parse_bounds_xy_tick_mm("0") == 0.0
     assert parse_bounds_xy_tick_mm("5") == 5.0
-
-
-def test_parse_aggregate_even_tail_n() -> None:
-    assert parse_aggregate_even_tail_n("0") == 0
-    assert parse_aggregate_even_tail_n("99") is None
 
 
 def test_spot_weight_mode_from_saved() -> None:

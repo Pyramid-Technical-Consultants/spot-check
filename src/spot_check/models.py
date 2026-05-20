@@ -6,6 +6,19 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from spot_check.constants import BOUNDS_Z_TICK_MEV_DEFAULT, BOUNDS_Z_TICK_MM_DEFAULT
+
+
+@dataclass(frozen=True)
+class ZAxisDisplayConfig:
+    """3D view Z mapping: water depth (mm) vs nominal MeV, WET, and cube tick steps."""
+
+    use_water_depth_mm: bool
+    upstream_wet_mm: float = 0.0
+    z_depth_metric: str = "csda"
+    tick_mm: float = BOUNDS_Z_TICK_MM_DEFAULT
+    tick_mev: float = BOUNDS_Z_TICK_MEV_DEFAULT
+
 
 @dataclass(frozen=True)
 class CubeZAxisSpec:
