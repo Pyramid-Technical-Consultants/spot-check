@@ -41,7 +41,8 @@ dev = ["pytest>=8", "pytest-timeout>=2.3", "ruff>=0.4", "mypy>=1.10", "pre-commi
 testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
-    "slow: larger regression tests (runtime)",
+    "slow: larger regression tests (runtime); excluded from default CI pytest selection",
+    "local_data: needs test_data/ fixtures (not in repo); excluded from default CI pytest selection",
 ]
 
 [tool.mypy]

@@ -373,6 +373,7 @@ def test_scene_z_positive_water_depth_matches_affine() -> None:
         assert abs(z_depth - z_mev_axis) > _MEV_DEPTH_CONFUSION_MM
 
 
+@pytest.mark.local_data
 @pytest.mark.skipif(not _T0G10_DCM.is_file(), reason="T0G10 DICOM not under test_data/")
 def test_t0g10_plan_spots_and_cube_ticks_use_csda_mm_not_mev() -> None:
     from spot_check.analysis.spatial import nominal_layer_energies_mev
@@ -412,6 +413,7 @@ def test_t0g10_plan_spots_and_cube_ticks_use_csda_mm_not_mev() -> None:
         _pl.close()
 
 
+@pytest.mark.local_data
 @pytest.mark.skipif(not _T0G40_DCM.is_file(), reason="T0G40 DICOM not under test_data/")
 def test_t0g40_deepest_layer_same_as_t0g10_shallowest_differs() -> None:
     from spot_check.analysis.spatial import nominal_layer_energies_mev
@@ -432,6 +434,7 @@ def test_t0g40_deepest_layer_same_as_t0g10_shallowest_differs() -> None:
     assert shallow < 60.0
 
 
+@pytest.mark.local_data
 @pytest.mark.skipif(not _T0G10_DCM.is_file(), reason="T0G10 DICOM not under test_data/")
 def test_t0g10_mev_axis_full_plan_range_with_slice_on() -> None:
     """Slice must not collapse Z; cube uses split ``axes_ranges`` on positive scene Z."""
@@ -468,6 +471,7 @@ def test_t0g10_mev_axis_full_plan_range_with_slice_on() -> None:
         pl.close()
 
 
+@pytest.mark.local_data
 @pytest.mark.skipif(not _T0G10_DCM.is_file(), reason="T0G10 DICOM not under test_data/")
 def test_show_comparison_3d_pyvista_water_depth_cube_axes() -> None:
     """End-to-end: plotter shows Z tick labels on water depth (split axes_ranges)."""

@@ -45,6 +45,7 @@ def test_gate_layer_fast_path_matches_gate_counter(tmp_path: Path) -> None:
     assert np.array_equal(fast, lg)
 
 
+@pytest.mark.local_data
 @pytest.mark.skipif(not _T0G10_CSV.is_file(), reason="T0G10 CSV not under test_data/")
 def test_gate_layer_fast_path_matches_t0g10_gate_counter() -> None:
     from spot_check.constants import project_root as root

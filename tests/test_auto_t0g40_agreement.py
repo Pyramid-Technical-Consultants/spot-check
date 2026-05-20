@@ -15,6 +15,8 @@ _T0G40_CSV = (
     / "15186535_T0G40_ic256-45-9018-data acquisition-2026-05-06-16-19-12.csv"
 )
 
+pytestmark = pytest.mark.local_data
+
 
 @pytest.mark.skipif(
     not _T0G40_DCM.is_file() or not _T0G40_CSV.is_file(),

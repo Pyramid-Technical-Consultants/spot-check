@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 
 import numpy as np
+import pytest
 
 from spot_check.analysis.auto_columns import load_auto_fit_columns_from_csv
 from spot_check.analysis.auto_params import infer_auto_layer_params
@@ -17,7 +18,10 @@ _RUN12 = (
     / "run12-cube-ic256-42-11377-data acquisition-2026-05-19-23-07-25.csv"
 )
 
+pytestmark = pytest.mark.local_data
 
+
+@pytest.mark.skipif(not _RUN12.is_file(), reason="run12 cube CSV not under test_data/")
 def test_large_plan_impute_finishes_quickly() -> None:
     n_plan = 20_000
     plan_xy = np.column_stack(
@@ -28,7 +32,6 @@ def test_large_plan_impute_finishes_quickly() -> None:
     )
     lk = _PlanImputeLookup.from_xy(plan_xy)
     assert lk is not None
-    assert _RUN12.is_file()
     t0 = time.perf_counter()
     cols = load_auto_fit_columns_from_csv(
         _RUN12,
@@ -40,8 +43,8 @@ def test_large_plan_impute_finishes_quickly() -> None:
     assert len(cols) > 0
 
 
+@pytest.mark.skipif(not _RUN12.is_file(), reason="run12 cube CSV not under test_data/")
 def test_auto_infer_and_measured_large_plan_under_budget() -> None:
-    assert _RUN12.is_file()
     n_plan = 20_000
     planned = [
         (float(i % 200) * 0.1, float(i % 151) * 0.1, 100.0 + (i % 50))

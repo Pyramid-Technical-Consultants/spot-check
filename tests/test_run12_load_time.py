@@ -17,6 +17,8 @@ _RUN12 = (
     / "run12-cube-ic256-42-11377-data acquisition-2026-05-19-23-07-25.csv"
 )
 
+pytestmark = pytest.mark.local_data
+
 
 @pytest.mark.skipif(not _RUN12.is_file(), reason="run12 cube fixture not present")
 def test_run12_gate_counter_fallback_time_gap_finishes_quickly() -> None:

@@ -17,6 +17,8 @@ _RUN12 = (
 )
 _CUBE_PLAN = Path(__file__).resolve().parents[1] / "test_data" / "R20M10_cube_original.csv"
 
+pytestmark = pytest.mark.local_data
+
 
 @pytest.mark.skipif(
     not _RUN12.is_file() or not _CUBE_PLAN.is_file(),

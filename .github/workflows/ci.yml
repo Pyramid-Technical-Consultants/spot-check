@@ -31,7 +31,7 @@ jobs:
         run: python -m compileall -q src/spot_check
 
       - name: Pytest
-        run: pytest -q
+        run: pytest -q -m "not slow and not local_data"
 
   build-windows-beta:
     name: Windows exe (beta)

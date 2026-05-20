@@ -19,6 +19,7 @@ from spot_check.plan import (
 _FIXTURE = Path(__file__).resolve().parent.parent / "test_data" / "R20M10_cube_original.csv"
 
 
+@pytest.mark.local_data
 @pytest.mark.skipif(not _FIXTURE.is_file(), reason="Pyramid plan fixture missing")
 def test_pyramid_plan_fixture_loads() -> None:
     assert is_pyramid_plan_csv(_FIXTURE)
@@ -70,6 +71,7 @@ def test_unsupported_plan_csv_raises(tmp_path: Path) -> None:
         planned_spot_xyz_and_counts_from_plan(path)
 
 
+@pytest.mark.local_data
 @pytest.mark.skipif(not _FIXTURE.is_file(), reason="Pyramid plan fixture missing")
 def test_dispatch_matches_pyramid_loader() -> None:
     a = planned_spot_xyz_and_counts_from_pyramid_csv(_FIXTURE)

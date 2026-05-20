@@ -67,12 +67,14 @@ Logging: set `SPOT_CHECK_LOG` to `DEBUG`, `INFO`, `WARNING`, or `ERROR`.
 
 ```bash
 ruff check src tests packaging
-pytest -q
-pytest -q -m slow          # large episode / CSV regressions
+# Default CI selection: fast, no test_data/, no slow episode stress tests
+pytest -q -m "not slow and not local_data"
+pytest -q -m slow          # large episode / CSV regressions (minutes)
+pytest -q -m local_data    # clinic/engineering: needs test_data/ (gitignored)
+pytest -q                  # everything selected (slow + local_data run if not skipped)
 ```
 
-Optional clinic checks (need `test_data/` plan + CSV):  
-`pytest -q tests/test_auto_t0g10_agreement.py`
+Clinic-scale checks (T0G10 agreement, run12 cube, DICOM cube axes) live under the **`local_data`** marker. Place fixtures in `test_data/` and run `pytest -q -m local_data`.
 
 Pre-commit (after setup): same Ruff rules on staged `src/`, `tests/`, `packaging/`.
 
@@ -105,10 +107,10 @@ Frozen builds omit SciPy/matplotlib; `packaging/trim_windows_bundle.py` trims Qt
 
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
-| **CI** | Push / PR to `main` / `master` | Ruff, byte-compile, pytest |
+| **CI** | Push / PR to `main` / `master` | Ruff, byte-compile, pytest (`not slow` and `not local_data`) |
 | **CI → Windows exe (beta)** | Push (non-tag) | Beta zip artifact |
 | **Release Windows** | Tag `v*` or manual | Release zip |
-| **Regression** | Weekly + manual | `pytest -m slow`; optional T0G10 tests if `test_data/` present |
+| **Regression** | Weekly + manual | `pytest -m slow`; `pytest -m local_data` (skips if `test_data/` missing) |
 
 ## Layout
 

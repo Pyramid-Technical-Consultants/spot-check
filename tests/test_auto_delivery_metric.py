@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from spot_check.analysis.auto_columns import load_auto_fit_columns_from_csv
 from spot_check.analysis.auto_params import infer_auto_layer_params
@@ -23,6 +24,8 @@ _T0G10 = (
     / "15186535_T0G10_ic256-45-9018-data acquisition-2026-05-06-16-27-25.csv"
 )
 
+pytestmark = pytest.mark.local_data
+
 
 def _episode_count_at_ratio(cols, ratio: float) -> int:
     return count_episodes_for_dead_ratio(
@@ -30,9 +33,9 @@ def _episode_count_at_ratio(cols, ratio: float) -> int:
     )
 
 
+@pytest.mark.skipif(not _RUN12.is_file(), reason="run12 cube CSV not under test_data/")
 def test_run12_reaches_more_episodes_at_high_ratio_than_legacy_cap() -> None:
     """IC256 cube CSV can segment more spots when calibration uses the widened ratio range."""
-    assert _RUN12.is_file()
     lk = _PlanImputeLookup.from_xy(np.zeros((1, 2)))
     cols = load_auto_fit_columns_from_csv(
         _RUN12, global_lk=lk, a_is_x=False, spot_weight_mode="channel_sum"
@@ -43,8 +46,8 @@ def test_run12_reaches_more_episodes_at_high_ratio_than_legacy_cap() -> None:
     assert at_new_cap > 3000
 
 
+@pytest.mark.skipif(not _RUN12.is_file(), reason="run12 cube CSV not under test_data/")
 def test_calibrated_dead_ratio_uses_widened_range_on_run12() -> None:
-    assert _RUN12.is_file()
     lk = _PlanImputeLookup.from_xy(np.zeros((1, 2)))
     cols = load_auto_fit_columns_from_csv(
         _RUN12, global_lk=lk, a_is_x=False, spot_weight_mode="channel_sum"
@@ -57,8 +60,8 @@ def test_calibrated_dead_ratio_uses_widened_range_on_run12() -> None:
     assert abs(n_ep - n_plan) < max(400, int(0.15 * n_plan))
 
 
+@pytest.mark.skipif(not _T0G10.is_file(), reason="T0G10 acquisition CSV not under test_data/")
 def test_t0g10_calibrated_ratio_still_near_plan_scale() -> None:
-    assert _T0G10.is_file()
     lk = _PlanImputeLookup.from_xy(np.zeros((1, 2)))
     cols = load_auto_fit_columns_from_csv(
         _T0G10, global_lk=lk, a_is_x=False, spot_weight_mode="channel_sum"
