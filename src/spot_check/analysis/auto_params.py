@@ -9,7 +9,6 @@ import numpy as np
 
 from spot_check.analysis.auto_columns import AutoFitColumns
 from spot_check.analysis.episodes import _rolling_mean, count_episodes_for_dead_ratio
-from spot_check.analysis.plan_sequential import infer_plan_seq_cluster_radius_mm2
 from spot_check.analysis.spatial import _plan_xy_by_energy_layer, nominal_layer_energies_mev
 from spot_check.constants import (
     AUTO_EDGE_DEAD_RATIO_DEFAULT,
@@ -19,6 +18,8 @@ from spot_check.constants import (
     AUTO_EDGE_TINY_MERGE_ROWS,
     AUTO_MIN_EPISODE_ROWS_DEFAULT,
     AUTO_MIN_ON_SPOT_WEIGHT_NA_DEFAULT,
+    AUTO_PLAN_SEQ_CLUSTER_RADIUS_MM_DEFAULT,
+    AUTO_PLAN_SEQ_CLUSTER_RADIUS_SCALE,
     AUTO_SPOT_XY_JUMP_MM_DEFAULT,
     TIME_LAYER_GAP_S_DEFAULT,
     VITERBI_LAYER_ADVANCE_PENALTY_MM2_DEFAULT,
@@ -48,6 +49,19 @@ def last_auto_layer_params() -> AutoLayerParams | None:
 def _set_last_params(p: AutoLayerParams | None) -> None:
     global _last_params
     _last_params = p
+
+
+def _infer_plan_seq_cluster_radius_mm2(plan_xy: np.ndarray) -> float:
+    """Legacy auto_params field; plan-sequential assign uses gap+pairwise advance only."""
+    pts = np.asarray(plan_xy, dtype=np.float64)
+    if pts.shape[0] < 2:
+        r_mm = float(AUTO_PLAN_SEQ_CLUSTER_RADIUS_MM_DEFAULT)
+        return r_mm * r_mm
+    d = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    d = d[(d > 1e-6) & np.isfinite(d)]
+    step = float(np.median(d)) if d.size else float(AUTO_PLAN_SEQ_CLUSTER_RADIUS_MM_DEFAULT)
+    r_mm = max(3.0, step * float(AUTO_PLAN_SEQ_CLUSTER_RADIUS_SCALE))
+    return r_mm * r_mm
 
 
 def _infer_episode_gap_s(t: np.ndarray, n_plan: int) -> float:
@@ -185,7 +199,7 @@ def infer_auto_layer_params(
         viterbi_advance_penalty_mm2=_infer_viterbi_penalty_mm2(planned_xyz),
         dead_ratio=dead_ratio,
         tiny_merge_rows=tiny_merge,
-        plan_seq_cluster_radius_mm2=infer_plan_seq_cluster_radius_mm2(plan_xy2),
+        plan_seq_cluster_radius_mm2=_infer_plan_seq_cluster_radius_mm2(plan_xy2),
     )
     _set_last_params(params)
     return params

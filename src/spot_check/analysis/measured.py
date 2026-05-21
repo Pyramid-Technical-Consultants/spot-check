@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 from spot_check.analysis._imports import *  # noqa: F403
 from spot_check.analysis.csv_io import open_acquisition_csv
 from spot_check.analysis.layers import (
@@ -10,8 +12,6 @@ from spot_check.analysis.layers import (
     _opt_float_cell,
     _plan_impute_lookups_per_layer,
     _PlanImputeLookup,
-    delivery_layer_indices,
-    layer_indices_by_acquisition_time,
     viterbi_monotone_layer_assign,
 )
 from spot_check.analysis.spatial import (
@@ -370,35 +370,20 @@ def _plan_sequential_aggregated_per_plan_spot(
     spots_per_layer: Sequence[int],
     a_is_x: bool,
 ) -> list[tuple[float, ...]]:
-    """One output row per plan delivery index (0 … n_plan-1); nominal layer from plan order."""
+    """One aggregated row per plan spot that has assigned acquisition data (no plan-only fill)."""
     from spot_check.analysis.layers import delivery_layer_indices
 
     plan_layer = delivery_layer_indices(n_plan_spots, spots_per_layer)
     by_pi = _aggregate_rows_by_spot_id_map(rows, spot_ids)
     out: list[tuple[float, ...]] = []
-    for i in range(n_plan_spots):
-        layer_i = float(int(plan_layer[i]))
-        t = by_pi.get(i)
-        if t is None:
-            px, py, _ = planned_xyz[i]
-            a, b = _ab_from_plan_xy(float(px), float(py), a_is_x=a_is_x)
-            out.append(
-                _measured_row_with_sigma(
-                    a,
-                    b,
-                    layer_i,
-                    1e-18,
-                    0,
-                    None,
-                    None,
-                    channel_sum_na=1e-18,
-                )
-            )
+    for i in sorted(by_pi):
+        if i < 0 or i >= n_plan_spots:
             continue
+        t = by_pi[i]
         a, b = float(t[0]), float(t[1])
         if not (math.isfinite(a) and math.isfinite(b)):
-            px, py, _ = planned_xyz[i]
-            a, b = _ab_from_plan_xy(float(px), float(py), a_is_x=a_is_x)
+            continue
+        layer_i = float(int(plan_layer[i]))
         lay = float(t[2])
         if not math.isfinite(lay):
             lay = layer_i
@@ -430,6 +415,52 @@ def _aggregate_assigned_rows(
         return rows
     return aggregate_measured_rows_by_spot_id(rows, spot_ids)
 
+
+@dataclass
+class MeasuredAssignResult:
+    """Assigned measured rows before optional spot aggregation."""
+
+    rows: list[tuple[float, ...]]
+    spot_ids: list[int]
+    layer_mode: str = "time_gap"
+    assign_method: str = ""
+    n_plan_spots: int = 0
+    planned_xyz: list[tuple[float, float, float]] | None = None
+    spots_per_layer: list[int] | None = None
+    a_is_x: bool = False
+    gates: list[int] = field(default_factory=list)
+
+
+def aggregate_measured_assign_result(
+    result: MeasuredAssignResult,
+    *,
+    aggregate_spots: bool,
+) -> list[tuple[float, ...]]:
+    """Collapse assigned rows by spot id when ``aggregate_spots`` is True."""
+    if not aggregate_spots:
+        return result.rows
+    if not result.rows:
+        return []
+    spot_ids = result.spot_ids
+    if result.gates and any(g >= 0 for g in result.gates):
+        spot_ids = _gate_phase_spot_ids_for_rows(result.gates)
+    if (
+        result.layer_mode == "auto"
+        and result.assign_method == "plan_sequential"
+        and result.planned_xyz is not None
+        and result.spots_per_layer is not None
+    ):
+        return _plan_sequential_aggregated_per_plan_spot(
+            result.rows,
+            spot_ids,
+            n_plan_spots=result.n_plan_spots,
+            planned_xyz=result.planned_xyz,
+            spots_per_layer=result.spots_per_layer,
+            a_is_x=result.a_is_x,
+        )
+    return aggregate_measured_rows_by_spot_id(result.rows, spot_ids)
+
+
 def _measured_tuple_for_spot_weighted_mean(
     t: tuple[float, ...],
 ) -> _GateSpotBufRow:
@@ -451,7 +482,7 @@ def _measured_tuple_for_spot_weighted_mean(
     ch = float(t[7]) if len(t) >= 8 else float(w)
     return (a, b, lay, w, pcd, sa, sb, ch)
 
-def measured_spot_abc_from_csv(
+def assign_measured_from_csv(
     csv_path: Path,
     *,
     max_points: int | None = None,
@@ -462,7 +493,6 @@ def measured_spot_abc_from_csv(
     viterbi_advance_penalty_mm2: float = VITERBI_LAYER_ADVANCE_PENALTY_MM2_DEFAULT,
     planned_xyz: list[tuple[float, float, float]] | None = None,
     a_is_x: bool = False,
-    aggregate_spots: bool = True,
     spot_weight_mode: str = SPOT_WEIGHT_MODE_DEFAULT,
     auto_episode_gap_s: float = TIME_LAYER_GAP_S_DEFAULT,
     auto_min_on_spot_weight_na: float = AUTO_MIN_ON_SPOT_WEIGHT_NA_DEFAULT,
@@ -472,41 +502,10 @@ def measured_spot_abc_from_csv(
     auto_assign_method: str = "episodes",
     heal_partial_fit_axes: bool = False,
     align_detector_xy_before_assign: bool = False,
-) -> list[tuple[float, ...]]:
-    """Measured rows as (A mm, B mm, layer index, spot weight, partial code).
+) -> MeasuredAssignResult:
+    """Assign layers/spots from CSV without spot aggregation.
 
-    Index **3** is a positive **weight** from ``spot_weight_mode`` (IX512 sum and/or Fit Amplitude
-    A/B; see :func:`measured_spot_weight_from_row`) for aggregation and optional 3D opacity.
-
-    Returns 8-tuples ``(A, B, layer, weight, partial, σ_A, σ_B, channel_sum_nA)`` (σ may be NaN).
-
-    By default, rows missing Fit Mean Position A or B are dropped. Set
-    ``heal_partial_fit_axes=True`` to keep rows with exactly one missing axis and fill the gap
-    from the nearest plan spot at the assigned layer (partial code 1 or 2). Rows with both axes
-    missing are always dropped.
-
-    **auto** never reads ``Gate Counter``. With ``auto_assign_method='episodes'``, deadtime
-    segmentation aligns spot count to the plan and layers follow **acquisition time** (earliest
-    spot -> layer 0 = highest nominal energy). With ``auto_assign_method='plan_sequential'``,
-    rows are assigned in **plan delivery order** (spot 0 = first spot of the highest-energy layer);
-    after each deadtime break (no fit on either position axis), assignment advances by exactly one
-    plan slot once the current spot has at least one row (no skipped plan indices).
-    Layers then match gate_counter plan-slot indexing.
-
-    When ``auto_infer_params`` is True (default), episode gap, XY jump, on-spot weight floor,
-    min episode rows, and Viterbi advance penalty are derived from the CSV timing/weights and
-    plan geometry (:func:`infer_auto_layer_params`); explicit ``auto_*`` / ``viterbi_*`` kwargs
-    are ignored. Set ``auto_infer_params=False`` to use the keyword values (tests, scripts).
-
-    **Pre-assignment detector align** (``align_detector_xy_before_assign=True``): rigid 2D map on
-    flattened plan + on-spot measured XY before episode or plan-sequential assignment (``auto``
-    only). Use when the detector frame is misaligned; post-assignment align only moves A/B after
-    indices are fixed.
-
-    **Spot aggregation** (``aggregate_spots=True``) runs after assignment: rows with the same
-    assignment id are collapsed via :func:`aggregate_measured_rows_by_spot_id` (weighted means of
-    A/B, layer, σ, and weight). Ids come from the assignment stage (episode/span index, gate-counter
-    spot phase, time-gap delivery spot, or gate phases when that column is present).
+    See :func:`measured_spot_abc_from_csv` for mode documentation.
     """
     mode = layer_mode.strip().lower().replace("-", "_")
     if mode not in ("time_gap", "plan_viterbi", "auto", "gate_counter"):
@@ -590,7 +589,7 @@ def measured_spot_abc_from_csv(
         with open_acquisition_csv(csv_path) as f:
             reader = csv.DictReader(f)
             if not reader.fieldnames:
-                return []
+                return MeasuredAssignResult([], [])
             time_key = reader.fieldnames[0]
             for row in reader:
                 if not (row.get(fa_key) or "").strip():
@@ -620,7 +619,7 @@ def measured_spot_abc_from_csv(
                 if max_points is not None and len(ab_buf) >= max_points:
                     break
         if not ab_buf:
-            return []
+            return MeasuredAssignResult([], [])
         meas_xy = np.asarray(xy_buf, dtype=np.float64)
         emit = _emit_sqdist_to_layers_mm2(meas_xy, layer_xy)
         layers_idx = viterbi_monotone_layer_assign(emit, viterbi_advance_penalty_mm2)
@@ -660,14 +659,20 @@ def measured_spot_abc_from_csv(
             if any(g >= 0 for g in gates_acc)
             else [int(layers_idx[i]) for i in range(len(out))]
         )
-        return _aggregate_assigned_rows(out, agg_ids, aggregate_spots=aggregate_spots)
+        return MeasuredAssignResult(
+            out,
+            list(agg_ids),
+            layer_mode="plan_viterbi",
+        )
 
     if mode == "auto":
-        from spot_check.analysis.auto_columns import load_auto_fit_columns_from_csv
-        from spot_check.analysis.episodes import (
-            cols_with_delivery_weights,
-            segment_align_auto_columns,
+        from spot_check.analysis.assign import (
+            EpisodeAssignParams,
+            PlanSequentialAssignParams,
+            run_auto_assignment,
         )
+        from spot_check.analysis.auto_columns import load_auto_fit_columns_from_csv
+        from spot_check.analysis.episodes import cols_with_delivery_weights
         if not layer_energies or max_layer is None:
             raise ValueError(
                 "plan-based layer modes require a plan with at least one nominal energy layer"
@@ -692,7 +697,7 @@ def measured_spot_abc_from_csv(
             heal_partial_fit_axes=heal_partial_fit_axes,
         )
         if len(cols) == 0:
-            return []
+            return MeasuredAssignResult([], [], layer_mode="auto", assign_method=assign_m)
 
         if align_detector_xy_before_assign:
             from spot_check.analysis.alignment import align_auto_fit_columns_to_plan_xy
@@ -720,7 +725,6 @@ def measured_spot_abc_from_csv(
         min_rows = int(auto_min_episode_rows)
         dead_ratio = float(AUTO_EDGE_DEAD_RATIO_DEFAULT)
         tiny_merge = int(AUTO_EDGE_TINY_MERGE_ROWS)
-        plan_seq_radius_mm2: float | None = None
         if auto_infer_params:
             from spot_check.analysis.auto_params import infer_auto_layer_params
 
@@ -731,41 +735,29 @@ def measured_spot_abc_from_csv(
             min_rows = auto_p.min_episode_rows
             dead_ratio = auto_p.dead_ratio
             tiny_merge = auto_p.tiny_merge_rows
-            plan_seq_radius_mm2 = float(auto_p.plan_seq_cluster_radius_mm2)
 
         assign_m_run = assign_m
-        if assign_m_run == "episodes":
-            aligned_groups, _diag = segment_align_auto_columns(
-                cols,
-                n_plan_spots=n_plan_spots,
-                episode_gap_s=gap_s,
-                min_on_spot_weight_na=min_w,
-                spot_xy_jump_mm=xy_jump,
-                min_episode_rows=min_rows,
-                dead_ratio=dead_ratio,
-                tiny_merge_rows=tiny_merge,
-                plan_xy=plan_xy2,
-            )
-            layers_idx_auto = layer_indices_by_acquisition_time(
-                aligned_groups, spots_per_layer
-            )
-        else:
-            from spot_check.analysis.plan_sequential import (
-                assign_plan_indices_sequential,
-                plan_spot_index_per_span,
-                sequential_spans_from_plan_indices,
-            )
-
-            plan_idx = assign_plan_indices_sequential(
-                cols,
-                plan_xy2,
-                min_rows_on_spot=1,
-                cluster_radius_mm2=plan_seq_radius_mm2,
-            )
-            aligned_groups = sequential_spans_from_plan_indices(plan_idx)
-            plan_layers = delivery_layer_indices(n_plan_spots, spots_per_layer)
-            spot_pi = plan_spot_index_per_span(plan_idx, aligned_groups)
-            layers_idx_auto = plan_layers[spot_pi]
+        ep_params = EpisodeAssignParams(
+            episode_gap_s=gap_s,
+            min_on_spot_weight_na=min_w,
+            spot_xy_jump_mm=xy_jump,
+            min_episode_rows=min_rows,
+            dead_ratio=dead_ratio,
+            tiny_merge_rows=tiny_merge,
+        )
+        ps_params = PlanSequentialAssignParams(min_rows_on_spot=1)
+        assign_out = run_auto_assignment(
+            assign_m_run,
+            cols,
+            n_plan_spots=n_plan_spots,
+            plan_xy=plan_xy2,
+            spots_per_layer=spots_per_layer,
+            episode_params=ep_params,
+            plan_sequential_params=ps_params,
+        )
+        aligned_groups = assign_out.spans
+        layers_idx_auto = assign_out.layer_index_per_span
+        plan_idx = assign_out.plan_index_per_row
 
         cols_w = cols_with_delivery_weights(cols)
 
@@ -816,33 +808,31 @@ def measured_spot_abc_from_csv(
                         channel_sum_na=ch_n,
                     )
                 )
-                if assign_m_run == "plan_sequential":
+                if assign_m_run == "plan_sequential" and plan_idx is not None:
                     spot_ids.append(int(plan_idx[ri]))
                 else:
                     spot_ids.append(ei)
                 if max_points is not None and len(out_rows) >= max_points:
-                    if assign_m_run == "plan_sequential" and aggregate_spots:
-                        return _plan_sequential_aggregated_per_plan_spot(
-                            out_rows,
-                            spot_ids,
-                            n_plan_spots=n_plan_spots,
-                            planned_xyz=planned_xyz,  # type: ignore[arg-type]
-                            spots_per_layer=spots_per_layer,
-                            a_is_x=a_is_x,
-                        )
-                    return out_rows
+                    return MeasuredAssignResult(
+                        out_rows,
+                        spot_ids,
+                        layer_mode="auto",
+                        assign_method=assign_m_run,
+                        n_plan_spots=n_plan_spots,
+                        planned_xyz=list(planned_xyz),  # type: ignore[arg-type]
+                        spots_per_layer=list(spots_per_layer),
+                        a_is_x=a_is_x,
+                    )
 
-        if assign_m_run == "plan_sequential" and aggregate_spots:
-            return _plan_sequential_aggregated_per_plan_spot(
-                out_rows,
-                spot_ids,
-                n_plan_spots=n_plan_spots,
-                planned_xyz=planned_xyz,  # type: ignore[arg-type]
-                spots_per_layer=spots_per_layer,
-                a_is_x=a_is_x,
-            )
-        return _aggregate_assigned_rows(
-            out_rows, spot_ids, aggregate_spots=aggregate_spots
+        return MeasuredAssignResult(
+            out_rows,
+            spot_ids,
+            layer_mode="auto",
+            assign_method=assign_m_run,
+            n_plan_spots=n_plan_spots,
+            planned_xyz=list(planned_xyz),  # type: ignore[arg-type]
+            spots_per_layer=list(spots_per_layer),
+            a_is_x=a_is_x,
         )
 
     if mode == "gate_counter":
@@ -878,7 +868,7 @@ def measured_spot_abc_from_csv(
         with open_acquisition_csv(csv_path) as f:
             reader = csv.DictReader(f)
             if not reader.fieldnames:
-                return []
+                return MeasuredAssignResult([], [])
             gc_key = GATE_COUNTER_KEY
             if gc_key not in reader.fieldnames:
                 raise ValueError(
@@ -930,8 +920,10 @@ def measured_spot_abc_from_csv(
                 spot_ids_gc.append(spot_id_gc)
                 if max_points is not None and len(out_gc) >= max_points:
                     break
-        return _aggregate_assigned_rows(
-            out_gc, spot_ids_gc, aggregate_spots=aggregate_spots
+        return MeasuredAssignResult(
+            out_gc,
+            spot_ids_gc,
+            layer_mode="gate_counter",
         )
 
     out: list[tuple[float, ...]] = []
@@ -1038,10 +1030,89 @@ def measured_spot_abc_from_csv(
             if max_points is not None and len(out) >= max_points:
                 break
 
-    return _aggregate_assigned_rows(
+    return MeasuredAssignResult(
         out,
-        _gate_phase_spot_ids_for_rows(gates_tg)
-        if aggregate_spots and any(g >= 0 for g in gates_tg)
-        else spot_ids_tg,
-        aggregate_spots=aggregate_spots,
+        spot_ids_tg,
+        layer_mode="time_gap",
+        gates=gates_tg,
     )
+
+
+def measured_spot_abc_from_csv(
+    csv_path: Path,
+    *,
+    max_points: int | None = None,
+    layer_mode: str = "time_gap",
+    layer_gap_s: float = TIME_LAYER_GAP_S_DEFAULT,
+    refill_same_spot_xy_tol_mm: float = REFILL_SAME_SPOT_XY_TOLERANCE_MM,
+    refill_trust_time_gap_stay_dist_mm: float = REFILL_TRUST_TIME_GAP_STAY_DIST_MM,
+    viterbi_advance_penalty_mm2: float = VITERBI_LAYER_ADVANCE_PENALTY_MM2_DEFAULT,
+    planned_xyz: list[tuple[float, float, float]] | None = None,
+    a_is_x: bool = False,
+    aggregate_spots: bool = True,
+    spot_weight_mode: str = SPOT_WEIGHT_MODE_DEFAULT,
+    auto_episode_gap_s: float = TIME_LAYER_GAP_S_DEFAULT,
+    auto_min_on_spot_weight_na: float = AUTO_MIN_ON_SPOT_WEIGHT_NA_DEFAULT,
+    auto_spot_xy_jump_mm: float = AUTO_SPOT_XY_JUMP_MM_DEFAULT,
+    auto_min_episode_rows: int = AUTO_MIN_EPISODE_ROWS_DEFAULT,
+    auto_infer_params: bool = True,
+    auto_assign_method: str = "episodes",
+    heal_partial_fit_axes: bool = False,
+    align_detector_xy_before_assign: bool = False,
+) -> list[tuple[float, ...]]:
+    """Measured rows as (A mm, B mm, layer index, spot weight, partial code).
+
+    Index **3** is a positive **weight** from ``spot_weight_mode`` (IX512 sum and/or Fit Amplitude
+    A/B; see :func:`measured_spot_weight_from_row`) for aggregation and optional 3D opacity.
+
+    Returns 8-tuples ``(A, B, layer, weight, partial, σ_A, σ_B, channel_sum_nA)`` (σ may be NaN).
+
+    By default, rows missing Fit Mean Position A or B are dropped. Set
+    ``heal_partial_fit_axes=True`` to keep rows with exactly one missing axis and fill the gap
+    from the nearest plan spot at the assigned layer (partial code 1 or 2). Rows with both axes
+    missing are always dropped.
+
+    **auto** never reads ``Gate Counter``. With ``auto_assign_method='episodes'``, deadtime
+    segmentation aligns spot count to the plan and layers follow **acquisition time** (earliest
+    spot -> layer 0 = highest nominal energy). With ``auto_assign_method='plan_sequential'``,
+    the first on-spot burst is plan spot **0** and delivery advances **+1** after deadtime gaps;
+    after each deadtime break (no fit on either position axis), assignment advances by exactly one
+    plan slot once the current spot has at least one row (no skipped plan indices).
+    Layers then match gate_counter plan-slot indexing.
+
+    When ``auto_infer_params`` is True (default), episode gap, XY jump, on-spot weight floor,
+    min episode rows, and Viterbi advance penalty are derived from the CSV timing/weights and
+    plan geometry (:func:`infer_auto_layer_params`); explicit ``auto_*`` / ``viterbi_*`` kwargs
+    are ignored. Set ``auto_infer_params=False`` to use the keyword values (tests, scripts).
+
+    **Pre-assignment detector align** (``align_detector_xy_before_assign=True``): rigid 2D map on
+    flattened plan + on-spot measured XY before episode or plan-sequential assignment (``auto``
+    only). Use when the detector frame is misaligned; post-assignment align only moves A/B after
+    indices are fixed.
+
+    **Spot aggregation** (``aggregate_spots=True``) runs after assignment: rows with the same
+    assignment id are collapsed via :func:`aggregate_measured_rows_by_spot_id` (weighted means of
+    A/B, layer, σ, and weight). Ids come from the assignment stage (episode/span index, gate-counter
+    spot phase, time-gap delivery spot, or gate phases when that column is present).
+    """
+    assigned = assign_measured_from_csv(
+        csv_path,
+        max_points=max_points,
+        layer_mode=layer_mode,
+        layer_gap_s=layer_gap_s,
+        refill_same_spot_xy_tol_mm=refill_same_spot_xy_tol_mm,
+        refill_trust_time_gap_stay_dist_mm=refill_trust_time_gap_stay_dist_mm,
+        viterbi_advance_penalty_mm2=viterbi_advance_penalty_mm2,
+        planned_xyz=planned_xyz,
+        a_is_x=a_is_x,
+        spot_weight_mode=spot_weight_mode,
+        auto_episode_gap_s=auto_episode_gap_s,
+        auto_min_on_spot_weight_na=auto_min_on_spot_weight_na,
+        auto_spot_xy_jump_mm=auto_spot_xy_jump_mm,
+        auto_min_episode_rows=auto_min_episode_rows,
+        auto_infer_params=auto_infer_params,
+        auto_assign_method=auto_assign_method,
+        heal_partial_fit_axes=heal_partial_fit_axes,
+        align_detector_xy_before_assign=align_detector_xy_before_assign,
+    )
+    return aggregate_measured_assign_result(assigned, aggregate_spots=aggregate_spots)

@@ -10,12 +10,12 @@ from spot_check.analysis.alignment import (
     align_auto_fit_columns_to_plan_xy,
     last_detector_align_info,
 )
+from spot_check.analysis.assign import assign_plan_indices_sequential
 from spot_check.analysis.auto_columns import (
     AutoFitColumns,
     position_fit_deadtime_mask,
 )
 from spot_check.analysis.episodes import AutoFitRow, _rows_to_columns
-from spot_check.analysis.plan_sequential import assign_plan_indices_sequential
 
 
 def _cols_along_x_rotated(

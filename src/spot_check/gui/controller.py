@@ -25,7 +25,6 @@ try:
         QLabel,
         QLineEdit,
         QMainWindow,
-        QProgressBar,
         QPushButton,
         QRadioButton,
         QScrollArea,
@@ -51,6 +50,11 @@ from spot_check.gui.layer_assign import (
     normalize_layer_assign_mode,
     resolve_layer_assign_mode,
 )
+from spot_check.gui.panels.status_format import (
+    append_auto_meas_lines,
+    format_auto_tuning_label,
+    format_qa_counts_label,
+)
 from spot_check.gui.parsers import (
     normalize_z_depth_metric,
     parse_bounds_xy_tick_mm,
@@ -65,8 +69,8 @@ from spot_check.gui.pipeline import (
     file_mtime,
     is_acquisition_csv_file,
     pipeline_load_job,
-    resolve_csv_load_layer_mode,
 )
+from spot_check.gui.pipeline_progress import PipelineProgressWidget
 from spot_check.gui.state import (
     apply_saved_window_layout,
     finish_saved_window_layout,
@@ -77,6 +81,10 @@ from spot_check.gui.state import (
 )
 from spot_check.gui.theme import MUTED_BODY, MUTED_HELP, MUTED_HINT
 from spot_check.gui.workers import PipelineLoaderSignals, PipelineLoadRunnable
+from spot_check.pipeline import CallbackProgressSink, PipelineConfig
+from spot_check.pipeline.export_job import pipeline_export_load
+from spot_check.pipeline.phases.qa import run_qa_phase
+from spot_check.pipeline.progress import NullProgressSink, ProgressEvent
 
 FOLDER = project_root()
 # Short pause after typing in numeric fields before recomputing the 3D view (ms).
@@ -588,7 +596,15 @@ class SpotCheckController:
         )
         fl.addRow("", btn_export_csv)
 
-        gb_layer = QGroupBox("Layer assignment")
+        gb_filter = QGroupBox("Filtering")
+        vl_filter = QVBoxLayout(gb_filter)
+        vl_filter.addWidget(cb_heal_partial)
+
+        gb_align_panel = QGroupBox("Detector alignment")
+        vl_align = QVBoxLayout(gb_align_panel)
+        vl_align.addWidget(cb_align)
+
+        gb_layer = QGroupBox("Spot assignment")
         vl_layer = QVBoxLayout(gb_layer)
         vl_layer.addWidget(rb_auto_episodes)
         vl_layer.addWidget(rb_auto_seq)
@@ -600,9 +616,11 @@ class SpotCheckController:
         lbl_auto_tuning.setStyleSheet(f"color: {MUTED_HINT}; font-size: 9pt;")
         vl_layer.addWidget(lbl_auto_tuning)
         vl_layer.addWidget(help_lbl)
-        vl_layer.addWidget(agg_intro_lbl)
-        vl_layer.addWidget(cb_agg)
-        vl_layer.addWidget(cb_heal_partial)
+
+        gb_agg = QGroupBox("Aggregation")
+        vl_agg = QVBoxLayout(gb_agg)
+        vl_agg.addWidget(agg_intro_lbl)
+        vl_agg.addWidget(cb_agg)
 
         gb_disp = QGroupBox("Display")
         vdisp = QVBoxLayout(gb_disp)
@@ -625,7 +643,6 @@ class SpotCheckController:
         w_z_wet = QWidget()
         w_z_wet.setLayout(z_wet_row)
         vdisp.addWidget(w_z_wet)
-        vdisp.addWidget(cb_align)
         rt = QHBoxLayout()
         rt.addWidget(QLabel("XY ticks (mm)"))
         rt.addWidget(e_bxy)
@@ -674,31 +691,23 @@ class SpotCheckController:
             qa_warn_f: float,
             plan_mu: object,
         ) -> None:
-            if not cb_pqa.isChecked():
-                lbl_qa_counts.setText(
-                    "Counts: enable “Color measured spots by plan QA” above."
-                )
-                return
-            if not planned or not measured:
-                lbl_qa_counts.setText("Counts: — (need plan and CSV)")
-                return
-            try:
-                n_pass, n_warn, n_fail = analysis.plan_qa_measured_spot_pass_warn_fail(
-                    planned,
-                    measured,
-                    qa_mode=qa_mode,
-                    pass_thr=float(qa_pass_f),
-                    warn_thr=float(qa_warn_f),
-                    plan_mu=plan_mu,  # type: ignore[arg-type]
-                    a_is_x=False,
-                )
-            except ValueError:
-                lbl_qa_counts.setText("Counts: — (check pass / warn thresholds)")
-                return
-            unit = "pp" if qa_mode == "dose" else "mm"
+            from spot_check.pipeline.types import PipelineState
+
+            qa_state = PipelineState()
+            qa = run_qa_phase(
+                qa_state,
+                NullProgressSink(),
+                planned=list(planned or []),
+                measured=list(measured or []),
+                qa_mode=qa_mode,
+                pass_thr=float(qa_pass_f),
+                warn_thr=float(qa_warn_f),
+                plan_mu=plan_mu,
+                enabled=bool(cb_pqa.isChecked()),
+            )
+            _plot_cache["qa_result"] = qa
             lbl_qa_counts.setText(
-                f"Measured spots: {n_pass} pass · {n_warn} warn · {n_fail} fail "
-                f"({unit} thresholds)"
+                format_qa_counts_label(qa, enabled=bool(cb_pqa.isChecked()))
             )
 
         gb_slice = QGroupBox("5-layer band")
@@ -725,9 +734,12 @@ class SpotCheckController:
         vview3d.addLayout(view_proj_row)
 
         drawer_layout.addWidget(gb_files)
+        drawer_layout.addWidget(gb_filter)
+        drawer_layout.addWidget(gb_align_panel)
         drawer_layout.addWidget(gb_layer)
-        drawer_layout.addWidget(gb_disp)
+        drawer_layout.addWidget(gb_agg)
         drawer_layout.addWidget(gb_qa)
+        drawer_layout.addWidget(gb_disp)
         drawer_layout.addWidget(gb_slice)
         drawer_layout.addWidget(gb_view3d)
 
@@ -782,6 +794,8 @@ class SpotCheckController:
             "layer_mode_run": "",
             "auto_assign_method": "episodes",
             "aggregate_run": False,
+            "assign_diagnostics": None,
+            "qa_result": None,
             "plotter": None,
             "aligned": None,
             "z_water_depth": False,
@@ -835,21 +849,9 @@ class SpotCheckController:
         load_overlay_spinner = QLabel(_LOAD_SPINNER_FRAMES[0])
         load_overlay_spinner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         load_overlay_spinner.setStyleSheet("color: #58a6ff; font-size: 36pt;")
-        load_overlay_msg = QLabel("Loading plan/CSV…")
-        load_overlay_msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        load_overlay_msg.setWordWrap(True)
-        load_overlay_msg.setStyleSheet("color: #c9d1d9; font-size: 12pt; font-weight: 600;")
-        load_overlay_bar = QProgressBar()
-        load_overlay_bar.setRange(0, 0)
-        load_overlay_bar.setFixedHeight(6)
-        load_overlay_bar.setTextVisible(False)
-        load_overlay_bar.setStyleSheet(
-            "QProgressBar { background-color: #21262d; border: none; border-radius: 3px; }"
-            "QProgressBar::chunk { background-color: #58a6ff; border-radius: 3px; }"
-        )
+        pipeline_progress = PipelineProgressWidget()
         load_overlay_card_lay.addWidget(load_overlay_spinner)
-        load_overlay_card_lay.addWidget(load_overlay_msg)
-        load_overlay_card_lay.addWidget(load_overlay_bar)
+        load_overlay_card_lay.addWidget(pipeline_progress)
         load_overlay_row.addWidget(load_overlay_card)
         load_overlay_row.addStretch(1)
         load_overlay_lay.addLayout(load_overlay_row)
@@ -887,7 +889,7 @@ class SpotCheckController:
             _loading_gen = int(generation)
             _spinner_frame = 0
             load_overlay_spinner.setText(_LOAD_SPINNER_FRAMES[0])
-            load_overlay_msg.setText(message)
+            pipeline_progress.reset(message=message)
             _sync_load_overlay_geometry()
             load_overlay.show()
             load_overlay.raise_()
@@ -901,7 +903,14 @@ class SpotCheckController:
                 return
             _loading_gen = None
             _load_spinner_timer.stop()
+            pipeline_progress.mark_complete()
             load_overlay.hide()
+
+        def _on_pipeline_progress(event: object, generation: int) -> None:
+            if generation != load_generation:
+                return
+            if isinstance(event, ProgressEvent):
+                pipeline_progress.apply_event(event)
 
         def _vtk_placeholder_message(text: str, *, error: bool = False) -> None:
             clr = "#f85149" if error else "#8b949e"
@@ -1014,8 +1023,13 @@ class SpotCheckController:
             auto_xy: float | None = None
             auto_vp: float | None = None
             assign_plot = str(_plot_cache.get("auto_assign_method") or "episodes")
+            assign_diag = _plot_cache.get("assign_diagnostics")
             if layer_mode_plot == "auto" and assign_plot == "episodes":
-                auto_p = analysis.last_auto_layer_params()
+                auto_p = (
+                    assign_diag.auto_layer_params
+                    if assign_diag is not None
+                    else analysis.last_auto_layer_params()
+                )
                 if auto_p is not None:
                     auto_gap = auto_p.episode_gap_s
                     auto_xy = auto_p.spot_xy_jump_mm
@@ -1126,39 +1140,20 @@ class SpotCheckController:
             else:
                 meas_line = "Measured: (none)"
             if measured and layer_mode_plot == "auto":
-                auto_p = analysis.last_auto_layer_params()
-                if auto_p is not None:
-                    if assign_plot == "plan_sequential":
-                        meas_line += " — plan-seq: one row per plan delivery slot"
-                        lbl_auto_tuning.setText(
-                            "Deadtime = no A/B position fit; spans aligned to plan count "
-                            f"(≥{auto_p.min_episode_rows} row(s)/span)."
-                        )
-                        if planned and n_plan_kept > 0 and n_meas != n_plan_kept:
-                            meas_line += (
-                                f" — WARNING: {n_meas} measured vs {n_plan_kept} plan spots"
-                            )
-                    else:
-                        meas_line += (
-                            f" — auto Δt≥{auto_p.episode_gap_s:g} s, "
-                            f"XY>{auto_p.spot_xy_jump_mm:g} mm, "
-                            f"Viterbi {auto_p.viterbi_advance_penalty_mm2:g} mm²"
-                        )
-                        lbl_auto_tuning.setText(
-                            "Inferred: "
-                            f"Δt {auto_p.episode_gap_s:g} s · XY {auto_p.spot_xy_jump_mm:g} mm · "
-                            f"weight ≥{auto_p.min_on_spot_weight_na:.3g} nA · "
-                            f"≥{auto_p.min_episode_rows} row(s)/episode · "
-                            f"Viterbi {auto_p.viterbi_advance_penalty_mm2:g} mm²"
-                        )
-                        diag_auto = analysis.last_auto_episode_diagnostics()
-                        if diag_auto is not None:
-                            meas_line += (
-                                f" — episodes raw={diag_auto.n_raw_episodes}, "
-                                f"aligned={diag_auto.n_after_align}/{diag_auto.n_plan}"
-                            )
-                            if not diag_auto.count_align_ok:
-                                meas_line += " (spot-count align incomplete)"
+                assign_diag = _plot_cache.get("assign_diagnostics")
+                lbl_auto_tuning.setText(
+                    format_auto_tuning_label(
+                        assign_diag,
+                        assign_method=assign_plot,
+                    )
+                )
+                meas_line = append_auto_meas_lines(
+                    meas_line,
+                    assign_diag,
+                    assign_method=assign_plot,
+                    n_meas=n_meas,
+                    n_plan_kept=n_plan_kept,
+                )
             if measured and aggregate_plot:
                 _cap = p.measured_spot_weight_caption(ctx.spot_weight_mode_run)
                 meas_line += f" (one {_cap}-weighted mean per assigned plan spot)"
@@ -1230,9 +1225,10 @@ class SpotCheckController:
             _plot_cache["layer_mode_run"] = ld.layer_mode_run
             _plot_cache["auto_assign_method"] = ld.auto_assign_method
             _plot_cache["aggregate_run"] = ld.aggregate_run
+            _plot_cache["assign_diagnostics"] = ld.assign_diagnostics
             build_target = ld.csv_display_name or ld.label or "plan"
             build_note = f"Building 3D view — {build_target}…"
-            load_overlay_msg.setText(build_note)
+            pipeline_progress.set_visualize_phase(message=build_note)
             status_lbl.setText(build_note)
             try:
                 _finalize_refresh(ctx0, need_data=True)
@@ -1267,6 +1263,8 @@ class SpotCheckController:
             _plot_cache["layer_mode_run"] = ""
             _plot_cache["auto_assign_method"] = "episodes"
             _plot_cache["aggregate_run"] = False
+            _plot_cache["assign_diagnostics"] = None
+            _plot_cache["qa_result"] = None
             _plot_cache["plotter"] = None
             analysis.idle_slice_band_controls_qt(slice_qt_bindings)
             short = msg if len(msg) < 160 else f"{msg[:157]}…"
@@ -1290,58 +1288,34 @@ class SpotCheckController:
                 return
 
             layer_assign_mode = _layer_assign_mode_from_ui()
-            layer_mode_req, auto_assign_method, auto_infer = resolve_layer_assign_mode(
-                layer_assign_mode
-            )
-
             sw_lbl_run = combo_sw.currentText().strip()
             sw_internal_run = _SW_MODE_BY_LABEL.get(sw_lbl_run, sc_const.SPOT_WEIGHT_MODE_DEFAULT)
             try:
-                spot_weight_mode_run = analysis.normalize_measured_spot_weight_mode(sw_internal_run)
+                spot_weight_mode_run = analysis.normalize_measured_spot_weight_mode(
+                    sw_internal_run
+                )
             except ValueError as ex:
                 status_lbl.setText(f"Export: {ex}")
                 return
 
             aggregate_spots = bool(cb_agg.isChecked())
             try:
-                planned = _plot_cache.get("planned")
-                plan_mu = _plot_cache.get("plan_mu")
-                if planned is None or plan_mu is None:
-                    planned, _, plan_mu, _, _ = analysis.planned_spot_xyz_and_counts_from_plan(dcm)
-                label = str(_plot_cache.get("label") or "")
-                layer_mode_run, aggregate_run = resolve_csv_load_layer_mode(
-                    layer_mode=layer_mode_req,
+                config = PipelineConfig(
                     plan_path=dcm,
                     csv_path=csv_path,
+                    layer_assign_mode=layer_assign_mode,
                     aggregate_spots=aggregate_spots,
-                    auto_assign_method=auto_assign_method,
-                )
-                align_before = bool(
-                    cb_align.isChecked() and layer_mode_run == "auto" and planned
-                )
-                measured = analysis.measured_spot_abc_from_csv(
-                    csv_path,
-                    max_points=None,
-                    planned_xyz=planned,
-                    a_is_x=False,
-                    layer_mode=layer_mode_run,
-                    aggregate_spots=aggregate_run,
                     spot_weight_mode=spot_weight_mode_run,
-                    auto_infer_params=auto_infer and layer_mode_run == "auto",
-                    auto_assign_method=auto_assign_method,
+                    auto_align=bool(cb_align.isChecked()),
                     heal_partial_fit_axes=bool(cb_heal_partial.isChecked()),
-                    align_detector_xy_before_assign=align_before,
                 )
-                if not measured:
-                    status_lbl.setText("Export: no measured rows.")
-                    return
-                aligned = bool(cb_align.isChecked() and planned)
-                if aligned and not align_before:
-                    measured, _align_info = analysis.align_measured_to_plan_detector_xy(
-                        planned,
-                        measured,
-                        a_is_x=False,
-                    )
+                ok, measured = pipeline_export_load(config)
+                planned = ok.planned
+                plan_mu = ok.plan_mu
+                label = ok.label
+                layer_mode_run = ok.layer_mode_run
+                aggregate_run = ok.aggregate_run
+                aligned = bool(cb_align.isChecked() and planned and ok.measured_aligned)
                 suffix = "-spots-agg.csv" if aggregate_run else "-spots.csv"
                 default_out = csv_path.with_name(acquisition_csv_stem(csv_path) + suffix)
                 out_path, _ = QFileDialog.getSaveFileName(
@@ -1504,6 +1478,14 @@ class SpotCheckController:
                     _show_loading(gen, load_note)
 
                     def _job() -> PipelineLoadOK:
+                        gen_local = gen
+
+                        def _on_progress(event: ProgressEvent) -> None:
+                            PipelineLoadRunnable.emit_progress(
+                                load_signals, gen_local, event
+                            )
+
+                        sink = CallbackProgressSink(_on_progress)
                         return pipeline_load_job(
                             ctx.plan_path,
                             ctx.csv_path,
@@ -1512,6 +1494,7 @@ class SpotCheckController:
                             spot_weight_mode=ctx.spot_weight_mode_run,
                             auto_align=bool(cb_align.isChecked()),
                             heal_partial_fit_axes=bool(cb_heal_partial.isChecked()),
+                            progress=sink,
                         )
 
                     load_pool.start(PipelineLoadRunnable(_job, load_signals, gen))
@@ -1555,6 +1538,7 @@ class SpotCheckController:
 
         load_signals.finished.connect(_on_pipeline_load_finished)
         load_signals.failed.connect(_on_pipeline_load_failed)
+        load_signals.progress.connect(_on_pipeline_progress)
         _debounce.timeout.connect(_do_refresh)
 
         def _commit_field_refresh() -> None:

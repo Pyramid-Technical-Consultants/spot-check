@@ -65,7 +65,7 @@ AUTO_PLAN_SEQ_FORWARD_WINDOW_MAX: Final[int] = 128
 AUTO_PLAN_SEQ_FORWARD_WINDOW_DEFAULT: Final[int] = 32
 AUTO_PLAN_SEQ_CLUSTER_RADIUS_MM_DEFAULT: Final[float] = 10.0
 AUTO_PLAN_SEQ_CLUSTER_RADIUS_SCALE: Final[float] = 1.6
-# Legacy pairwise plan[i] vs plan[i+1] margin (mm²); kept for tests tuning pairwise mode.
+# Post-deadtime advance: closer to plan[i+1] than plan[i] by at least this margin (mm²).
 AUTO_PLAN_SEQ_ADVANCE_MARGIN_MM2: Final[float] = 4.0
 
 # --- Nominal energy → water-equivalent depth (display / approximate QA only) -----

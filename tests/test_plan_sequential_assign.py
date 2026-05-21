@@ -6,13 +6,13 @@ import math
 
 import numpy as np
 
-from spot_check.analysis.auto_columns import AutoFitColumns, position_fit_deadtime_mask
-from spot_check.analysis.episodes import AutoFitRow, _rows_to_columns
-from spot_check.analysis.plan_sequential import (
+from spot_check.analysis.assign import (
     assign_plan_indices_sequential,
     plan_spot_index_per_span,
     sequential_spans_from_plan_indices,
 )
+from spot_check.analysis.auto_columns import AutoFitColumns, position_fit_deadtime_mask
+from spot_check.analysis.episodes import AutoFitRow, _rows_to_columns
 
 
 def _cols_from_on_off_pattern(
@@ -254,7 +254,7 @@ def test_position_fit_deadtime_mask() -> None:
 
 
 def test_plan_sequential_measured_csv_single_row_bursts(tmp_path) -> None:
-    """End-to-end: one CSV row per on-burst still yields one aggregated spot per plan slot."""
+    """End-to-end: one CSV row per on-burst still yields one aggregated row per delivered spot."""
     from spot_check import analysis
     from tests.conftest import write_measured_csv
 
@@ -266,8 +266,8 @@ def test_plan_sequential_measured_csv_single_row_bursts(tmp_path) -> None:
                 "time (s)": str(idx * 0.01),
                 "IX512 Channel Sum (nA)": "100.0",
                 "Fit Amplitude A (nA)": "10.0",
-                "Fit Mean Position A (mm)": str(float(spot * 10)),
-                "Fit Mean Position B (mm)": "0.0",
+                "Fit Mean Position A (mm)": "0.0",
+                "Fit Mean Position B (mm)": str(float(spot * 10)),
             }
         )
         idx += 1
@@ -309,8 +309,8 @@ def test_plan_sequential_measured_csv(tmp_path) -> None:
                     "time (s)": str(idx * 0.01),
                     "IX512 Channel Sum (nA)": "100.0",
                     "Fit Amplitude A (nA)": "10.0",
-                    "Fit Mean Position A (mm)": str(float(spot * 10)),
-                    "Fit Mean Position B (mm)": "0.0",
+                    "Fit Mean Position A (mm)": "0.0",
+                    "Fit Mean Position B (mm)": str(float(spot * 10)),
                 }
             )
             idx += 1
