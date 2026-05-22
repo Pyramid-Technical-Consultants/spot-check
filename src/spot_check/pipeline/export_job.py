@@ -14,7 +14,9 @@ def pipeline_export_load(
 ) -> tuple[PipelineLoadOK, list[tuple[float, ...]]]:
     """Run the data pipeline and return load result plus rows for export."""
     ok = run_data_phases(config, progress=progress or NullProgressSink())
-    measured = list(ok.measured_aligned or ok.measured_unaligned)
+    measured = list(
+        ok.measured_fine_aligned or ok.measured_unaligned
+    )
     if not measured:
         raise ValueError("No measured rows to export.")
     return ok, measured

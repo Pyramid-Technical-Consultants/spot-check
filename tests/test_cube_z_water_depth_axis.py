@@ -19,10 +19,9 @@ from spot_check.geometry import (
     cube_z_axis_label_endpoints,
     cube_z_axis_spec,
     cube_z_axis_spec_for_display,
-    disable_pyvista_cube_axes_label_lod,
-    invert_z_cube_axis_tick_labels,
+    heal_plan_cube_axes,
     nominal_energy_to_scene_z,
-    pin_xy_cube_axis_tick_endpoints,
+    plan_cube_scene_bounds_and_axes_ranges,
     plan_depth_bounds_mm,
     refresh_pyvista_cube_axes,
 )
@@ -110,17 +109,15 @@ def _cube_actor_like_plotter(
     y_min: float = -40.0,
     y_max: float = 40.0,
 ):
-    """``show_bounds`` like ``scripts/cube_axes_10_cube_test.py``: ``axes_ranges`` == ``bounds``."""
+    """``show_bounds`` with ``bounds == axes_ranges``, then ``heal_plan_cube_axes``."""
     pv = _pyvista_off_screen()
-    bounds = (
+    bounds, axes_ranges = plan_cube_scene_bounds_and_axes_ranges(
         float(x_min),
         float(x_max),
         float(y_min),
         float(y_max),
-        float(spec.zmin_scene),
-        float(spec.zmax_scene),
+        spec,
     )
-    axes_ranges = bounds
     pl = pv.Plotter(off_screen=True)
     actor = pl.show_bounds(
         bounds=bounds,
@@ -130,17 +127,9 @@ def _cube_actor_like_plotter(
         ticks="inside",
         padding=0.0,
         n_zlabels=spec.n_zlabels,
-        fmt="%.4g",
+        fmt="%.0f",
     )
-    disable_pyvista_cube_axes_label_lod(actor)
-    try:
-        actor.z_label_visibility = True
-    except Exception:
-        pass
-    pin_xy_cube_axis_tick_endpoints(actor)
-    invert_z_cube_axis_tick_labels(
-        actor, z_scene_min=float(bounds[4]), z_scene_max=float(bounds[5])
-    )
+    heal_plan_cube_axes(actor, bounds, z_spec=spec, apply_style=False)
     return pl, actor, bounds, axes_ranges
 
 
@@ -244,7 +233,7 @@ def test_refresh_after_update_bounds_axes() -> None:
     )
     try:
         _pl.renderer.update_bounds_axes()
-        refresh_pyvista_cube_axes(actor, bounds, axes_ranges)
+        refresh_pyvista_cube_axes(actor, bounds, axes_ranges, z_spec=spec)
         zl = [float(actor.z_labels[i]) for i in range(len(actor.z_labels))]
         assert min(zl) == pytest.approx(78.5, abs=2.0)
         assert max(zl) == pytest.approx(134.4, abs=2.0)
@@ -264,7 +253,7 @@ def test_refresh_pins_plan_z_not_visible_mesh_extent() -> None:
     )
     try:
         actor.update_bounds((x_min, x_max, y_min, y_max, *tight_z))
-        refresh_pyvista_cube_axes(actor, bounds, axes_ranges)
+        refresh_pyvista_cube_axes(actor, bounds, axes_ranges, z_spec=spec)
         z_shallow_scene = float(spec.zmax_scene)
         shallow_lbl = label_at_scene_z(actor, z_shallow_scene)
         assert shallow_lbl == pytest.approx(78.5, abs=2.0)
@@ -286,7 +275,7 @@ def test_refresh_after_bounds_setter() -> None:
     )
     try:
         actor.bounds = bounds
-        refresh_pyvista_cube_axes(actor, bounds, axes_ranges)
+        refresh_pyvista_cube_axes(actor, bounds, axes_ranges, z_spec=spec)
         zl = [float(actor.z_labels[i]) for i in range(len(actor.z_labels))]
         assert min(zl) == pytest.approx(78.5, abs=3.0)
         assert max(zl) == pytest.approx(134.4, abs=3.0)
@@ -307,7 +296,7 @@ def test_refresh_after_cube_axes_update_bounds() -> None:
     try:
         tight = (x_min, x_max, y_min, y_max, -220.0, -180.0)
         actor.update_bounds(tight)
-        refresh_pyvista_cube_axes(actor, bounds, axes_ranges)
+        refresh_pyvista_cube_axes(actor, bounds, axes_ranges, z_spec=spec)
         zl = [float(actor.z_labels[i]) for i in range(len(actor.z_labels))]
         assert min(zl) == pytest.approx(78.5, abs=3.0)
         assert max(zl) == pytest.approx(134.4, abs=3.0)
@@ -327,7 +316,7 @@ def test_regression_bounds_setter_then_refresh_restores_depth_mm() -> None:
     try:
         _assert_cube_z_depth_mapping(actor, spec)
         actor.bounds = bounds
-        refresh_pyvista_cube_axes(actor, bounds, axes_ranges)
+        refresh_pyvista_cube_axes(actor, bounds, axes_ranges, z_spec=spec)
         _assert_cube_z_depth_mapping(actor, spec)
     finally:
         _pl.close()

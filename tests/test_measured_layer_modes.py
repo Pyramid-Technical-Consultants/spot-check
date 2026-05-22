@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import ast
-import math
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from spot_check import analysis
@@ -15,14 +15,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _ANALYSIS_DIR = _REPO_ROOT / "src" / "spot_check" / "analysis"
 
 _MODULE_SPATIAL_USAGE: dict[str, frozenset[str]] = {
-    "measured.py": frozenset(
-        {
-            "_plan_xy_by_energy_layer",
-            "_build_layer_kdtrees",
-            "_emit_sqdist_to_layers_mm2",
-        }
+    "assign/layer_plan_viterbi.py": frozenset(
+        {"_plan_xy_by_energy_layer", "_emit_sqdist_to_layers_mm2"}
     ),
-    "alignment.py": frozenset({"_plan_xy_by_energy_layer"}),
+    "assign/layer_time_gap.py": frozenset(
+        {"_plan_xy_by_energy_layer", "_build_layer_kdtrees"}
+    ),
+    "assign/layer_gate_counter.py": frozenset({"_plan_xy_by_energy_layer"}),
+    "assign/layer_auto.py": frozenset({"_plan_xy_by_energy_layer"}),
     "layers.py": frozenset({"_kdtree_query_k1", "_min_xy_dist_to_nominal_energy"}),
 }
 
@@ -101,36 +101,26 @@ def test_measured_spot_abc_gate_counter_aggregate(tmp_path: Path) -> None:
     assert len(rows) >= 1
 
 
-def test_align_measured_single_row() -> None:
-    planned = [(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)]
-    measured = [(1.0, 2.0, 0.0, 1.0, 0, float("nan"), float("nan"), 1.0)]
-    aligned, info = analysis.align_measured_to_plan_detector_xy(
-        planned,
-        measured,
-        a_is_x=False,
-    )
-    assert len(aligned) == 1
-    assert math.isfinite(float(aligned[0][0]))
-    assert info.n_pairs == 1
+def test_fit_coarse_flat_from_minimal_csv(tmp_path: Path) -> None:
+    from spot_check.analysis.alignment import fit_coarse_flat_align_from_auto_columns
+    from spot_check.analysis.auto_columns import load_auto_fit_columns_from_csv
+    from spot_check.analysis.layers import _PlanImputeLookup
 
-
-def test_align_measured_to_plan_detector_xy_uses_plan_layers(
-    measured_csv_writer,
-) -> None:
-    csv_path = measured_csv_writer()
-    measured = analysis.measured_spot_abc_from_csv(
+    csv_path = write_measured_csv(tmp_path / "align.csv", minimal_measured_rows())
+    planned = list(MINIMAL_PLANNED_XYZ)
+    plan_xy2 = np.asarray([(float(px), float(py)) for px, py, _ in planned], dtype=np.float64)
+    global_lk = _PlanImputeLookup.from_xy(plan_xy2)
+    assert global_lk is not None
+    cols = load_auto_fit_columns_from_csv(
         csv_path,
-        planned_xyz=list(MINIMAL_PLANNED_XYZ),
-        layer_mode="gate_counter",
+        global_lk=global_lk,
         a_is_x=False,
+        spot_weight_mode="channel_sum",
+        include_deadtime_rows=False,
     )
-    aligned, info = analysis.align_measured_to_plan_detector_xy(
-        list(MINIMAL_PLANNED_XYZ),
-        measured,
-        a_is_x=False,
-    )
-    assert len(aligned) == len(measured)
-    assert info is not None
+    info = fit_coarse_flat_align_from_auto_columns(cols, planned)
+    assert info.from_coarse_phase
+    assert info.n_pairs >= 1
 
 
 @pytest.mark.parametrize("filename", sorted(_MODULE_SPATIAL_USAGE))

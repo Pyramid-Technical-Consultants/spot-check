@@ -2,28 +2,9 @@
 
 from __future__ import annotations
 
-from spot_check.pipeline.progress import ProgressEvent, ProgressSink
+from spot_check.pipeline.progress import ProgressSink, report_phase_progress
 from spot_check.pipeline.types import PHASE_LOAD, PipelineConfig, PipelineState
-from spot_check.plan import plan_label_from_path, planned_spot_xyz_and_counts_from_plan
-
-
-def _report(
-    progress: ProgressSink,
-    *,
-    step: str,
-    message: str,
-    current: int | None = None,
-    total: int | None = None,
-) -> None:
-    progress.report(
-        ProgressEvent(
-            phase_id=PHASE_LOAD,
-            step=step,
-            message=message,
-            current=current,
-            total=total,
-        )
-    )
+from spot_check.plan import load_plan_from_path
 
 
 def run_load_phase(
@@ -36,17 +17,18 @@ def run_load_phase(
     csv_path = config.csv_path
 
     if plan_path is not None:
-        _report(
+        report_phase_progress(
             progress,
+            PHASE_LOAD,
             step="plan_start",
             message=f"Reading plan: {plan_path.name}…",
         )
-        label = plan_label_from_path(plan_path)
-        planned, plan_fwhm_xy, plan_mu, n_plan_kept, n_plan_raw = (
-            planned_spot_xyz_and_counts_from_plan(plan_path)
+        label, planned, plan_fwhm_xy, plan_mu, n_plan_kept, n_plan_raw = load_plan_from_path(
+            plan_path
         )
-        _report(
+        report_phase_progress(
             progress,
+            PHASE_LOAD,
             step="plan_done",
             message=f"Plan loaded — {n_plan_kept} spots kept ({n_plan_raw} raw).",
         )
@@ -58,8 +40,9 @@ def run_load_phase(
         state.n_plan_raw = n_plan_raw
 
     if csv_path is not None:
-        _report(
+        report_phase_progress(
             progress,
+            PHASE_LOAD,
             step="csv_start",
             message=f"Opening acquisition CSV: {csv_path.name}…",
         )

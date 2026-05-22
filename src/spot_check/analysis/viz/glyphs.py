@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from spot_check.analysis._imports import *  # noqa: F403
+from spot_check.analysis.colors import _hex_to_rgb_u8
 from spot_check.analysis.pyvista_backend import pv, require_pyvista
 
 _GLYPH_UNIT_SPHERE: dict[tuple[int, int], Any] = {}
@@ -80,7 +81,92 @@ def _instanced_axis_aligned_ellipsoids(
     face_arr[:, 1:4] = inst_tris
     return pv.PolyData(pts, face_arr.ravel())
 
-def _plan_spot_fwhm_glyph_mesh(plan_pts: np.ndarray, fwhm_xy_mm: np.ndarray) -> Any:
+def _plan_spot_visibility_rgba(visible_mask: np.ndarray) -> np.ndarray:
+    """RGBA for plan spots; alpha=0 keeps geometry in bounds while hiding out-of-band spots."""
+    vis = np.asarray(visible_mask, dtype=bool).reshape(-1)
+    r, g, b = _hex_to_rgb_u8(_PLAN_COLOR_3D)
+    n = int(vis.shape[0])
+    rgba = np.empty((n, 4), dtype=np.uint8)
+    rgba[:, 0] = r
+    rgba[:, 1] = g
+    rgba[:, 2] = b
+    a_vis = int(round(0.45 * 255))
+    rgba[:, 3] = np.where(vis, np.uint8(a_vis), np.uint8(0))
+    return rgba
+
+def _plan_spot_point_mesh(plan_pts: np.ndarray, *, visible_mask: np.ndarray | None = None) -> Any:
+    """Plan spot point cloud with per-spot visibility via RGBA alpha."""
+    require_pyvista()
+    n = int(plan_pts.shape[0])
+    m = pv.PolyData(plan_pts)
+    if n == 0:
+        return m
+    if visible_mask is None:
+        vis = np.ones(n, dtype=bool)
+    else:
+        vis = np.asarray(visible_mask, dtype=bool).reshape(-1)
+        if int(vis.shape[0]) != n:
+            raise ValueError("visible_mask length must match plan_pts row count")
+    m["rgba"] = _plan_spot_visibility_rgba(vis)
+    return m
+
+def _plan_spot_cross_mesh(
+    plan_pts: np.ndarray,
+    *,
+    spot_mask: np.ndarray,
+    visible_mask: np.ndarray | None = None,
+    color_hex: str = _PLAN_QA_FAIL_HEX,
+) -> Any:
+    """XY cross marker at selected plan spots (two orthogonal line segments each)."""
+    require_pyvista()
+    n = int(plan_pts.shape[0])
+    sm = np.asarray(spot_mask, dtype=bool).reshape(-1)
+    if int(sm.shape[0]) != n:
+        raise ValueError("spot_mask length must match plan_pts row count")
+    idx = np.flatnonzero(sm)
+    if idx.size == 0:
+        return pv.PolyData(np.zeros((0, 3), dtype=np.float64))
+    centers = np.asarray(plan_pts[idx], dtype=np.float64)
+    m = int(idx.size)
+    arm = float(_PLAN_MISSING_CROSS_HALF_ARM_MM)
+    pts = np.empty((m * 4, 3), dtype=np.float64)
+    for j, c in enumerate(centers):
+        cx, cy, cz = float(c[0]), float(c[1]), float(c[2])
+        base = j * 4
+        pts[base + 0] = (cx - arm, cy, cz)
+        pts[base + 1] = (cx + arm, cy, cz)
+        pts[base + 2] = (cx, cy - arm, cz)
+        pts[base + 3] = (cx, cy + arm, cz)
+    line_arr: list[int] = []
+    for j in range(m):
+        base_pt = j * 4
+        line_arr.extend([2, base_pt, base_pt + 1])
+        line_arr.extend([2, base_pt + 2, base_pt + 3])
+    poly = pv.PolyData(pts, lines=np.asarray(line_arr, dtype=np.int64))
+    r, g, b = _hex_to_rgb_u8(color_hex)
+    a_vis = int(round(0.85 * 255))
+    rgba_pts = np.empty((m * 4, 4), dtype=np.uint8)
+    rgba_pts[:, 0] = np.uint8(r)
+    rgba_pts[:, 1] = np.uint8(g)
+    rgba_pts[:, 2] = np.uint8(b)
+    if visible_mask is None:
+        rgba_pts[:, 3] = np.uint8(a_vis)
+    else:
+        vis = np.asarray(visible_mask, dtype=bool).reshape(-1)
+        if int(vis.shape[0]) != n:
+            raise ValueError("visible_mask length must match plan_pts row count")
+        spot_vis = vis[idx]
+        for j, v in enumerate(spot_vis):
+            rgba_pts[j * 4 : (j + 1) * 4, 3] = np.uint8(a_vis if v else 0)
+    poly["rgba"] = rgba_pts
+    return poly
+
+def _plan_spot_fwhm_glyph_mesh(
+    plan_pts: np.ndarray,
+    fwhm_xy_mm: np.ndarray,
+    *,
+    visible_mask: np.ndarray | None = None,
+) -> Any:
     """At each plan point, an axis-aligned ellipsoid with X/Y semiaxis = FWHM/2 (mm) and thin Z."""
     require_pyvista()
     n = int(plan_pts.shape[0])
@@ -102,7 +188,16 @@ def _plan_spot_fwhm_glyph_mesh(plan_pts: np.ndarray, fwhm_xy_mm: np.ndarray) -> 
         zptp = 1.0
     sz = max(zptp * _PLAN_FWHM_GLYPH_Z_SPAN_FRAC, 1e-9)
     scal = np.column_stack([sx, sy, np.full(n, sz, dtype=np.float64)])
-    return _instanced_axis_aligned_ellipsoids(plan_pts, scal)
+    g = _instanced_axis_aligned_ellipsoids(plan_pts, scal)
+    if visible_mask is not None:
+        vis = np.asarray(visible_mask, dtype=bool).reshape(-1)
+        if int(vis.shape[0]) != n:
+            raise ValueError("visible_mask length must match plan_pts row count")
+        tpl = _unit_sphere_glyph_template(14, 14)
+        n_g = int(tpl.n_points)
+        if int(g.n_points) == n_g * n:
+            g["rgba"] = np.repeat(_plan_spot_visibility_rgba(vis), n_g, axis=0)
+    return g
 
 def _measured_spot_sigma_glyph_mesh(
     meas_pts: np.ndarray,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from spot_check.analysis._imports import *  # noqa: F403
-from spot_check.analysis.viz.data import _nominal_layer_index_band_mev
+from spot_check.analysis.viz.data import _nominal_layer_index_band_mev, _time_slice_range_ms
 
 _VTK_TK_PUMP: dict[str, Any] = {"after_id": None, "plotter": None}
 
@@ -282,6 +282,20 @@ def apply_comparison_3d_camera_view(
     if render:
         plotter.render()
 
+def apply_comparison_3d_projection_view(
+    plotter: Any,
+    *,
+    perspective: bool = True,
+    render: bool = True,
+) -> None:
+    """Toggle perspective vs parallel projection without rebuilding the 3D scene."""
+    try:
+        plotter.camera.parallel_projection = not bool(perspective)
+    except Exception:
+        pass
+    if render:
+        plotter.render()
+
 def disconnect_slice_band_controls_qt(slice_qt: dict[str, Any] | None) -> None:
     """Stop Qt slice callbacks from a prior plot while a new 3D view is building."""
     if slice_qt is None:
@@ -350,10 +364,7 @@ def _wire_slice_band_controls_qt(
 
     def on_chk(checked: bool) -> None:
         slice_cfg["slice_on"] = bool(checked)
-        try:
-            apply_slice(refit_camera=True)
-        except TypeError:
-            apply_slice()
+        apply_slice()
         refresh()
 
     disconnect_slice_band_controls_qt(slice_qt)
@@ -377,4 +388,202 @@ def _wire_slice_band_controls_qt(
     slice_qt["_slice_chk_handler"] = on_chk
     sli.valueChanged.connect(on_sli)
     chk.toggled.connect(on_chk)
+    refresh()
+
+
+def disconnect_time_slice_controls_qt(time_slice_qt: dict[str, Any] | None) -> None:
+    """Stop Qt timeline playback bar or legacy time-slice callbacks before replot."""
+    if time_slice_qt is None:
+        return
+    bar = time_slice_qt.get("bar")
+    if bar is not None:
+        bar.stop_playback()
+        return
+    chk: Any = time_slice_qt.get("check")
+    sli: Any = time_slice_qt.get("slider")
+    prev_chk = time_slice_qt.get("_time_slice_chk_handler")
+    prev_sli = time_slice_qt.get("_time_slice_sli_handler")
+    if chk is not None and prev_chk is not None:
+        try:
+            chk.toggled.disconnect(prev_chk)
+        except (TypeError, RuntimeError):
+            pass
+    if sli is not None and prev_sli is not None:
+        try:
+            sli.valueChanged.disconnect(prev_sli)
+        except (TypeError, RuntimeError):
+            pass
+    time_slice_qt.pop("_time_slice_chk_handler", None)
+    time_slice_qt.pop("_time_slice_sli_handler", None)
+
+
+def idle_time_slice_controls_qt(time_slice_qt: dict[str, Any] | None) -> None:
+    if time_slice_qt is None:
+        return
+    bar = time_slice_qt.get("bar")
+    if bar is not None:
+        bar.idle()
+        return
+    disconnect_time_slice_controls_qt(time_slice_qt)
+    try:
+        time_slice_qt["slider"].setEnabled(False)
+        time_slice_qt["check"].setEnabled(False)
+        time_slice_qt["status"].setText("Time window enables after a successful 3D plot.")
+    except Exception:
+        pass
+
+
+def _wire_time_slice_controls_qt(
+    time_slice_qt: dict[str, Any],
+    time_slice_cfg: dict[str, bool | int | float],
+    meas_time_s: np.ndarray,
+    *,
+    window_s: float,
+    apply_slice: Any,
+    saved_speed: float = 1.0,
+) -> None:
+    bar = time_slice_qt.get("bar")
+    if bar is not None:
+        bar.wire(time_slice_cfg, meas_time_s, window_s=window_s, apply_slice=apply_slice,
+                 saved_speed=saved_speed)
+        time_slice_cfg["slice_on"] = True
+        return
+
+    chk: Any = time_slice_qt["check"]
+    sli: Any = time_slice_qt["slider"]
+    status: Any = time_slice_qt["status"]
+    rng = _time_slice_range_ms(meas_time_s, window_s=window_s)
+    if rng is None:
+        idle_time_slice_controls_qt(time_slice_qt)
+        return
+    start_min_ms, start_max_ms, t_min, t_max = rng
+    win = float(window_s)
+
+    def band_line() -> str:
+        start_ms = int(time_slice_cfg["start_ms"])
+        start_s = float(start_ms) / 1000.0
+        if not bool(time_slice_cfg["slice_on"]):
+            return (
+                f"Full timeline: {t_min:.3f}–{t_max:.3f} s. "
+                f"Slider ref — window start {start_s:.3f} s ({win:g} s wide)."
+            )
+        lo_s = start_s
+        hi_s = start_s + win
+        return f"1 s time window: [{lo_s:.3f}, {hi_s:.3f}] s on plan and measured spots."
+
+    def refresh() -> None:
+        status.setText(band_line())
+
+    def on_sli(val: int) -> None:
+        time_slice_cfg["start_ms"] = int(np.clip(int(val), start_min_ms, start_max_ms))
+        if bool(time_slice_cfg["slice_on"]):
+            apply_slice()
+        refresh()
+
+    def on_chk(checked: bool) -> None:
+        time_slice_cfg["slice_on"] = bool(checked)
+        apply_slice()
+        refresh()
+
+    disconnect_time_slice_controls_qt(time_slice_qt)
+
+    sli.setMinimum(int(start_min_ms))
+    sli.setMaximum(int(start_max_ms))
+    sli.setSingleStep(1)
+    try:
+        sli.setTracking(True)
+    except Exception:
+        pass
+    cur_ms = int(np.clip(int(time_slice_cfg["start_ms"]), start_min_ms, start_max_ms))
+    time_slice_cfg["start_ms"] = cur_ms
+    sli.blockSignals(True)
+    sli.setValue(cur_ms)
+    sli.blockSignals(False)
+    chk.blockSignals(True)
+    chk.setChecked(bool(time_slice_cfg["slice_on"]))
+    chk.blockSignals(False)
+    chk.setEnabled(True)
+    sli.setEnabled(True)
+    time_slice_qt["_time_slice_sli_handler"] = on_sli
+    time_slice_qt["_time_slice_chk_handler"] = on_chk
+    sli.valueChanged.connect(on_sli)
+    chk.toggled.connect(on_chk)
+    refresh()
+
+
+def idle_time_slice_controls(slice_tk: dict[str, Any] | None) -> None:
+    """Disable 3D time-window widgets until a plot exists (Tk GUI)."""
+    if slice_tk is None or tk is None:
+        return
+    try:
+        slice_tk["time_scale"].configure(state=tk.DISABLED)
+        slice_tk["time_checkbtn"].state(["disabled"])
+        slice_tk["time_status_var"].set("Run Show 3D to enable the time window.")
+        slice_tk["var_time_slice"].set(False)
+    except (tk.TclError, KeyError):
+        pass
+
+
+def _wire_time_slice_controls(
+    slice_tk: dict[str, Any],
+    time_slice_cfg: dict[str, bool | int | float],
+    meas_time_s: np.ndarray,
+    *,
+    window_s: float,
+    apply_slice: Any,
+) -> None:
+    if tk is None:
+        return
+    rng = _time_slice_range_ms(meas_time_s, window_s=window_s)
+    if rng is None:
+        idle_time_slice_controls(slice_tk)
+        return
+    start_min_ms, start_max_ms, t_min, t_max = rng
+    win = float(window_s)
+    var_slice = slice_tk["var_time_slice"]
+    scale = slice_tk["time_scale"]
+    chk = slice_tk["time_checkbtn"]
+    status_var = slice_tk["time_status_var"]
+
+    def band_line() -> str:
+        start_ms = int(time_slice_cfg["start_ms"])
+        start_s = float(start_ms) / 1000.0
+        if not bool(time_slice_cfg["slice_on"]):
+            return (
+                f"Full timeline: {t_min:.3f}–{t_max:.3f} s. "
+                f"Slider ref — window start {start_s:.3f} s ({win:g} s wide)."
+            )
+        lo_s = start_s
+        hi_s = start_s + win
+        return f"1 s time window: [{lo_s:.3f}, {hi_s:.3f}] s on plan and measured spots."
+
+    def refresh() -> None:
+        status_var.set(band_line())
+
+    def on_scale(val: str) -> None:
+        time_slice_cfg["start_ms"] = int(
+            np.clip(int(round(float(val))), start_min_ms, start_max_ms)
+        )
+        if bool(time_slice_cfg["slice_on"]):
+            apply_slice()
+        refresh()
+
+    def on_chk() -> None:
+        time_slice_cfg["slice_on"] = bool(var_slice.get())
+        apply_slice()
+        refresh()
+
+    cur_ms = int(np.clip(int(time_slice_cfg["start_ms"]), start_min_ms, start_max_ms))
+    time_slice_cfg["start_ms"] = cur_ms
+    var_slice.set(bool(time_slice_cfg["slice_on"]))
+    scale.configure(
+        from_=start_min_ms,
+        to=start_max_ms,
+        resolution=1,
+        state=tk.NORMAL,
+    )
+    scale.set(cur_ms)
+    chk.state(["!disabled"])
+    scale.configure(command=on_scale)
+    chk.configure(command=on_chk)
     refresh()

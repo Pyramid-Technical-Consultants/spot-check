@@ -22,8 +22,6 @@ from spot_check.constants import (
     AUTO_PLAN_SEQ_CLUSTER_WINDOW,
 )
 
-method = "plan_sequential"
-
 
 def _xy_sqdist(x0: float, y0: float, x1: float, y1: float) -> float:
     dx = float(x0) - float(x1)
@@ -174,31 +172,39 @@ def plan_spot_index_per_span(
     return np.fromiter((int(plan_idx[s]) for s, _ in spans), dtype=np.int64, count=len(spans))
 
 
-def assign(
-    cols: AutoFitColumns,
-    *,
-    n_plan_spots: int,
-    plan_xy: np.ndarray,
-    spots_per_layer: Sequence[int],
-    params: PlanSequentialAssignParams | None = None,
-) -> AutoAssignResult:
-    from spot_check.analysis.layers import delivery_layer_indices
+class PlanSequentialAssigner:
+    """Auto sub-assigner: plan-order delivery with deadtime gaps."""
 
-    p = params or PlanSequentialAssignParams(
-        cluster_window=int(AUTO_PLAN_SEQ_CLUSTER_WINDOW),
-        advance_margin_mm2=float(AUTO_PLAN_SEQ_ADVANCE_MARGIN_MM2),
-    )
-    plan_idx = assign_plan_indices(cols, plan_xy, params=p)
-    spans = sequential_spans_from_plan_indices(plan_idx)
-    spot_pi = plan_spot_index_per_span(plan_idx, spans)
-    plan_layers = delivery_layer_indices(n_plan_spots, spots_per_layer)
-    layers = plan_layers[spot_pi]
-    return AutoAssignResult(
-        spans=spans,
-        layer_index_per_span=layers,
-        plan_index_per_row=plan_idx,
-    )
+    method = "plan_sequential"
 
+    def assign(
+        self,
+        cols: AutoFitColumns,
+        *,
+        n_plan_spots: int,
+        plan_xy: np.ndarray,
+        spots_per_layer: Sequence[int],
+        params: PlanSequentialAssignParams | None = None,
+    ) -> AutoAssignResult:
+        from spot_check.analysis.layers import delivery_layer_indices
+
+        p = params or PlanSequentialAssignParams(
+            cluster_window=int(AUTO_PLAN_SEQ_CLUSTER_WINDOW),
+            advance_margin_mm2=float(AUTO_PLAN_SEQ_ADVANCE_MARGIN_MM2),
+        )
+        plan_idx = assign_plan_indices(cols, plan_xy, params=p)
+        spans = sequential_spans_from_plan_indices(plan_idx)
+        spot_pi = plan_spot_index_per_span(plan_idx, spans)
+        plan_layers = delivery_layer_indices(n_plan_spots, spots_per_layer)
+        layers = plan_layers[spot_pi]
+        return AutoAssignResult(
+            spans=spans,
+            layer_index_per_span=layers,
+            plan_index_per_row=plan_idx,
+        )
+
+
+assigner = PlanSequentialAssigner()
 
 # Back-compat names used by tests and diagnostics.
 assign_plan_indices_sequential = assign_plan_indices

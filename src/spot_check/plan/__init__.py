@@ -13,6 +13,7 @@ from .dicom import (
 from .load import (
     is_plan_dicom,
     is_supported_plan_file,
+    load_plan_from_path,
     plan_label_from_path,
     planned_spot_xyz_and_counts_from_plan,
 )
@@ -29,6 +30,7 @@ __all__ = [
     "is_plan_dicom",
     "is_pyramid_plan_csv",
     "is_supported_plan_file",
+    "load_plan_from_path",
     "plan_label_from_path",
     "plan_label_from_pyramid_csv",
     "plan_label_from_pyramid_csv_stem",

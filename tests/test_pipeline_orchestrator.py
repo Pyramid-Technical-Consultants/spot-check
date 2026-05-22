@@ -11,11 +11,21 @@ from spot_check.pipeline.load_result import resolve_csv_load_layer_mode
 from spot_check.pipeline.progress import CallbackProgressSink
 from spot_check.pipeline.types import (
     PHASE_ASSIGN,
+    PHASE_COARSE_FLAT,
     PHASE_FILTER,
+    PHASE_FINE_ALIGN,
     PHASE_LOAD,
     PipelineConfig,
 )
 from tests.conftest import minimal_measured_rows, write_measured_csv
+
+
+def test_phase_coarse_flat_id_is_stable() -> None:
+    assert PHASE_COARSE_FLAT == "coarse_flat"
+
+
+def test_phase_fine_align_id_is_stable() -> None:
+    assert PHASE_FINE_ALIGN == "fine_align"
 
 
 def test_resolve_csv_load_layer_mode_reexported() -> None:

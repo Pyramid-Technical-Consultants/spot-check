@@ -16,6 +16,8 @@ from typing import Final
 
 # --- Timing / layer-step heuristics (time-gap & auto episode gaps) -------------
 TIME_LAYER_GAP_S_DEFAULT: Final[float] = 0.2
+# 3D time slicer: measured spots visible when acquisition time is in [start, start + window].
+TIME_SLICE_WINDOW_S_DEFAULT: Final[float] = 1.0
 
 # After a long Δt: same-spot synchrotron refill only if post-gap XY is this close (mm, plan frame).
 REFILL_SAME_SPOT_XY_TOLERANCE_MM: Final[float] = 3.0
@@ -86,6 +88,8 @@ PROTON_R80_FROM_CSDA_OFFSET_MM: Final[float] = 1.14
 _ENERGY_AXIS_VIEW_SCALE: Final[float] = 2.0
 _PLAN_FWHM_GLYPH_Z_SPAN_FRAC: Final[float] = 0.004
 _DEFAULT_PLAN_FWHM_MM_WHEN_MISSING: Final[float] = 4.0
+# Missing-plan-spot cross markers: half-arm in mm (display only; not tied to FWHM).
+_PLAN_MISSING_CROSS_HALF_ARM_MM: Final[float] = 1.0
 
 # Measured spot σ ellipsoids (3D display): semiaxis = scale * CSV σ (mm); diameter = 2*scale*σ.
 # Default 0.5 → 1σ diameter per A/B axis; Z extent shares plan glyph fraction (display only).
@@ -108,6 +112,11 @@ DISPLAY_GLYPH_INSTANCE_CAP: Final[int] = 24_000
 DISPLAY_POINT_MESH_TARGET: Final[int] = 1_250_000
 # Max rows used to *fit* detector rigid XY (transform still applied to every row).
 DETECTOR_ALIGN_MAX_FIT_SAMPLES: Final[int] = 3_000
+
+# --- Assigned-row XY σ flier filter (layer-NN plan vs fit position) ---------------
+FILTER_XY_FLIER_SIGMA_DEFAULT: Final[float] = 3.0
+FILTER_XY_FLIER_SIGMA_MIN: Final[float] = 0.5
+FILTER_XY_FLIER_SIGMA_MAX: Final[float] = 20.0
 
 # --- Plan QA colouring (XY distance to nearest plan spot on assigned layer) -----
 PLAN_QA_PASS_MM_DEFAULT: Final[float] = 1.0

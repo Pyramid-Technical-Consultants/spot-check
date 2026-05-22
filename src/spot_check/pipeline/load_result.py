@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from spot_check.analysis.csv_io import acquisition_csv_has_gate_counter
+from spot_check.models import DetectorRigidAlign2D
 from spot_check.pipeline.diagnostics import AssignDiagnostics
 
 
@@ -21,13 +22,15 @@ class PipelineLoadOK:
     n_plan_raw: int
     measured_unaligned: list[tuple[float, ...]]
     csv_display_name: str
-    measured_aligned: list[tuple[float, ...]] | None = None
-    align_info: Any | None = None
-    detector_pre_aligned: bool = False
+    measured_fine_aligned: list[tuple[float, ...]] | None = None
+    coarse_flat_align_info: DetectorRigidAlign2D | None = None
+    fine_align_info: Any | None = None
     layer_mode_run: str = "time_gap"
     auto_assign_method: str = "episodes"
     aggregate_run: bool = False
     assign_diagnostics: AssignDiagnostics | None = None
+    plan_spots_no_data: Any = None
+    plan_spot_time_s: Any = None
 
 
 def aggregation_applies(*, layer_mode: str, aggregate_spots: bool) -> bool:

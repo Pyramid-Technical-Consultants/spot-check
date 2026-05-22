@@ -44,12 +44,14 @@ merges rows that share the same spot-assignment id into one **weighted-mean** po
 σ, weight from ``spot_weight_mode``). Grouping ids come from the active assignment mode (episode
 span, gate-counter spot phase, time-gap delivery spot, etc.), not from a separate CSV pass.
 
-**Detector XY alignment (optional):** For ``layer_mode='auto'``, enable rigid align in the GUI
-to run **before** assignment on flattened 2D plan + on-spot measured XY
-(:func:`align_auto_fit_columns_to_plan_xy`), then assign spots/layers on the corrected
-positions. Other modes use :func:`align_measured_to_plan_detector_xy` after assignment (per-layer
-NN). Both fit a 2D rigid transform (rotation + translation; see :class:`DetectorRigidAlign2D`)
-via multi-start ICP with coarse rotation seeds (90°+ rotations and A↔B axis swaps).
+**Detector XY alignment (optional):** The data pipeline has exactly two alignment steps, each
+independent of layer assignment mode. **Coarse flat 2D** (optional GUI toggle) runs after CSV
+filter and before spot assignment: multi-start ICP on flattened plan + on-spot measured XY
+(:func:`fit_coarse_flat_align_from_auto_columns`), then the rigid map is applied during
+assignment. **Fine alignment** always runs after spot aggregation when any fine DOF toggle is on
+(:func:`fine_align_measured_to_plan`) to reduce remaining residuals. Both use
+:class:`DetectorRigidAlign2D` / :class:`DetectorFineAlign2D` with coarse rotation seeds and
+optional Fit A↔B axis swap and plan-axis mirror search.
 
 **Plan QA coloring (optional):** colors each measured point from Euclidean XY distance to the
 nearest plan spot on its assigned layer: green ≤ pass mm (default 1), amber between pass and

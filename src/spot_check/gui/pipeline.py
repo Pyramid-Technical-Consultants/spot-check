@@ -31,7 +31,6 @@ __all__ = [
 class GuiRefreshContext:
     plan_path: Path | None
     csv_path: Path | None
-    xy_tick_use: float
     qa_mode: str
     qa_pass_f: float
     qa_warn_f: float
@@ -48,8 +47,13 @@ def pipeline_load_job(
     layer_assign_mode: str,
     aggregate_spots: bool,
     spot_weight_mode: str,
-    auto_align: bool = False,
+    coarse_flat_align: bool = False,
     heal_partial_fit_axes: bool = False,
+    fine_align_xy: bool = True,
+    fine_align_rotation: bool = True,
+    fine_align_scale: bool = True,
+    filter_xy_fliers: bool = False,
+    filter_xy_flier_sigma: float = 3.0,
     progress: ProgressSink | None = None,
 ) -> PipelineLoadOK:
     config = PipelineConfig(
@@ -58,7 +62,12 @@ def pipeline_load_job(
         layer_assign_mode=layer_assign_mode,
         aggregate_spots=aggregate_spots,
         spot_weight_mode=spot_weight_mode,
-        auto_align=auto_align,
+        coarse_flat_align=coarse_flat_align,
         heal_partial_fit_axes=heal_partial_fit_axes,
+        fine_align_xy=fine_align_xy,
+        fine_align_rotation=fine_align_rotation,
+        fine_align_scale=fine_align_scale,
+        filter_xy_fliers=filter_xy_fliers,
+        filter_xy_flier_sigma=filter_xy_flier_sigma,
     )
     return run_data_phases(config, progress=progress or NullProgressSink())

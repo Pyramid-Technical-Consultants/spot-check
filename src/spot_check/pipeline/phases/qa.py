@@ -4,14 +4,8 @@ from __future__ import annotations
 
 from spot_check.analysis import plan_qa
 from spot_check.pipeline.diagnostics import QAResult
-from spot_check.pipeline.progress import ProgressEvent, ProgressSink
+from spot_check.pipeline.progress import ProgressSink, report_phase_progress
 from spot_check.pipeline.types import PHASE_QA, PipelineState
-
-
-def _report(progress: ProgressSink, *, step: str, message: str) -> None:
-    progress.report(
-        ProgressEvent(phase_id=PHASE_QA, step=step, message=message)
-    )
 
 
 def run_qa_phase(
@@ -30,7 +24,9 @@ def run_qa_phase(
     if not enabled or not planned or not measured:
         return None
 
-    _report(progress, step="qa_start", message=f"Computing plan QA ({qa_mode})…")
+    report_phase_progress(
+        progress, PHASE_QA, step="qa_start", message=f"Computing plan QA ({qa_mode})…"
+    )
     try:
         n_pass, n_warn, n_fail = plan_qa.plan_qa_measured_spot_pass_warn_fail(
             planned,
@@ -42,12 +38,15 @@ def run_qa_phase(
             a_is_x=False,
         )
     except ValueError:
-        _report(progress, step="qa_error", message="QA thresholds invalid — skipped.")
+        report_phase_progress(
+            progress, PHASE_QA, step="qa_error", message="QA thresholds invalid — skipped."
+        )
         return None
 
     unit = "pp" if qa_mode == "dose" else "mm"
-    _report(
+    report_phase_progress(
         progress,
+        PHASE_QA,
         step="qa_done",
         message=(
             f"QA complete — {n_pass} pass · {n_warn} warn · {n_fail} fail ({unit})."

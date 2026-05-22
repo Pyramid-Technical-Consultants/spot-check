@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from spot_check.analysis.auto_params import AutoLayerParams
 from spot_check.analysis.episodes import AutoEpisodeDiagnostics
-from spot_check.models import DetectorRigidAlign2D
+from spot_check.models import DetectorFineAlign2D, DetectorRigidAlign2D
 
 
 @dataclass(frozen=True)
@@ -34,5 +34,5 @@ class PipelineDiagnostics:
     """All structured diagnostics from a completed data pipeline run."""
 
     assign: AssignDiagnostics | None = None
-    align_info: DetectorRigidAlign2D | None = None
-    detector_pre_aligned: bool = False
+    coarse_flat_align_info: DetectorRigidAlign2D | None = None
+    fine_align_info: DetectorFineAlign2D | None = None

@@ -23,6 +23,27 @@ class ProgressSink(Protocol):
     def report(self, event: ProgressEvent) -> None: ...
 
 
+def report_phase_progress(
+    progress: ProgressSink,
+    phase_id: str,
+    *,
+    step: str,
+    message: str,
+    current: int | None = None,
+    total: int | None = None,
+) -> None:
+    """Emit one progress event for a pipeline phase."""
+    progress.report(
+        ProgressEvent(
+            phase_id=phase_id,
+            step=step,
+            message=message,
+            current=current,
+            total=total,
+        )
+    )
+
+
 class NullProgressSink:
     """No-op sink for tests and headless callers."""
 

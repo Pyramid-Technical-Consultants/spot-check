@@ -1,5 +1,4 @@
 from spot_check.gui.parsers import (
-    parse_bounds_xy_tick_mm,
     parse_layer_gap_s,
     parse_plan_qa_thresholds,
     plan_qa_thresholds_input_in_progress,
@@ -25,9 +24,11 @@ def test_plan_qa_thresholds_input_in_progress() -> None:
     assert plan_qa_thresholds_input_in_progress("0.5", "3") is False
 
 
-def test_parse_bounds_xy_tick_mm() -> None:
-    assert parse_bounds_xy_tick_mm("0") == 0.0
-    assert parse_bounds_xy_tick_mm("5") == 5.0
+def test_parse_filter_xy_flier_sigma() -> None:
+    from spot_check.gui.parsers import parse_filter_xy_flier_sigma
+
+    assert parse_filter_xy_flier_sigma("3") == 3.0
+    assert parse_filter_xy_flier_sigma("0.4") is None
 
 
 def test_spot_weight_mode_from_saved() -> None:

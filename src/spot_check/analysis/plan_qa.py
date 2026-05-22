@@ -134,11 +134,9 @@ def _plan_qa_error_line_polylines(
     *,
     pass_mm: float,
     warn_mm: float,
-    use_proton_water_depth_mm: bool = False,
-    upstream_wet_mm: float = 0.0,
-    z_depth_metric: str = "csda",
-    plan_e_lo_mev: float | None = None,
-    plan_e_hi_mev: float | None = None,
+    z_display_cfg: ZAxisDisplayConfig,
+    plan_e_lo_mev: float,
+    plan_e_hi_mev: float,
 ) -> tuple[Any, Any]:
     """Separate line sets for warn-tier and fail-tier points (measured → NN plan spot), view Z."""
     if pv is None:
@@ -151,39 +149,15 @@ def _plan_qa_error_line_polylines(
     fail_m = d > warn_mm
     warn_m = ~pass_m & ~fail_m
 
-    if plan_e_lo_mev is None or plan_e_hi_mev is None:
-        raise ValueError("plan_e_lo_mev and plan_e_hi_mev required for plan QA error lines")
-
     exp = np.asarray(expected_plan_xyz, dtype=np.float64).reshape(-1, 3)
     meas = np.asarray(meas_pts_view, dtype=np.float64).reshape(-1, 3)
     exp_view = exp.copy()
-    _z_cfg = ZAxisDisplayConfig(
-        use_water_depth_mm=bool(use_proton_water_depth_mm),
-        upstream_wet_mm=float(upstream_wet_mm),
-        z_depth_metric=str(z_depth_metric),
+    exp_view[:, 2] = nominal_mev_column_to_scene_z(
+        exp[:, 2],
+        plan_e_lo=float(plan_e_lo_mev),
+        plan_e_hi=float(plan_e_hi_mev),
+        config=z_display_cfg,
     )
-    if use_proton_water_depth_mm:
-        d_lo, d_hi = plan_depth_bounds_mm(
-            float(plan_e_lo_mev),
-            float(plan_e_hi_mev),
-            upstream_wet_mm=upstream_wet_mm,
-            z_depth_metric=z_depth_metric,
-        )
-        exp_view[:, 2] = nominal_energy_to_scene_z(
-            exp[:, 2],
-            plan_e_lo=float(plan_e_lo_mev),
-            plan_e_hi=float(plan_e_hi_mev),
-            config=_z_cfg,
-            depth_lo_mm=d_lo,
-            depth_hi_mm=d_hi,
-        )
-    else:
-        exp_view[:, 2] = nominal_energy_to_scene_z(
-            exp[:, 2],
-            plan_e_lo=float(plan_e_lo_mev),
-            plan_e_hi=float(plan_e_hi_mev),
-            config=_z_cfg,
-        )
 
     def _build(idxs: np.ndarray) -> Any:
         pts_list: list[np.ndarray] = []

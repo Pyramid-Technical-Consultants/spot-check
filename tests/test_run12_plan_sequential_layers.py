@@ -102,7 +102,7 @@ def test_run12_plan_sequential_detector_align() -> None:
     assert 0 < len(rows) < len(planned_xyz)
     info = analysis.last_detector_align_info()
     assert info is not None
-    assert info.pre_assignment
+    assert info.from_coarse_phase
     assert info.n_pairs >= 2
 
 

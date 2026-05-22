@@ -111,10 +111,9 @@ def _iter_planned_spot_slots_from_dataset(ds: Any):
                 yield drop, tpl, fwhm_cp, mu
 
 
-def planned_spot_xyz_and_counts_from_dicom(
-    dcm_path: Path,
+def planned_spot_xyz_and_counts_from_dicom_dataset(
+    ds: Any,
 ) -> tuple[list[tuple[float, float, float]], np.ndarray | None, np.ndarray, int, int]:
-    ds = pydicom.dcmread(dcm_path, stop_before_pixels=True, force=True)
     out: list[tuple[float, float, float]] = []
     mu_kept: list[float] = []
     fwhm_kept: list[tuple[float, float] | None] = []
@@ -144,6 +143,14 @@ def planned_spot_xyz_and_counts_from_dicom(
     if n_kept == 0:
         raise PlanDataError("No planned spots extracted from DICOM")
     plan_mu = np.asarray(mu_kept, dtype=np.float64)
+    return out, fwhm_arr, plan_mu, n_kept, n_raw
+
+
+def planned_spot_xyz_and_counts_from_dicom(
+    dcm_path: Path,
+) -> tuple[list[tuple[float, float, float]], np.ndarray | None, np.ndarray, int, int]:
+    ds = pydicom.dcmread(dcm_path, stop_before_pixels=True, force=True)
+    out, fwhm_arr, plan_mu, n_kept, n_raw = planned_spot_xyz_and_counts_from_dicom_dataset(ds)
     logger.info(
         "DICOM plan loaded: %s — %s spots kept, %s raw map slots",
         dcm_path,

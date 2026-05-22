@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 from spot_check.analysis._imports import *  # noqa: F403
 
 
@@ -53,58 +55,71 @@ def _nearest_layer_index_from_plan_energy(z: float, layer_e: list[float]) -> int
             best_i = i
     return best_i
 
-def _layer_xy_kdtrees_for_qa(
-    layer_xyz: list[np.ndarray],
-) -> list[Any | None]:
-    """2D cKDTree per nominal layer (plan X/Y mm) for NN queries; None when scipy missing or
-    empty."""
-    trees: list[Any | None] = []
-    for arr in layer_xyz:
-        a2 = np.asarray(arr, dtype=np.float64).reshape(-1, 3)
-        if a2.shape[0] == 0 or _cKDTree is None:
-            trees.append(None)
-            continue
-        xy = a2[:, 0:2]
-        trees.append(_cKDTree(xy))
-    return trees
+class LayerNnPlanContext(NamedTuple):
+    """Cached per-layer plan geometry for repeated layer-NN queries."""
 
-def layer_nn_plan_xy_distances_and_expected_xyz(
+    layer_e: list[float]
+    layer_xyz: list[np.ndarray]
+    trees: list[Any | None]
+    hi: int
+
+
+def build_layer_nn_plan_context(
     planned_xyz: list[tuple[float, float, float]],
-    measured_rows: list[tuple[float, ...]],
-    *,
-    a_is_x: bool,
-) -> tuple[np.ndarray, np.ndarray]:
-    """XY distance (mm) to nearest plan spot on each row's nominal layer and that spot's plan
-    (x,y,energy)."""
-    if not planned_xyz:
-        raise ValueError("plan is empty")
+) -> LayerNnPlanContext:
+    """Build layer buckets and KD-trees once for many measured-row queries."""
     layer_e = nominal_layer_energies_mev(planned_xyz)
     if not layer_e:
         raise ValueError("plan has no nominal energy layers")
     layer_xyz = _plan_xyz_by_energy_layer(planned_xyz, layer_e)
-    hi = len(layer_e) - 1
-    n = len(measured_rows)
-    if n == 0:
-        return np.zeros(0, dtype=np.float64), np.zeros((0, 3), dtype=np.float64)
-
-    li_raw = np.rint(np.asarray([float(t[2]) for t in measured_rows], dtype=np.float64)).astype(
-        np.intp, copy=False
+    trees = _layer_xy_kdtrees_for_qa(layer_xyz)
+    return LayerNnPlanContext(
+        layer_e=layer_e,
+        layer_xyz=layer_xyz,
+        trees=trees,
+        hi=len(layer_e) - 1,
     )
-    np.clip(li_raw, 0, hi, out=li_raw)
 
+
+def meas_layer_indices_and_xy_from_rows(
+    measured_rows: list[tuple[float, ...]],
+    hi: int,
+    *,
+    a_is_x: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Layer index (clipped) and plan-frame measured XY as (n, 2)."""
+    n = len(measured_rows)
+    li_raw = np.rint(
+        np.fromiter((float(t[2]) for t in measured_rows), dtype=np.float64, count=n)
+    ).astype(np.intp, copy=False)
+    np.clip(li_raw, 0, int(hi), out=li_raw)
     if a_is_x:
         mx = np.fromiter((float(t[0]) for t in measured_rows), dtype=np.float64, count=n)
         my = np.fromiter((float(t[1]) for t in measured_rows), dtype=np.float64, count=n)
     else:
         mx = np.fromiter((float(t[1]) for t in measured_rows), dtype=np.float64, count=n)
         my = np.fromiter((float(t[0]) for t in measured_rows), dtype=np.float64, count=n)
-    meas_xy = np.column_stack([mx, my])
+    return li_raw, np.column_stack([mx, my])
+
+
+def layer_nn_dist_and_expected_from_xy(
+    ctx: LayerNnPlanContext,
+    meas_xy: np.ndarray,
+    li_raw: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Layer-NN distance and expected plan XYZ from pre-built context and XY arrays."""
+    n = int(meas_xy.shape[0])
+    if n == 0:
+        return np.zeros(0, dtype=np.float64), np.zeros((0, 3), dtype=np.float64)
+    if int(li_raw.shape[0]) != n:
+        raise ValueError("layer index length mismatch for layer-NN query")
 
     out_d = np.full(n, np.inf, dtype=np.float64)
     out_xyz = np.full((n, 3), np.nan, dtype=np.float64)
-    trees = _layer_xy_kdtrees_for_qa(layer_xyz)
+    layer_xyz = ctx.layer_xyz
+    trees = ctx.trees
 
-    for ell in range(len(layer_e)):
+    for ell in range(len(ctx.layer_e)):
         mask = li_raw == ell
         if not np.any(mask):
             continue
@@ -132,6 +147,41 @@ def layer_nn_plan_xy_distances_and_expected_xyz(
             out_d[sub_fin] = np.sqrt(d2[np.arange(qf.shape[0], dtype=np.intp), j])
             out_xyz[sub_fin] = arr[j]
     return out_d, out_xyz
+
+
+def _layer_xy_kdtrees_for_qa(
+    layer_xyz: list[np.ndarray],
+) -> list[Any | None]:
+    """2D cKDTree per nominal layer (plan X/Y mm) for NN queries; None when scipy missing or
+    empty."""
+    trees: list[Any | None] = []
+    for arr in layer_xyz:
+        a2 = np.asarray(arr, dtype=np.float64).reshape(-1, 3)
+        if a2.shape[0] == 0 or _cKDTree is None:
+            trees.append(None)
+            continue
+        xy = a2[:, 0:2]
+        trees.append(_cKDTree(xy))
+    return trees
+
+def layer_nn_plan_xy_distances_and_expected_xyz(
+    planned_xyz: list[tuple[float, float, float]],
+    measured_rows: list[tuple[float, ...]],
+    *,
+    a_is_x: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    """XY distance (mm) to nearest plan spot on each row's nominal layer and that spot's plan
+    (x,y,energy)."""
+    if not planned_xyz:
+        raise ValueError("plan is empty")
+    ctx = build_layer_nn_plan_context(planned_xyz)
+    n = len(measured_rows)
+    if n == 0:
+        return np.zeros(0, dtype=np.float64), np.zeros((0, 3), dtype=np.float64)
+    li_raw, meas_xy = meas_layer_indices_and_xy_from_rows(
+        measured_rows, ctx.hi, a_is_x=a_is_x
+    )
+    return layer_nn_dist_and_expected_from_xy(ctx, meas_xy, li_raw)
 
 def layer_nn_plan_match_for_measured(
     planned_xyz: list[tuple[float, float, float]],
@@ -216,6 +266,85 @@ def distances_measured_xy_to_layer_nn_plan_mm(
     layer."""
     d, _ = layer_nn_plan_xy_distances_and_expected_xyz(planned_xyz, measured_rows, a_is_x=a_is_x)
     return d
+
+
+def _measured_row_sigma_xy_mm(
+    tup: tuple[float, ...],
+    *,
+    a_is_x: bool,
+    sigma_fallback_mm: float,
+) -> tuple[float, float]:
+    """Plan-frame σ_x, σ_y from row tuple indices 5/6 (Fit σ A/B mapped like A/B axes)."""
+    fb = max(float(sigma_fallback_mm), 1e-6)
+    sa = float("nan")
+    sb = float("nan")
+    if len(tup) >= 6:
+        try:
+            sa = float(tup[5])
+            if not math.isfinite(sa) or sa <= 0.0:
+                sa = float("nan")
+        except (TypeError, ValueError):
+            sa = float("nan")
+    if len(tup) >= 7:
+        try:
+            sb = float(tup[6])
+            if not math.isfinite(sb) or sb <= 0.0:
+                sb = float("nan")
+        except (TypeError, ValueError):
+            sb = float("nan")
+    if a_is_x:
+        sx = sa if math.isfinite(sa) else fb
+        sy = sb if math.isfinite(sb) else fb
+    else:
+        sx = sb if math.isfinite(sb) else fb
+        sy = sa if math.isfinite(sa) else fb
+    return sx, sy
+
+
+def xy_sigma_flier_keep_mask(
+    measured_rows: list[tuple[float, ...]],
+    planned_xyz: list[tuple[float, float, float]],
+    *,
+    n_sigma: float,
+    a_is_x: bool,
+    sigma_fallback_mm: float = MEASURED_SIGMA_GLYPH_FALLBACK_MM,
+) -> np.ndarray:
+    """True where a row should be kept (not a σ-normalized XY flier vs layer-NN plan).
+
+    Deviation uses plan-frame offsets to the nearest plan spot on the row's nominal layer and
+    fit σ on each axis: ``sqrt((dx/σ_x)² + (dy/σ_y)²) ≤ n_sigma``.
+    """
+    n = len(measured_rows)
+    if n == 0 or not planned_xyz:
+        return np.ones(n, dtype=bool)
+    ns = float(n_sigma)
+    if ns <= 0.0:
+        return np.ones(n, dtype=bool)
+
+    _dist, exp_xyz = layer_nn_plan_xy_distances_and_expected_xyz(
+        planned_xyz, measured_rows, a_is_x=a_is_x
+    )
+    _li_raw, meas_xy = meas_layer_indices_and_xy_from_rows(
+        measured_rows, build_layer_nn_plan_context(planned_xyz).hi, a_is_x=a_is_x
+    )
+    exp_xy = np.asarray(exp_xyz[:, 0:2], dtype=np.float64)
+    dx = meas_xy[:, 0] - exp_xy[:, 0]
+    dy = meas_xy[:, 1] - exp_xy[:, 1]
+
+    sig_x = np.empty(n, dtype=np.float64)
+    sig_y = np.empty(n, dtype=np.float64)
+    for i, tup in enumerate(measured_rows):
+        sx, sy = _measured_row_sigma_xy_mm(
+            tup, a_is_x=a_is_x, sigma_fallback_mm=sigma_fallback_mm
+        )
+        sig_x[i] = sx
+        sig_y[i] = sy
+
+    norm = np.sqrt((dx / sig_x) ** 2 + (dy / sig_y) ** 2)
+    keep = norm <= ns
+    no_exp = ~np.isfinite(exp_xy).all(axis=1)
+    keep[no_exp] = True
+    return keep
 
 def _layer_plan_mu_by_energy_layer(
     planned_xyz: list[tuple[float, float, float]],

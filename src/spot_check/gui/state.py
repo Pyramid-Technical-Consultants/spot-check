@@ -34,6 +34,8 @@ def load_gui_state() -> dict[str, object]:
             loaded = json.loads(state_file.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
                 data.update(loaded)
+        if "coarse_flat_align" not in data and "auto_align_detector_xy" in data:
+            data["coarse_flat_align"] = data["auto_align_detector_xy"]
     except json.JSONDecodeError as exc:
         logger.warning(
             "GUI state file %s is not valid JSON (%s); using defaults.",
@@ -56,8 +58,12 @@ def save_gui_state(
     spot_weight_mode: str,
     aggregate_spots_by_gate: bool,
     heal_partial_fit_axes: bool,
-    auto_align_detector_xy: bool,
-    bounds_xy_tick_mm: float,
+    coarse_flat_align: bool,
+    fine_align_xy: bool,
+    fine_align_rotation: bool,
+    fine_align_scale: bool,
+    filter_xy_fliers: bool,
+    filter_xy_flier_sigma: float,
     plan_qa_coloring: bool,
     plan_qa_mode: str,
     plan_qa_pass_mm: float,
@@ -74,6 +80,9 @@ def save_gui_state(
     view_projection_perspective: bool,
     slice_band_on: bool,
     slice_band_center_i: int,
+    time_slice_on: bool,
+    time_slice_start_ms: int,
+    time_slice_speed: float = 1.0,
 ) -> None:
     path = gui_state_file()
     try:
@@ -89,8 +98,12 @@ def save_gui_state(
                     "spot_weight_mode": spot_weight_mode,
                     "aggregate_spots_by_gate": aggregate_spots_by_gate,
                     "heal_partial_fit_axes": heal_partial_fit_axes,
-                    "auto_align_detector_xy": auto_align_detector_xy,
-                    "bounds_xy_tick_mm": bounds_xy_tick_mm,
+                    "coarse_flat_align": coarse_flat_align,
+                    "fine_align_xy": fine_align_xy,
+                    "fine_align_rotation": fine_align_rotation,
+                    "fine_align_scale": fine_align_scale,
+                    "filter_xy_fliers": filter_xy_fliers,
+                    "filter_xy_flier_sigma": float(filter_xy_flier_sigma),
                     "plan_qa_coloring": plan_qa_coloring,
                     "plan_qa_mode": plan_qa_mode,
                     "plan_qa_pass_mm": plan_qa_pass_mm,
@@ -107,6 +120,9 @@ def save_gui_state(
                     "view_projection_perspective": view_projection_perspective,
                     "slice_band_on": slice_band_on,
                     "slice_band_center_i": slice_band_center_i,
+                    "time_slice_on": time_slice_on,
+                    "time_slice_start_ms": time_slice_start_ms,
+                    "time_slice_speed": float(time_slice_speed),
                     "gui_state_schema_version": int(DEFAULT_GUI_STATE["gui_state_schema_version"]),
                 },
                 indent=2,

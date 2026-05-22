@@ -109,7 +109,7 @@ def test_pre_align_reduces_plan_sequential_xy_error() -> None:
     assert err_before > 5.0
 
     aligned, info = align_auto_fit_columns_to_plan_xy(cols, planned, a_is_x=False)
-    assert info.pre_assignment
+    assert info.from_coarse_phase
     assert last_detector_align_info() is info
 
     fixed_idx = assign_plan_indices_sequential(aligned, plan_xy, min_rows_on_spot=1)

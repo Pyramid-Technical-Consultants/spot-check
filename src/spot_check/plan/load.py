@@ -8,7 +8,10 @@ import pydicom
 
 from spot_check.exceptions import PlanDataError
 
-from .dicom import planned_spot_xyz_and_counts_from_dicom
+from .dicom import (
+    planned_spot_xyz_and_counts_from_dicom,
+    planned_spot_xyz_and_counts_from_dicom_dataset,
+)
 from .pyramid_csv import (
     is_pyramid_plan_csv,
     plan_label_from_pyramid_csv,
@@ -44,6 +47,29 @@ def planned_spot_xyz_and_counts_from_plan(
         return planned_spot_xyz_and_counts_from_dicom(plan_path)
     if is_pyramid_plan_csv(plan_path):
         return planned_spot_xyz_and_counts_from_pyramid_csv(plan_path)
+    raise PlanDataError(
+        f"Unsupported plan file {plan_path.name!r}: use RT Ion DICOM (.dcm) "
+        "or Pyramid plan CSV (X/Y position, energy, charge columns)"
+    )
+
+
+def load_plan_from_path(
+    plan_path: Path,
+) -> tuple[str, list[tuple[float, float, float]], object, object, int, int]:
+    """Read plan label and spot table in one file pass (DICOM or Pyramid CSV)."""
+    if is_plan_dicom(plan_path):
+        ds = pydicom.dcmread(plan_path, stop_before_pixels=True, force=True)
+        label = str(ds.get("RTPlanLabel", "") or "").strip()
+        planned, fwhm, mu, n_kept, n_raw = planned_spot_xyz_and_counts_from_dicom_dataset(
+            ds
+        )
+        return label, planned, fwhm, mu, n_kept, n_raw
+    if is_pyramid_plan_csv(plan_path):
+        label = plan_label_from_pyramid_csv(plan_path)
+        planned, fwhm, mu, n_kept, n_raw = planned_spot_xyz_and_counts_from_pyramid_csv(
+            plan_path
+        )
+        return label, planned, fwhm, mu, n_kept, n_raw
     raise PlanDataError(
         f"Unsupported plan file {plan_path.name!r}: use RT Ion DICOM (.dcm) "
         "or Pyramid plan CSV (X/Y position, energy, charge columns)"

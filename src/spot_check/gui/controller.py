@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import math
 import sys
 from pathlib import Path
 
@@ -20,6 +21,7 @@ try:
         QFileDialog,
         QFormLayout,
         QFrame,
+        QGridLayout,
         QGroupBox,
         QHBoxLayout,
         QLabel,
@@ -50,14 +52,16 @@ from spot_check.gui.layer_assign import (
     normalize_layer_assign_mode,
     resolve_layer_assign_mode,
 )
+from spot_check.gui.load_overlay import LoadOverlayPanel
 from spot_check.gui.panels.status_format import (
     append_auto_meas_lines,
     format_auto_tuning_label,
     format_qa_counts_label,
 )
 from spot_check.gui.parsers import (
+    filter_xy_flier_sigma_input_in_progress,
     normalize_z_depth_metric,
-    parse_bounds_xy_tick_mm,
+    parse_filter_xy_flier_sigma,
     parse_plan_qa_thresholds,
     parse_upstream_wet_shifter_mm,
     plan_qa_thresholds_input_in_progress,
@@ -70,7 +74,6 @@ from spot_check.gui.pipeline import (
     is_acquisition_csv_file,
     pipeline_load_job,
 )
-from spot_check.gui.pipeline_progress import PipelineProgressWidget
 from spot_check.gui.state import (
     apply_saved_window_layout,
     finish_saved_window_layout,
@@ -80,6 +83,7 @@ from spot_check.gui.state import (
     win_is_maximized,
 )
 from spot_check.gui.theme import MUTED_BODY, MUTED_HELP, MUTED_HINT
+from spot_check.gui.timeline_playback import TimelinePlaybackBar
 from spot_check.gui.workers import PipelineLoaderSignals, PipelineLoadRunnable
 from spot_check.pipeline import CallbackProgressSink, PipelineConfig
 from spot_check.pipeline.export_job import pipeline_export_load
@@ -89,8 +93,6 @@ from spot_check.pipeline.progress import NullProgressSink, ProgressEvent
 FOLDER = project_root()
 # Short pause after typing in numeric fields before recomputing the 3D view (ms).
 _REFRESH_DEBOUNCE_MS = 380
-_LOAD_SPINNER_FRAMES: tuple[str, ...] = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
-_LOAD_SPINNER_MS = 90
 _SPOT_WEIGHT_COMBO_LABELS: tuple[tuple[str, str], ...] = (
     ("channel_sum", "Channel sum"),
     ("fit_amplitude_a", "Fit amp A"),
@@ -131,6 +133,11 @@ class SpotCheckController:
         vtk_host.setStyleSheet("background-color: #0d1117;")
         vtk_layout = QVBoxLayout(vtk_host)
         vtk_layout.setContentsMargins(0, 0, 0, 0)
+        vtk_layout.setSpacing(0)
+        vtk_view_pane = QFrame()
+        vtk_view_pane.setStyleSheet("background-color: #0d1117;")
+        vtk_view_layout = QVBoxLayout(vtk_view_pane)
+        vtk_view_layout.setContentsMargins(0, 0, 0, 0)
         vtk_placeholder = QLabel(
             "3D view — pick a plan (.dcm or Pyramid .csv) and/or acquisition .csv; "
             "updates when inputs validate."
@@ -138,15 +145,42 @@ class SpotCheckController:
         vtk_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         vtk_placeholder.setWordWrap(True)
         vtk_placeholder.setStyleSheet("color: #8b949e; font-size: 11pt; padding: 24px;")
-        vtk_layout.addWidget(vtk_placeholder)
+        vtk_view_layout.addWidget(vtk_placeholder)
+        vtk_layout.addWidget(vtk_view_pane, 1)
+
+        timeline_bar = TimelinePlaybackBar(vtk_host)
+        vtk_layout.addWidget(timeline_bar)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setMinimumWidth(360)
+        scroll.setMinimumWidth(400)
         drawer = QWidget()
         drawer_layout = QVBoxLayout(drawer)
+        drawer_layout.setSpacing(6)
+        drawer_layout.setContentsMargins(4, 6, 4, 6)
         drawer_layout.addStretch(0)
+
+        def _group_layout(gb: QGroupBox) -> QVBoxLayout:
+            lay = QVBoxLayout(gb)
+            lay.setSpacing(4)
+            lay.setContentsMargins(8, 8, 8, 6)
+            return lay
+
+        def _inline_row(*widgets: QWidget, stretch_last: bool = False) -> QWidget:
+            wrap = QWidget()
+            row = QHBoxLayout(wrap)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            n = len(widgets)
+            for i, w in enumerate(widgets):
+                if stretch_last and i == n - 1:
+                    row.addWidget(w, 1)
+                else:
+                    row.addWidget(w)
+            if not stretch_last:
+                row.addStretch(1)
+            return wrap
 
         def _add_hint_lbl(text: str) -> QLabel:
             hint = QLabel(text)
@@ -163,14 +197,7 @@ class SpotCheckController:
 
         e_dcm = QLineEdit(str(saved.get("dcm_path") or ""))
         e_csv = QLineEdit(str(saved.get("csv_path") or ""))
-        raw_bxy = saved.get("bounds_xy_tick_mm", sc_const.BOUNDS_XY_TICK_MM_DEFAULT)
-        try:
-            bxy0 = float(raw_bxy)
-            if bxy0 != 0.0 and (bxy0 < 0.05 or bxy0 > 500.0):
-                bxy0 = float(sc_const.BOUNDS_XY_TICK_MM_DEFAULT)
-        except (TypeError, ValueError):
-            bxy0 = float(sc_const.BOUNDS_XY_TICK_MM_DEFAULT)
-        e_bxy = QLineEdit(f"{bxy0:g}")
+
         def _qa_thr_pair(
             pass_key: str,
             warn_key: str,
@@ -264,8 +291,8 @@ class SpotCheckController:
             "Water-equivalent thickness (mm) of upstream range shifter / WET material. "
             "Subtracted from the selected Z depth (shallower spots) when water depth is enabled."
         )
-        cb_align = QCheckBox("Rigid XY align measured → plan (any rotation / A↔B)")
-        cb_align.setChecked(_bool_saved("auto_align_detector_xy", True))
+        cb_align = QCheckBox("Coarse flat 2D align (before assignment)")
+        cb_align.setChecked(_bool_saved("coarse_flat_align", True))
         cb_agg = QCheckBox("Aggregate rows per assigned spot (weighted mean)")
         cb_agg.setChecked(_bool_saved("aggregate_spots_by_gate", True))
         cb_agg.setToolTip(
@@ -278,6 +305,30 @@ class SpotCheckController:
             "Off (default): drop rows missing Fit Mean Position A or B. "
             "On: keep rows with exactly one missing axis; fill the gap from the nearest plan "
             "spot at the assigned layer (shown gold in 3D when QA coloring is off)."
+        )
+        cb_filter_xy = QCheckBox("Remove XY fliers vs expected plan (σ-normalized)")
+        cb_filter_xy.setChecked(_bool_saved("filter_xy_fliers", False))
+        cb_filter_xy.setToolTip(
+            "After spot assignment, drop rows whose plan-frame offset to the nearest plan spot "
+            "on the row's layer exceeds the σ limit on each fit axis. Requires a plan."
+        )
+        raw_filter_sigma = saved.get(
+            "filter_xy_flier_sigma", sc_const.FILTER_XY_FLIER_SIGMA_DEFAULT
+        )
+        try:
+            filter_sigma0 = float(raw_filter_sigma)
+            if (
+                filter_sigma0 < sc_const.FILTER_XY_FLIER_SIGMA_MIN
+                or filter_sigma0 > sc_const.FILTER_XY_FLIER_SIGMA_MAX
+            ):
+                filter_sigma0 = float(sc_const.FILTER_XY_FLIER_SIGMA_DEFAULT)
+        except (TypeError, ValueError):
+            filter_sigma0 = float(sc_const.FILTER_XY_FLIER_SIGMA_DEFAULT)
+        e_filter_sigma = QLineEdit(f"{filter_sigma0:g}")
+        e_filter_sigma.setFixedWidth(56)
+        e_filter_sigma.setToolTip(
+            f"Keep rows with sqrt((dx/σ_x)² + (dy/σ_y)²) ≤ limit "
+            f"({sc_const.FILTER_XY_FLIER_SIGMA_MIN:g}–{sc_const.FILTER_XY_FLIER_SIGMA_MAX:g})."
         )
         cb_pqa = QCheckBox("Color measured spots by plan QA (pass / warn / fail)")
         cb_pqa.setChecked(_bool_saved("plan_qa_coloring", True))
@@ -359,6 +410,26 @@ class SpotCheckController:
         }
         analysis.idle_slice_band_controls_qt(slice_qt_bindings)
 
+        try:
+            _time_start0 = int(saved.get("time_slice_start_ms", 0))
+            if _time_start0 < 0:
+                _time_start0 = 0
+        except (TypeError, ValueError):
+            _time_start0 = 0
+        try:
+            _time_speed0 = float(saved.get("time_slice_speed", 1.0))
+            if not math.isfinite(_time_speed0) or _time_speed0 <= 0.0:
+                _time_speed0 = 1.0
+        except (TypeError, ValueError):
+            _time_speed0 = 1.0
+
+        time_slice_qt_bindings: dict[str, object] = timeline_bar.bindings_dict()
+        analysis.idle_time_slice_controls_qt(time_slice_qt_bindings)
+
+        def _idle_view_slice_controls_qt() -> None:
+            analysis.idle_slice_band_controls_qt(slice_qt_bindings)
+            analysis.idle_time_slice_controls_qt(time_slice_qt_bindings)
+
         status_lbl = QLabel("Browse or paste paths. Summary here after each update.")
         status_lbl.setWordWrap(True)
         status_lbl.setStyleSheet(f"color: {MUTED_BODY};")
@@ -394,14 +465,15 @@ class SpotCheckController:
 
         def persist() -> None:
             mode = _layer_assign_mode_from_ui()
-            xy_tick_save = parse_bounds_xy_tick_mm(e_bxy.text())
-            if xy_tick_save is None:
-                xy_tick_save = float(sc_const.BOUNDS_XY_TICK_MM_DEFAULT)
-                e_bxy.setText(f"{xy_tick_save:g}")
             wet_save = parse_upstream_wet_shifter_mm(e_wet.text())
             if wet_save is None:
                 wet_save = float(sc_const.UPSTREAM_WET_SHIFTER_MM_DEFAULT)
                 e_wet.setText(f"{wet_save:g}")
+            filter_sigma_save = parse_filter_xy_flier_sigma(e_filter_sigma.text())
+            if filter_sigma_save is None:
+                filter_sigma_save = float(sc_const.FILTER_XY_FLIER_SIGMA_DEFAULT)
+                if not filter_xy_flier_sigma_input_in_progress(e_filter_sigma.text()):
+                    e_filter_sigma.setText(f"{filter_sigma_save:g}")
             _stash_qa_thresholds()
             qa_thr = parse_plan_qa_thresholds(e_qa_pass.text(), e_qa_warn.text())
             if qa_thr is not None:
@@ -429,6 +501,14 @@ class SpotCheckController:
                 _sb_ci_persist = int(slice_sli.value())
             except (AttributeError, TypeError, ValueError):
                 _sb_ci_persist = 0
+            try:
+                _ts_start_persist = int(timeline_bar.start_ms())
+            except (AttributeError, TypeError, ValueError):
+                _ts_start_persist = _time_start0
+            try:
+                _ts_speed_persist = float(timeline_bar.speed_multiplier())
+            except (AttributeError, TypeError, ValueError):
+                _ts_speed_persist = _time_speed0
             save_gui_state(
                 dcm_path=e_dcm.text().strip(),
                 csv_path=e_csv.text().strip(),
@@ -439,8 +519,12 @@ class SpotCheckController:
                 spot_weight_mode=sw_mode_norm,
                 aggregate_spots_by_gate=cb_agg.isChecked(),
                 heal_partial_fit_axes=cb_heal_partial.isChecked(),
-                auto_align_detector_xy=cb_align.isChecked(),
-                bounds_xy_tick_mm=float(xy_tick_save),
+                coarse_flat_align=cb_align.isChecked(),
+                fine_align_xy=cb_fine_xy.isChecked(),
+                fine_align_rotation=cb_fine_rot.isChecked(),
+                fine_align_scale=cb_fine_scale.isChecked(),
+                filter_xy_fliers=cb_filter_xy.isChecked(),
+                filter_xy_flier_sigma=float(filter_sigma_save),
                 plan_qa_coloring=cb_pqa.isChecked(),
                 plan_qa_mode=qa_mode_sv,
                 plan_qa_pass_mm=float(pos_thr[0]),
@@ -457,6 +541,9 @@ class SpotCheckController:
                 view_projection_perspective=cb_view_proj.isChecked(),
                 slice_band_on=bool(slice_chk.isChecked()),
                 slice_band_center_i=_sb_ci_persist,
+                time_slice_on=True,
+                time_slice_start_ms=_ts_start_persist,
+                time_slice_speed=_ts_speed_persist,
             )
 
         def browse_dcm() -> None:
@@ -490,6 +577,10 @@ class SpotCheckController:
             on = cb_z_water.isChecked()
             e_wet.setEnabled(on)
             combo_z_depth.setEnabled(on)
+
+        def _sync_filter_xy_ui() -> None:
+            on = cb_filter_xy.isChecked()
+            e_filter_sigma.setEnabled(on)
 
         def _current_z_depth_metric() -> str:
             key = combo_z_depth.currentData()
@@ -568,9 +659,29 @@ class SpotCheckController:
             btn.clicked.connect(_clear_path)
             return btn
 
+        cb_fine_xy = QCheckBox("Fine XY")
+        cb_fine_xy.setChecked(_bool_saved("fine_align_xy", True))
+        cb_fine_rot = QCheckBox("Fine rotation")
+        cb_fine_rot.setChecked(_bool_saved("fine_align_rotation", True))
+        cb_fine_scale = QCheckBox("Fine scale X/Y")
+        cb_fine_scale.setChecked(_bool_saved("fine_align_scale", True))
+        fine_tip = (
+            "Optional refinement after aggregation: weighted least-squares adjustment vs plan XY "
+            "(nearest plan spot on each row's nominal layer — same pairing as plan QA). "
+            "Independent scale absorbs source-to-detector distance error; optional SAD entry for "
+            "constrained magnification may follow."
+        )
+        for _cb_fin in (cb_fine_xy, cb_fine_rot, cb_fine_scale):
+            _cb_fin.setToolTip(fine_tip)
+
+        e_qa_pass.setFixedWidth(56)
+        e_qa_warn.setFixedWidth(56)
+
         # --- drawer sections ---
         gb_files = QGroupBox("Files")
         fl = QFormLayout(gb_files)
+        fl.setSpacing(4)
+        fl.setContentsMargins(8, 8, 8, 6)
         row_dcm = QWidget()
         h_dcm = QHBoxLayout(row_dcm)
         h_dcm.setContentsMargins(0, 0, 0, 0)
@@ -597,81 +708,56 @@ class SpotCheckController:
         fl.addRow("", btn_export_csv)
 
         gb_filter = QGroupBox("Filtering")
-        vl_filter = QVBoxLayout(gb_filter)
-        vl_filter.addWidget(cb_heal_partial)
+        vl_filter = _group_layout(gb_filter)
+        vl_filter.addWidget(cb_filter_xy)
+        vl_filter.addWidget(
+            _inline_row(QLabel("σ limit:"), e_filter_sigma, stretch_last=False)
+        )
+        vl_filter.addWidget(
+            _add_hint_lbl(
+                "Runs after assignment: nearest plan spot on the row's layer; "
+                "fit σ A/B mapped like A/B axes."
+            )
+        )
 
-        gb_align_panel = QGroupBox("Detector alignment")
-        vl_align = QVBoxLayout(gb_align_panel)
-        vl_align.addWidget(cb_align)
-
-        gb_layer = QGroupBox("Spot assignment")
-        vl_layer = QVBoxLayout(gb_layer)
-        vl_layer.addWidget(rb_auto_episodes)
-        vl_layer.addWidget(rb_auto_seq)
-        vl_layer.addWidget(rb_gate)
+        gb_assign = QGroupBox("Spot assignment & aggregation")
+        vl_assign = _group_layout(gb_assign)
+        vl_assign.addWidget(rb_auto_episodes)
+        vl_assign.addWidget(rb_auto_seq)
+        vl_assign.addWidget(rb_gate)
         lbl_auto_tuning = QLabel(
             "Tuning: inferred from plan + CSV when Auto is selected."
         )
         lbl_auto_tuning.setWordWrap(True)
         lbl_auto_tuning.setStyleSheet(f"color: {MUTED_HINT}; font-size: 9pt;")
-        vl_layer.addWidget(lbl_auto_tuning)
-        vl_layer.addWidget(help_lbl)
+        vl_assign.addWidget(lbl_auto_tuning)
+        vl_assign.addWidget(help_lbl)
+        vl_assign.addWidget(cb_heal_partial)
+        vl_assign.addWidget(agg_intro_lbl)
+        vl_assign.addWidget(cb_agg)
 
-        gb_agg = QGroupBox("Aggregation")
-        vl_agg = QVBoxLayout(gb_agg)
-        vl_agg.addWidget(agg_intro_lbl)
-        vl_agg.addWidget(cb_agg)
-
-        gb_disp = QGroupBox("Display")
-        vdisp = QVBoxLayout(gb_disp)
-        vdisp.addWidget(cb_weight_ch)
-        sw_row = QHBoxLayout()
-        sw_row.addWidget(QLabel("Weight:"))
-        sw_row.addWidget(combo_sw, 1)
-        wsw = QWidget()
-        wsw.setLayout(sw_row)
-        vdisp.addWidget(wsw)
-        vdisp.addWidget(cb_plan_fwhm)
-        vdisp.addWidget(cb_meas_sigma)
-        z_wet_row = QHBoxLayout()
-        z_wet_row.addWidget(cb_z_water)
-        z_wet_row.addWidget(QLabel("Upstream WET (mm)"))
-        z_wet_row.addWidget(e_wet)
-        z_wet_row.addWidget(QLabel("Depth"))
-        z_wet_row.addWidget(combo_z_depth)
-        z_wet_row.addStretch(1)
-        w_z_wet = QWidget()
-        w_z_wet.setLayout(z_wet_row)
-        vdisp.addWidget(w_z_wet)
-        rt = QHBoxLayout()
-        rt.addWidget(QLabel("XY ticks (mm)"))
-        rt.addWidget(e_bxy)
-        rt.addWidget(_add_hint_lbl("0 = coarse; ~5 common"), 1)
-        wtick = QWidget()
-        wtick.setLayout(rt)
-        vdisp.addWidget(wtick)
+        gb_align = QGroupBox("Detector alignment")
+        vl_align = _group_layout(gb_align)
+        vl_align.addWidget(cb_align)
+        fine_grid = QGridLayout()
+        fine_grid.setContentsMargins(0, 0, 0, 0)
+        fine_grid.setHorizontalSpacing(8)
+        fine_grid.setVerticalSpacing(2)
+        fine_grid.addWidget(cb_fine_xy, 0, 0)
+        fine_grid.addWidget(cb_fine_rot, 0, 1)
+        fine_grid.addWidget(cb_fine_scale, 1, 0, 1, 2)
+        w_fine = QWidget()
+        w_fine.setLayout(fine_grid)
+        vl_align.addWidget(w_fine)
 
         gb_qa = QGroupBox("Plan QA")
-        vqa = QVBoxLayout(gb_qa)
+        vqa = _group_layout(gb_qa)
         vqa.addWidget(cb_pqa)
-        qa_mode_row = QHBoxLayout()
-        qa_mode_row.addWidget(rb_qa_pos)
-        qa_mode_row.addWidget(rb_qa_dose)
-        wqa_mode = QWidget()
-        wqa_mode.setLayout(qa_mode_row)
-        vqa.addWidget(wqa_mode)
-        vqa.addWidget(cb_qa_lines)
-        vqa.addWidget(cb_qa_hide)
+        vqa.addWidget(_inline_row(rb_qa_pos, rb_qa_dose))
+        vqa.addWidget(_inline_row(cb_qa_lines, cb_qa_hide))
         lbl_qa_pass = QLabel("Pass ≤ (mm)")
         lbl_qa_warn = QLabel("Warn ≤ (mm)")
-        qa_th = QHBoxLayout()
-        qa_th.addWidget(lbl_qa_pass)
-        qa_th.addWidget(e_qa_pass)
-        qa_th.addWidget(lbl_qa_warn)
-        qa_th.addWidget(e_qa_warn)
-        wqa = QWidget()
-        wqa.setLayout(qa_th)
-        vqa.addWidget(wqa)
+        vqa.addWidget(_inline_row(lbl_qa_pass, e_qa_pass, lbl_qa_warn, e_qa_warn))
         qa_hint_lbl = _add_hint_lbl("Need 0 < pass < warn.")
         vqa.addWidget(qa_hint_lbl)
         lbl_qa_counts = QLabel("Counts: —")
@@ -681,6 +767,42 @@ class SpotCheckController:
         lbl_qa_counts.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         vqa.addWidget(lbl_qa_counts)
         _apply_qa_mode_ui(refresh_fields=False)
+
+        gb_disp = QGroupBox("Display & view")
+        vdisp = _group_layout(gb_disp)
+        vdisp.addWidget(cb_weight_ch)
+        vdisp.addWidget(_inline_row(QLabel("Weight:"), combo_sw, stretch_last=True))
+        vdisp.addWidget(_inline_row(cb_plan_fwhm, cb_meas_sigma))
+        z_wet_row = QHBoxLayout()
+        z_wet_row.setContentsMargins(0, 0, 0, 0)
+        z_wet_row.setSpacing(6)
+        z_wet_row.addWidget(cb_z_water)
+        z_wet_row.addWidget(QLabel("WET (mm)"))
+        z_wet_row.addWidget(e_wet)
+        z_wet_row.addWidget(QLabel("Depth"))
+        z_wet_row.addWidget(combo_z_depth, 1)
+        w_z_wet = QWidget()
+        w_z_wet.setLayout(z_wet_row)
+        vdisp.addWidget(w_z_wet)
+        vdisp.addWidget(_inline_row(slice_chk, slice_sli, stretch_last=True))
+        vdisp.addWidget(slice_status)
+        view_proj_row = QHBoxLayout()
+        view_proj_row.setContentsMargins(0, 0, 0, 0)
+        view_proj_row.setSpacing(6)
+        view_proj_row.addWidget(cb_view_proj)
+        btn_view_top = QPushButton("Top")
+        btn_view_left = QPushButton("Left")
+        btn_view_right = QPushButton("Right")
+        for _vb in (btn_view_top, btn_view_left, btn_view_right):
+            _vb.setFixedHeight(26)
+        btn_view_top.setToolTip("Top down: look along scene Z (detector XY plane).")
+        btn_view_left.setToolTip("From −X (Fit B) side — YZ plane.")
+        btn_view_right.setToolTip("From +X (Fit B) side — YZ plane.")
+        view_proj_row.addWidget(btn_view_top)
+        view_proj_row.addWidget(btn_view_left)
+        view_proj_row.addWidget(btn_view_right)
+        view_proj_row.addStretch(1)
+        vdisp.addLayout(view_proj_row)
 
         def _update_plan_qa_counts_label(
             planned: list[tuple[float, float, float]] | None,
@@ -710,38 +832,12 @@ class SpotCheckController:
                 format_qa_counts_label(qa, enabled=bool(cb_pqa.isChecked()))
             )
 
-        gb_slice = QGroupBox("5-layer band")
-        vsl = QVBoxLayout(gb_slice)
-        vsl.addWidget(slice_chk)
-        vsl.addWidget(slice_sli)
-        vsl.addWidget(slice_status)
-
-        gb_view3d = QGroupBox("3D view")
-        vview3d = QVBoxLayout(gb_view3d)
-        view_proj_row = QHBoxLayout()
-        view_proj_row.addWidget(cb_view_proj, 1)
-        btn_view_top = QPushButton("Top")
-        btn_view_left = QPushButton("Left")
-        btn_view_right = QPushButton("Right")
-        for _vb in (btn_view_top, btn_view_left, btn_view_right):
-            _vb.setFixedHeight(26)
-        btn_view_top.setToolTip("Top down: look along scene Z (detector XY plane).")
-        btn_view_left.setToolTip("From −X (Fit B) side — YZ plane.")
-        btn_view_right.setToolTip("From +X (Fit B) side — YZ plane.")
-        view_proj_row.addWidget(btn_view_top)
-        view_proj_row.addWidget(btn_view_left)
-        view_proj_row.addWidget(btn_view_right)
-        vview3d.addLayout(view_proj_row)
-
         drawer_layout.addWidget(gb_files)
         drawer_layout.addWidget(gb_filter)
-        drawer_layout.addWidget(gb_align_panel)
-        drawer_layout.addWidget(gb_layer)
-        drawer_layout.addWidget(gb_agg)
+        drawer_layout.addWidget(gb_assign)
+        drawer_layout.addWidget(gb_align)
         drawer_layout.addWidget(gb_qa)
         drawer_layout.addWidget(gb_disp)
-        drawer_layout.addWidget(gb_slice)
-        drawer_layout.addWidget(gb_view3d)
 
         auto_hint = QLabel(
             "3D refreshes when inputs validate. Numbers debounce briefly after typing."
@@ -786,23 +882,29 @@ class SpotCheckController:
             "n_plan_kept": 0,
             "n_plan_raw": 0,
             "measured_unaligned": None,
-            "measured_aligned": None,
-            "align_info": None,
-            "align_cache_key": None,
+            "measured_fine_aligned": None,
+            "coarse_flat_align_info": None,
+            "fine_align_info": None,
             "label": "",
             "csv_display_name": "",
             "layer_mode_run": "",
             "auto_assign_method": "episodes",
             "aggregate_run": False,
             "assign_diagnostics": None,
+            "plan_spots_no_data": None,
+            "plan_spot_time_s": None,
             "qa_result": None,
             "plotter": None,
-            "aligned": None,
+            "coarse_flat": None,
+            "fine_align_ui": None,
             "z_water_depth": False,
             "upstream_wet_mm": 0.0,
             "z_depth_metric": sc_const.Z_DEPTH_METRIC_DEFAULT,
+            "spot_weight_mode_run": sc_const.SPOT_WEIGHT_MODE_DEFAULT,
             "slice_on": bool(slice_chk.isChecked()),
             "slice_center_i": int(slice_sli.value()),
+            "time_slice_start_ms": _time_start0,
+            "time_slice_speed": _time_speed0,
         }
 
         def _apply_quick_view(view: str) -> None:
@@ -820,49 +922,148 @@ class SpotCheckController:
             except Exception as exc:
                 logger.warning("Could not set 3D camera view %r: %s", view, exc)
 
+        def _apply_projection_view() -> None:
+            pl = _plot_cache.get("plotter")
+            if pl is not None:
+                try:
+                    analysis.apply_comparison_3d_projection_view(
+                        pl,
+                        perspective=cb_view_proj.isChecked(),
+                    )
+                    qw = slice_qt_bindings.get("_qt_vtk_widget")
+                    if qw is not None:
+                        try:
+                            qw.update()
+                        except Exception:
+                            pass
+                except Exception as exc:
+                    logger.warning("Could not set 3D projection view: %s", exc)
+            persist()
+
+        def _apply_display_refresh() -> None:
+            """Recolor/re-mesh spots in-place (QA, weight tint, glyphs) without pipeline reload."""
+            pl = _plot_cache.get("plotter")
+            planned_raw = _plot_cache.get("planned")
+            measured_raw = _plot_cache.get("measured_unaligned")
+            if pl is None or getattr(pl, "_spot_check_apply_display", None) is None:
+                _do_refresh()
+                return
+            if planned_raw is None and measured_raw is None:
+                _do_refresh()
+                return
+            planned = list(planned_raw) if planned_raw is not None else []
+            measured_fine = _plot_cache.get("measured_fine_aligned")
+            measured = list(measured_fine) if measured_fine else list(measured_raw or [])
+            qa_mode_run = _current_plan_qa_mode()
+            qa_pass_f = float(
+                sc_const.PLAN_QA_DOSE_PASS_PP_DEFAULT
+                if qa_mode_run == "dose"
+                else sc_const.PLAN_QA_PASS_MM_DEFAULT
+            )
+            qa_warn_f = float(
+                sc_const.PLAN_QA_DOSE_WARN_PP_DEFAULT
+                if qa_mode_run == "dose"
+                else sc_const.PLAN_QA_WARN_MM_DEFAULT
+            )
+            if cb_pqa.isChecked():
+                qa_pair = parse_plan_qa_thresholds(e_qa_pass.text(), e_qa_warn.text())
+                if qa_pair is None:
+                    if plan_qa_thresholds_input_in_progress(
+                        e_qa_pass.text(), e_qa_warn.text()
+                    ):
+                        qa_pass_f, qa_warn_f = _qa_thr_by_mode[qa_mode_run]
+                    else:
+                        return
+                else:
+                    qa_pass_f, qa_warn_f = qa_pair
+                    _qa_thr_by_mode[qa_mode_run] = (float(qa_pass_f), float(qa_warn_f))
+            sw_lbl = combo_sw.currentText().strip()
+            sw_internal = _SW_MODE_BY_LABEL.get(sw_lbl, sc_const.SPOT_WEIGHT_MODE_DEFAULT)
+            try:
+                spot_weight_mode_run = analysis.normalize_measured_spot_weight_mode(sw_internal)
+            except ValueError:
+                spot_weight_mode_run = sc_const.SPOT_WEIGHT_MODE_DEFAULT
+            try:
+                analysis.refresh_comparison_3d_display(
+                    pl,
+                    planned,
+                    measured,
+                    a_is_x=False,
+                    weight_measured_by_channel=cb_weight_ch.isChecked(),
+                    spot_weight_mode=spot_weight_mode_run,
+                    plan_qa_coloring=cb_pqa.isChecked(),
+                    plan_qa_mode=qa_mode_run,
+                    plan_qa_pass_mm=qa_pass_f
+                    if qa_mode_run == "position"
+                    else float(sc_const.PLAN_QA_PASS_MM_DEFAULT),
+                    plan_qa_warn_mm=qa_warn_f
+                    if qa_mode_run == "position"
+                    else float(sc_const.PLAN_QA_WARN_MM_DEFAULT),
+                    plan_qa_pass_pp=qa_pass_f
+                    if qa_mode_run == "dose"
+                    else float(sc_const.PLAN_QA_DOSE_PASS_PP_DEFAULT),
+                    plan_qa_warn_pp=qa_warn_f
+                    if qa_mode_run == "dose"
+                    else float(sc_const.PLAN_QA_DOSE_WARN_PP_DEFAULT),
+                    plan_mu=_plot_cache.get("plan_mu"),
+                    plan_qa_draw_error_lines=cb_qa_lines.isChecked(),
+                    plan_qa_hide_pass_spots=cb_qa_hide.isChecked(),
+                    plan_fwhm_xy_mm=_plot_cache.get("plan_fwhm_xy"),
+                    scale_plan_spots_by_dicom_fwhm=cb_plan_fwhm.isChecked(),
+                    measured_spots_sigma_world_mm=cb_meas_sigma.isChecked(),
+                    z_axis_use_proton_water_depth_mm=bool(_plot_cache.get("z_water_depth", False)),
+                    upstream_wet_shifter_mm=float(_plot_cache.get("upstream_wet_mm", 0.0)),
+                    z_depth_metric=str(
+                        _plot_cache.get("z_depth_metric", sc_const.Z_DEPTH_METRIC_DEFAULT)
+                    ),
+                    plan_spots_no_data=_plot_cache.get("plan_spots_no_data"),
+                    plan_spot_time_s=_plot_cache.get("plan_spot_time_s"),
+                )
+            except Exception as exc:
+                logger.warning("Display refresh failed, running full replot: %s", exc)
+                _do_refresh()
+                return
+            _update_plan_qa_counts_label(
+                planned,
+                measured,
+                qa_mode=qa_mode_run,
+                qa_pass_f=float(qa_pass_f),
+                qa_warn_f=float(qa_warn_f),
+                plan_mu=_plot_cache.get("plan_mu"),
+            )
+            qw = slice_qt_bindings.get("_qt_vtk_widget")
+            if qw is not None:
+                try:
+                    qw.update()
+                except Exception:
+                    pass
+            persist()
+
         load_generation = 0
         load_pool = QThreadPool(win)
         load_pool.setMaxThreadCount(1)
         load_signals = PipelineLoaderSignals(win)
         pending_ctx: GuiRefreshContext | None = None
         _loading_gen: int | None = None
-        _spinner_frame = 0
 
-        load_overlay = QFrame(vtk_host)
-        load_overlay.setObjectName("loadOverlay")
-        load_overlay.setStyleSheet("#loadOverlay { background-color: rgba(13, 17, 23, 0.45); }")
-        load_overlay.setVisible(False)
-        load_overlay_lay = QVBoxLayout(load_overlay)
-        load_overlay_lay.setContentsMargins(0, 0, 0, 0)
-        load_overlay_lay.addStretch(1)
-        load_overlay_row = QHBoxLayout()
-        load_overlay_row.addStretch(1)
-        load_overlay_card = QFrame()
-        load_overlay_card.setObjectName("loadOverlayCard")
-        load_overlay_card.setStyleSheet(
-            "#loadOverlayCard { background-color: rgba(22, 27, 34, 0.96); "
-            "border: 1px solid #30363d; border-radius: 8px; }"
-        )
-        load_overlay_card_lay = QVBoxLayout(load_overlay_card)
-        load_overlay_card_lay.setContentsMargins(20, 16, 20, 16)
-        load_overlay_card_lay.setSpacing(10)
-        load_overlay_spinner = QLabel(_LOAD_SPINNER_FRAMES[0])
-        load_overlay_spinner.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        load_overlay_spinner.setStyleSheet("color: #58a6ff; font-size: 36pt;")
-        pipeline_progress = PipelineProgressWidget()
-        load_overlay_card_lay.addWidget(load_overlay_spinner)
-        load_overlay_card_lay.addWidget(pipeline_progress)
-        load_overlay_row.addWidget(load_overlay_card)
-        load_overlay_row.addStretch(1)
-        load_overlay_lay.addLayout(load_overlay_row)
-        load_overlay_lay.addStretch(1)
+        load_overlay = LoadOverlayPanel(vtk_host)
 
         def _sync_load_overlay_geometry() -> None:
-            host_w = max(1, int(vtk_host.width()))
-            host_h = max(1, int(vtk_host.height()))
-            load_overlay.setGeometry(0, 0, host_w, host_h)
-            card_w = max(160, int(host_w * 0.30))
-            load_overlay_card.setFixedWidth(card_w)
+            load_overlay.sync_geometry()
+            if _loading_gen is not None:
+                _hide_vtk_host_content()
+
+        def _hide_vtk_host_content() -> None:
+            vtk_view_pane.hide()
+            timeline_bar.hide()
+
+        def _show_vtk_host_content() -> None:
+            vtk_view_pane.show()
+            timeline_bar.show()
+
+        def _pin_load_overlay_on_top() -> None:
+            _hide_vtk_host_content()
+            load_overlay.sync_geometry()
             load_overlay.raise_()
 
         class _LoadOverlayResizeFilter(QObject):
@@ -874,27 +1075,12 @@ class SpotCheckController:
         _load_overlay_filter = _LoadOverlayResizeFilter(win)
         vtk_host.installEventFilter(_load_overlay_filter)
 
-        _load_spinner_timer = QTimer(win)
-        _load_spinner_timer.setInterval(_LOAD_SPINNER_MS)
-
-        def _tick_load_spinner() -> None:
-            nonlocal _spinner_frame
-            _spinner_frame = (_spinner_frame + 1) % len(_LOAD_SPINNER_FRAMES)
-            load_overlay_spinner.setText(_LOAD_SPINNER_FRAMES[_spinner_frame])
-
-        _load_spinner_timer.timeout.connect(_tick_load_spinner)
-
         def _show_loading(generation: int, message: str) -> None:
-            nonlocal _loading_gen, _spinner_frame
+            nonlocal _loading_gen
             _loading_gen = int(generation)
-            _spinner_frame = 0
-            load_overlay_spinner.setText(_LOAD_SPINNER_FRAMES[0])
-            pipeline_progress.reset(message=message)
-            _sync_load_overlay_geometry()
-            load_overlay.show()
-            load_overlay.raise_()
-            if not _load_spinner_timer.isActive():
-                _load_spinner_timer.start()
+            load_overlay.reset(message=message)
+            _pin_load_overlay_on_top()
+            load_overlay.show_loading()
             QApplication.processEvents()
 
         def _hide_loading(generation: int) -> None:
@@ -902,26 +1088,26 @@ class SpotCheckController:
             if _loading_gen is None or int(generation) != int(_loading_gen):
                 return
             _loading_gen = None
-            _load_spinner_timer.stop()
-            pipeline_progress.mark_complete()
-            load_overlay.hide()
+            load_overlay.mark_complete()
+            load_overlay.hide_loading()
+            _show_vtk_host_content()
 
         def _on_pipeline_progress(event: object, generation: int) -> None:
             if generation != load_generation:
                 return
             if isinstance(event, ProgressEvent):
-                pipeline_progress.apply_event(event)
+                load_overlay.apply_event(event)
 
         def _vtk_placeholder_message(text: str, *, error: bool = False) -> None:
             clr = "#f85149" if error else "#8b949e"
             fn = getattr(analysis, "_clear_qt_layout_items", None)
             if fn is not None:
-                fn(vtk_host)
-            lay = vtk_host.layout()
+                fn(vtk_view_pane)
+            lay = vtk_view_pane.layout()
             if lay is None:
-                lay = QVBoxLayout(vtk_host)
+                lay = QVBoxLayout(vtk_view_pane)
                 lay.setContentsMargins(0, 0, 0, 0)
-                vtk_host.setLayout(lay)
+                vtk_view_pane.setLayout(lay)
             lbl = QLabel(text)
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl.setWordWrap(True)
@@ -948,7 +1134,7 @@ class SpotCheckController:
                 )
                 _plot_cache["pipeline_key"] = None
                 _plot_cache["plotter"] = None
-                analysis.idle_slice_band_controls_qt(slice_qt_bindings)
+                _idle_view_slice_controls_qt()
                 _vtk_placeholder_message(
                     "Display state reset — tweak an option or re-pick files.",
                     error=True,
@@ -961,7 +1147,7 @@ class SpotCheckController:
             if not planned and not measured_unaligned:
                 _plot_cache["pipeline_key"] = None
                 _plot_cache["plotter"] = None
-                analysis.idle_slice_band_controls_qt(slice_qt_bindings)
+                _idle_view_slice_controls_qt()
                 _vtk_placeholder_message(
                     "Select a plan (.dcm or Pyramid .csv) and/or acquisition .csv.",
                     error=False,
@@ -969,39 +1155,18 @@ class SpotCheckController:
                 status_lbl.setText("Ready — pick plan and/or CSV.")
                 return
 
-            measured = list(measured_unaligned)
-            detector_align_caption: str | None = None
-            align_note = ""
-            align_cache_key = (pipeline_key, bool(cb_align.isChecked()))
-            if cb_align.isChecked() and planned and measured:
-                if _plot_cache.get("detector_pre_aligned"):
-                    measured = list(measured_unaligned)
-                    info0 = _plot_cache.get("align_info")
-                    if info0 is not None:
-                        detector_align_caption = p.format_detector_align_caption(info0)
-                else:
-                    cached_aligned = _plot_cache.get("measured_aligned")
-                    cached_align_key = _plot_cache.get("align_cache_key")
-                    if cached_aligned is not None and cached_align_key == align_cache_key:
-                        measured = list(cached_aligned)
-                        info0 = _plot_cache.get("align_info")
-                        if info0 is not None:
-                            detector_align_caption = p.format_detector_align_caption(info0)
-                    else:
-                        try:
-                            measured, align_info = p.align_measured_to_plan_detector_xy(
-                                planned, measured, a_is_x=False
-                            )
-                            _plot_cache["measured_aligned"] = measured
-                            _plot_cache["align_info"] = align_info
-                            _plot_cache["align_cache_key"] = align_cache_key
-                            detector_align_caption = p.format_detector_align_caption(
-                                align_info
-                            )
-                        except ValueError as ex:
-                            align_note = f" Detector alignment skipped: {ex}"
-            else:
-                _plot_cache["align_cache_key"] = align_cache_key
+            measured_fine = _plot_cache.get("measured_fine_aligned")
+            measured = list(measured_fine) if measured_fine else list(measured_unaligned)
+            coarse_info = _plot_cache.get("coarse_flat_align_info")
+            fine_info = _plot_cache.get("fine_align_info")
+            align_caption = p.format_total_detector_align_caption(
+                coarse=coarse_info,
+                fine=fine_info,
+                measured_base=measured_unaligned if measured_unaligned else None,
+                measured_final=measured if measured else None,
+                a_is_x=False,
+            )
+
             QApplication.processEvents()
             n_meas = len(measured)
 
@@ -1014,6 +1179,16 @@ class SpotCheckController:
             except (AttributeError, TypeError, ValueError):
                 pass
             slice_band_init = {"slice_on": _si_on, "center_i": _si_ci}
+
+            _ts_start = int(_plot_cache.get("time_slice_start_ms", _time_start0))
+            _ts_speed = float(_plot_cache.get("time_slice_speed", _time_speed0))
+            try:
+                if timeline_bar._slider.isEnabled():
+                    _ts_start = int(timeline_bar.start_ms())
+                    _ts_speed = float(timeline_bar.speed_multiplier())
+            except (AttributeError, TypeError, ValueError):
+                pass
+            time_slice_init = {"slice_on": True, "start_ms": _ts_start}
 
             layer_mode_req, _, _ = resolve_layer_assign_mode(ctx.layer_assign_mode)
             layer_mode_plot = str(_plot_cache.get("layer_mode_run") or layer_mode_req)
@@ -1038,11 +1213,15 @@ class SpotCheckController:
             reuse_pl = _plot_cache.get("plotter")
             wet_use = float(sc_const.UPSTREAM_WET_SHIFTER_MM_DEFAULT)
             metric_use = _current_z_depth_metric()
+            fine_xy_on = cb_fine_xy.isChecked()
+            fine_rot_on = cb_fine_rot.isChecked()
+            fine_scale_on = cb_fine_scale.isChecked()
+            fine_tuple_ui = (fine_xy_on, fine_rot_on, fine_scale_on)
             if cb_z_water.isChecked():
                 wet_parsed = parse_upstream_wet_shifter_mm(e_wet.text())
                 if wet_parsed is None:
                     _bump_load_generation_invalidate_async()
-                    analysis.idle_slice_band_controls_qt(slice_qt_bindings)
+                    _idle_view_slice_controls_qt()
                     _vtk_placeholder_message(
                         f"Upstream WET: 0–{sc_const.UPSTREAM_WET_SHIFTER_MM_MAX:g} mm.",
                         error=True,
@@ -1053,7 +1232,8 @@ class SpotCheckController:
             preserve_cam = (
                 reuse_pl is not None
                 and _plot_cache["pipeline_key"] == pipeline_key
-                and _plot_cache.get("aligned") == cb_align.isChecked()
+                and _plot_cache.get("coarse_flat") == cb_align.isChecked()
+                and tuple(_plot_cache.get("fine_align_ui") or ()) == fine_tuple_ui
                 and _plot_cache.get("z_water_depth") == cb_z_water.isChecked()
                 and float(_plot_cache.get("upstream_wet_mm", 0.0)) == wet_use
                 and str(_plot_cache.get("z_depth_metric", "csda")) == metric_use
@@ -1078,8 +1258,7 @@ class SpotCheckController:
                 weight_measured_by_channel=cb_weight_ch.isChecked(),
                 aggregate_spots=aggregate_plot,
                 spot_weight_mode=ctx.spot_weight_mode_run,
-                detector_align_caption=detector_align_caption,
-                bounds_xy_tick_mm=ctx.xy_tick_use,
+                detector_align_caption=align_caption,
                 plan_qa_coloring=cb_pqa.isChecked(),
                 plan_qa_mode=ctx.qa_mode,
                 plan_qa_pass_mm=ctx.qa_pass_f
@@ -1107,15 +1286,24 @@ class SpotCheckController:
                 reuse_plotter=reuse_pl if reuse_pl is not None else None,
                 reuse_camera=preserve_cam,
                 reembed_qt=reuse_pl is None,
-                embed_qt=vtk_host,
+                embed_qt=vtk_view_pane,
                 slice_qt=slice_qt_bindings,
                 slice_band_init=slice_band_init,
+                time_slice_qt=time_slice_qt_bindings,
+                time_slice_init=time_slice_init,
+                time_slice_speed=_ts_speed,
+                plan_spots_no_data=_plot_cache.get("plan_spots_no_data"),
+                plan_spot_time_s=_plot_cache.get("plan_spot_time_s"),
             )
+            if _loading_gen is not None:
+                _pin_load_overlay_on_top()
             _plot_cache["plotter"] = pl
-            _plot_cache["aligned"] = cb_align.isChecked()
+            _plot_cache["coarse_flat"] = cb_align.isChecked()
+            _plot_cache["fine_align_ui"] = fine_tuple_ui
             _plot_cache["z_water_depth"] = cb_z_water.isChecked()
             _plot_cache["upstream_wet_mm"] = wet_use
             _plot_cache["z_depth_metric"] = metric_use
+            _plot_cache["spot_weight_mode_run"] = str(ctx.spot_weight_mode_run)
             try:
                 _plot_cache["slice_on"] = bool(slice_chk.isChecked())
                 if slice_sli.isEnabled():
@@ -1123,6 +1311,13 @@ class SpotCheckController:
             except (AttributeError, TypeError, ValueError):
                 _plot_cache["slice_on"] = bool(slice_band_init["slice_on"])
                 _plot_cache["slice_center_i"] = int(slice_band_init["center_i"])
+            try:
+                if timeline_bar._slider.isEnabled():
+                    _plot_cache["time_slice_start_ms"] = int(timeline_bar.start_ms())
+                    _plot_cache["time_slice_speed"] = float(timeline_bar.speed_multiplier())
+            except (AttributeError, TypeError, ValueError):
+                _plot_cache["time_slice_start_ms"] = int(time_slice_init["start_ms"])
+                _plot_cache["time_slice_speed"] = float(_ts_speed)
             cache_note = (
                 ""
                 if need_data
@@ -1159,8 +1354,8 @@ class SpotCheckController:
                 meas_line += f" (one {_cap}-weighted mean per assigned plan spot)"
             elif measured and ctx.aggregate_spots and not aggregate_plot:
                 meas_line += " (aggregation off for this load)"
-            if cb_align.isChecked() and detector_align_caption:
-                meas_line += f". {detector_align_caption}"
+            if align_caption:
+                meas_line += f". {align_caption}"
             if cb_pqa.isChecked():
                 if ctx.qa_mode == "dose":
                     meas_line += (
@@ -1181,7 +1376,7 @@ class SpotCheckController:
             if cb_meas_sigma.isChecked():
                 meas_line += ". Measured: σ-sized ellipsoids in world XY (mm; see 3D caption)"
             parts = [plan_line, meas_line]
-            status_lbl.setText(f"Updated. {'. '.join(parts)}.{align_note}{cache_note}")
+            status_lbl.setText(f"Updated. {'. '.join(parts)}.{cache_note}")
             _update_plan_qa_counts_label(
                 planned,
                 measured,
@@ -1214,33 +1409,34 @@ class SpotCheckController:
             _plot_cache["measured_unaligned"] = (
                 ld.measured_unaligned if ld.measured_unaligned else []
             )
-            _plot_cache["measured_aligned"] = ld.measured_aligned
-            _plot_cache["align_info"] = ld.align_info
-            _plot_cache["detector_pre_aligned"] = bool(ld.detector_pre_aligned)
-            _plot_cache["align_cache_key"] = (
-                (ld.pipeline_key, True) if ld.measured_aligned is not None else None
+            _plot_cache["measured_fine_aligned"] = (
+                ld.measured_fine_aligned if ld.measured_fine_aligned else None
             )
+            _plot_cache["coarse_flat_align_info"] = ld.coarse_flat_align_info
+            _plot_cache["fine_align_info"] = ld.fine_align_info
             _plot_cache["label"] = ld.label
             _plot_cache["csv_display_name"] = ld.csv_display_name
             _plot_cache["layer_mode_run"] = ld.layer_mode_run
             _plot_cache["auto_assign_method"] = ld.auto_assign_method
             _plot_cache["aggregate_run"] = ld.aggregate_run
             _plot_cache["assign_diagnostics"] = ld.assign_diagnostics
+            _plot_cache["plan_spots_no_data"] = ld.plan_spots_no_data
+            _plot_cache["plan_spot_time_s"] = ld.plan_spot_time_s
             build_target = ld.csv_display_name or ld.label or "plan"
             build_note = f"Building 3D view — {build_target}…"
-            pipeline_progress.set_visualize_phase(message=build_note)
+            load_overlay.set_visualize_phase(message=build_note)
             status_lbl.setText(build_note)
             try:
                 _finalize_refresh(ctx0, need_data=True)
             except RuntimeError as e:
                 _plot_cache["plotter"] = None
-                analysis.idle_slice_band_controls_qt(slice_qt_bindings)
+                _idle_view_slice_controls_qt()
                 _vtk_placeholder_message(f"PyVista: {e}", error=True)
                 status_lbl.setText(f"PyVista: {e}")
                 logger.warning("PyVista runtime error during 3D refresh: %s", e)
             except Exception as e:
                 _plot_cache["plotter"] = None
-                analysis.idle_slice_band_controls_qt(slice_qt_bindings)
+                _idle_view_slice_controls_qt()
                 _vtk_placeholder_message(f"Error: {e}", error=True)
                 status_lbl.setText(f"Error: {e}")
                 logger.exception("Unexpected error during 3D refresh")
@@ -1254,9 +1450,9 @@ class SpotCheckController:
             pending_ctx = None
             _plot_cache["pipeline_key"] = None
             _plot_cache["measured_unaligned"] = None
-            _plot_cache["measured_aligned"] = None
-            _plot_cache["align_info"] = None
-            _plot_cache["align_cache_key"] = None
+            _plot_cache["measured_fine_aligned"] = None
+            _plot_cache["coarse_flat_align_info"] = None
+            _plot_cache["fine_align_info"] = None
             _plot_cache["planned"] = None
             _plot_cache["plan_fwhm_xy"] = None
             _plot_cache["plan_mu"] = None
@@ -1264,9 +1460,12 @@ class SpotCheckController:
             _plot_cache["auto_assign_method"] = "episodes"
             _plot_cache["aggregate_run"] = False
             _plot_cache["assign_diagnostics"] = None
+            _plot_cache["plan_spots_no_data"] = None
+            _plot_cache["plan_spot_time_s"] = None
             _plot_cache["qa_result"] = None
             _plot_cache["plotter"] = None
-            analysis.idle_slice_band_controls_qt(slice_qt_bindings)
+            _plot_cache["fine_align_ui"] = None
+            _idle_view_slice_controls_qt()
             short = msg if len(msg) < 160 else f"{msg[:157]}…"
             _vtk_placeholder_message(short, error=True)
             status_lbl.setText(short)
@@ -1306,8 +1505,16 @@ class SpotCheckController:
                     layer_assign_mode=layer_assign_mode,
                     aggregate_spots=aggregate_spots,
                     spot_weight_mode=spot_weight_mode_run,
-                    auto_align=bool(cb_align.isChecked()),
+                    coarse_flat_align=bool(cb_align.isChecked()),
                     heal_partial_fit_axes=bool(cb_heal_partial.isChecked()),
+                    fine_align_xy=bool(cb_fine_xy.isChecked()),
+                    fine_align_rotation=bool(cb_fine_rot.isChecked()),
+                    fine_align_scale=bool(cb_fine_scale.isChecked()),
+                    filter_xy_fliers=bool(cb_filter_xy.isChecked()),
+                    filter_xy_flier_sigma=float(
+                        parse_filter_xy_flier_sigma(e_filter_sigma.text())
+                        or sc_const.FILTER_XY_FLIER_SIGMA_DEFAULT
+                    ),
                 )
                 ok, measured = pipeline_export_load(config)
                 planned = ok.planned
@@ -1315,7 +1522,13 @@ class SpotCheckController:
                 label = ok.label
                 layer_mode_run = ok.layer_mode_run
                 aggregate_run = ok.aggregate_run
-                aligned = bool(cb_align.isChecked() and planned and ok.measured_aligned)
+                aligned_to_plan = bool(
+                    planned
+                    and (
+                        ok.measured_fine_aligned is not None
+                        or ok.coarse_flat_align_info is not None
+                    )
+                )
                 suffix = "-spots-agg.csv" if aggregate_run else "-spots.csv"
                 default_out = csv_path.with_name(acquisition_csv_stem(csv_path) + suffix)
                 out_path, _ = QFileDialog.getSaveFileName(
@@ -1331,7 +1544,7 @@ class SpotCheckController:
                     plan_mu,
                     measured,
                     aggregated=aggregate_run,
-                    positions_aligned_to_plan=aligned,
+                    positions_aligned_to_plan=aligned_to_plan,
                 )
                 write_combined_export_csv(
                     Path(out_path),
@@ -1342,7 +1555,7 @@ class SpotCheckController:
                         "layer_mode": layer_mode_run,
                         "aggregate_spots": "yes" if aggregate_run else "no",
                         "spot_weight_mode": spot_weight_mode_run,
-                        "aligned_measured_xy": "yes" if aligned else "no",
+                        "aligned_measured_xy": "yes" if aligned_to_plan else "no",
                     },
                 )
                 status_lbl.setText(f"Exported {len(rows)} spot row(s) to {out_path}")
@@ -1374,24 +1587,32 @@ class SpotCheckController:
                 _plot_cache["pipeline_key"] = None
                 _plot_cache["planned"] = None
                 _plot_cache["measured_unaligned"] = None
-                _plot_cache["measured_aligned"] = None
-                analysis.idle_slice_band_controls_qt(slice_qt_bindings)
+                _plot_cache["measured_fine_aligned"] = None
+                _plot_cache["coarse_flat_align_info"] = None
+                _plot_cache["fine_align_info"] = None
+                _idle_view_slice_controls_qt()
                 _vtk_placeholder_message(
                     "Select a plan (.dcm or Pyramid .csv) and/or acquisition .csv.",
                     error=False,
                 )
                 status_lbl.setText("Ready — pick plan and/or CSV.")
                 return
-            xy_tick_use = parse_bounds_xy_tick_mm(e_bxy.text())
-            if xy_tick_use is None:
-                _bump_load_generation_invalidate_async()
-                analysis.idle_slice_band_controls_qt(slice_qt_bindings)
-                _vtk_placeholder_message(
-                    "XY ticks: 0 or spacing 0.05–500 mm.",
-                    error=True,
-                )
-                status_lbl.setText("Fix XY ticks (mm).")
-                return
+            filter_sigma_use = parse_filter_xy_flier_sigma(e_filter_sigma.text())
+            if cb_filter_xy.isChecked() and filter_sigma_use is None:
+                if filter_xy_flier_sigma_input_in_progress(e_filter_sigma.text()):
+                    filter_sigma_use = float(sc_const.FILTER_XY_FLIER_SIGMA_DEFAULT)
+                else:
+                    _bump_load_generation_invalidate_async()
+                    _idle_view_slice_controls_qt()
+                    _vtk_placeholder_message(
+                        f"XY flier σ: {sc_const.FILTER_XY_FLIER_SIGMA_MIN:g}–"
+                        f"{sc_const.FILTER_XY_FLIER_SIGMA_MAX:g}.",
+                        error=True,
+                    )
+                    status_lbl.setText("Fix XY flier σ limit.")
+                    return
+            elif filter_sigma_use is None:
+                filter_sigma_use = float(sc_const.FILTER_XY_FLIER_SIGMA_DEFAULT)
             qa_mode_run = _current_plan_qa_mode()
             qa_pass_f = float(
                 sc_const.PLAN_QA_DOSE_PASS_PP_DEFAULT
@@ -1412,7 +1633,7 @@ class SpotCheckController:
                         qa_pass_f, qa_warn_f = _qa_thr_by_mode[qa_mode_run]
                     else:
                         _bump_load_generation_invalidate_async()
-                        analysis.idle_slice_band_controls_qt(slice_qt_bindings)
+                        _idle_view_slice_controls_qt()
                         unit = "pp" if qa_mode_run == "dose" else "mm"
                         _vtk_placeholder_message(
                             f"QA: 0 < pass < warn ≤ 500 ({unit}).",
@@ -1440,11 +1661,12 @@ class SpotCheckController:
                     bool(cb_agg.isChecked()),
                     spot_weight_mode_run,
                     bool(cb_heal_partial.isChecked()),
+                    bool(cb_filter_xy.isChecked()),
+                    float(filter_sigma_use),
                 )
                 ctx = GuiRefreshContext(
                     plan_path=plan_path if has_plan else None,
                     csv_path=csv_path if has_csv else None,
-                    xy_tick_use=float(xy_tick_use),
                     qa_mode=qa_mode_run,
                     qa_pass_f=qa_pass_f,
                     qa_warn_f=qa_warn_f,
@@ -1492,8 +1714,13 @@ class SpotCheckController:
                             layer_assign_mode=ctx.layer_assign_mode,
                             aggregate_spots=ctx.aggregate_spots,
                             spot_weight_mode=ctx.spot_weight_mode_run,
-                            auto_align=bool(cb_align.isChecked()),
+                            coarse_flat_align=bool(cb_align.isChecked()),
                             heal_partial_fit_axes=bool(cb_heal_partial.isChecked()),
+                            fine_align_xy=bool(cb_fine_xy.isChecked()),
+                            fine_align_rotation=bool(cb_fine_rot.isChecked()),
+                            fine_align_scale=bool(cb_fine_scale.isChecked()),
+                            filter_xy_fliers=bool(cb_filter_xy.isChecked()),
+                            filter_xy_flier_sigma=float(filter_sigma_use),
                             progress=sink,
                         )
 
@@ -1508,7 +1735,7 @@ class SpotCheckController:
                     )
                     _plot_cache["pipeline_key"] = None
                     _plot_cache["plotter"] = None
-                    analysis.idle_slice_band_controls_qt(slice_qt_bindings)
+                    _idle_view_slice_controls_qt()
                     _vtk_placeholder_message(
                         "Display state reset — tweak an option or re-pick files.",
                         error=True,
@@ -1519,19 +1746,19 @@ class SpotCheckController:
                     _finalize_refresh(ctx, need_data=False)
                 except RuntimeError as e:
                     _plot_cache["plotter"] = None
-                    analysis.idle_slice_band_controls_qt(slice_qt_bindings)
+                    _idle_view_slice_controls_qt()
                     _vtk_placeholder_message(f"PyVista: {e}", error=True)
                     status_lbl.setText(f"PyVista: {e}")
                     logger.warning("PyVista runtime error during 3D refresh: %s", e)
                 except Exception as e:
                     _plot_cache["plotter"] = None
-                    analysis.idle_slice_band_controls_qt(slice_qt_bindings)
+                    _idle_view_slice_controls_qt()
                     _vtk_placeholder_message(f"Error: {e}", error=True)
                     status_lbl.setText(f"Error: {e}")
                     logger.exception("Unexpected error during 3D refresh")
             except Exception as e:
                 _plot_cache["plotter"] = None
-                analysis.idle_slice_band_controls_qt(slice_qt_bindings)
+                _idle_view_slice_controls_qt()
                 _vtk_placeholder_message(f"Error: {e}", error=True)
                 status_lbl.setText(f"Error: {e}")
                 logger.exception("Unexpected error during 3D refresh")
@@ -1548,7 +1775,6 @@ class SpotCheckController:
         for w in (
             e_dcm,
             e_csv,
-            e_bxy,
             e_wet,
         ):
             w.textChanged.connect(_schedule_refresh)
@@ -1556,28 +1782,33 @@ class SpotCheckController:
         # QA thresholds: refresh on commit only so values like 0.5 can be typed without
         # debounced validation firing on intermediate "0" or "0.".
         for w in (e_qa_pass, e_qa_warn):
-            w.editingFinished.connect(_commit_field_refresh)
-        combo_sw.currentIndexChanged.connect(_do_refresh)
+            w.editingFinished.connect(_apply_display_refresh)
+        combo_sw.currentIndexChanged.connect(_apply_display_refresh)
         combo_z_depth.currentIndexChanged.connect(_do_refresh)
-        cb_weight_ch.toggled.connect(_do_refresh)
-        cb_plan_fwhm.toggled.connect(_do_refresh)
-        cb_meas_sigma.toggled.connect(_do_refresh)
+        cb_weight_ch.toggled.connect(_apply_display_refresh)
+        cb_plan_fwhm.toggled.connect(_apply_display_refresh)
+        cb_meas_sigma.toggled.connect(_apply_display_refresh)
         cb_z_water.toggled.connect(lambda _c: (_sync_wet_shifter_ui(), _do_refresh()))
         cb_align.toggled.connect(_do_refresh)
+        cb_fine_xy.toggled.connect(_do_refresh)
+        cb_fine_rot.toggled.connect(_do_refresh)
+        cb_fine_scale.toggled.connect(_do_refresh)
         cb_agg.toggled.connect(lambda _c: (_update_help(), _do_refresh()))
         cb_heal_partial.toggled.connect(_do_refresh)
-        cb_pqa.toggled.connect(lambda _c: (_sync_qa_lines(), _do_refresh()))
+        cb_filter_xy.toggled.connect(lambda _c: (_sync_filter_xy_ui(), _do_refresh()))
+        e_filter_sigma.editingFinished.connect(_do_refresh)
+        cb_pqa.toggled.connect(lambda _c: (_sync_qa_lines(), _apply_display_refresh()))
 
         def _on_qa_mode_changed() -> None:
             _stash_qa_thresholds()
             _apply_qa_mode_ui(refresh_fields=True)
-            _do_refresh()
+            _apply_display_refresh()
 
         rb_qa_pos.toggled.connect(lambda _c: _on_qa_mode_changed() if _c else None)
         rb_qa_dose.toggled.connect(lambda _c: _on_qa_mode_changed() if _c else None)
-        cb_qa_lines.toggled.connect(_do_refresh)
-        cb_qa_hide.toggled.connect(_do_refresh)
-        cb_view_proj.toggled.connect(_do_refresh)
+        cb_qa_lines.toggled.connect(_apply_display_refresh)
+        cb_qa_hide.toggled.connect(_apply_display_refresh)
+        cb_view_proj.toggled.connect(_apply_projection_view)
         btn_view_top.clicked.connect(lambda: _apply_quick_view("top"))
         btn_view_left.clicked.connect(lambda: _apply_quick_view("left"))
         btn_view_right.clicked.connect(lambda: _apply_quick_view("right"))
@@ -1586,10 +1817,13 @@ class SpotCheckController:
         rb_gate.toggled.connect(lambda _c: (_update_help(), _do_refresh()))
         slice_chk.toggled.connect(lambda _c: persist())
         slice_sli.sliderReleased.connect(persist)
+        timeline_bar._slider.sliderReleased.connect(persist)
+        timeline_bar._combo_speed.currentIndexChanged.connect(lambda _i: persist())
 
         app.aboutToQuit.connect(persist)
 
         win.show()
         finish_saved_window_layout(win, maximized=restore_maximized)
+        _sync_filter_xy_ui()
         QTimer.singleShot(0, _do_refresh)
         sys.exit(app.exec())

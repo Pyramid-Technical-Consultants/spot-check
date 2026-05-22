@@ -74,12 +74,22 @@ def parse_upstream_wet_shifter_mm(raw: str) -> float | None:
     return None
 
 
-def parse_bounds_xy_tick_mm(raw: str) -> float | None:
+def filter_xy_flier_sigma_input_in_progress(raw: str) -> bool:
+    """True while the user is mid-edit (e.g. ``3`` or ``3.`` before ``3.5``)."""
+    s = str(raw).strip()
+    if not s:
+        return True
+    if s in ("-", "+", ".", "-.", "+."):
+        return True
+    return s.endswith(".")
+
+
+def parse_filter_xy_flier_sigma(raw: str) -> float | None:
+    if filter_xy_flier_sigma_input_in_progress(raw):
+        return None
     try:
         v = float(str(raw).strip())
-        if v == 0.0:
-            return 0.0
-        if 0.05 <= v <= 500.0:
+        if sc_const.FILTER_XY_FLIER_SIGMA_MIN <= v <= sc_const.FILTER_XY_FLIER_SIGMA_MAX:
             return v
     except (ValueError, TypeError):
         pass
