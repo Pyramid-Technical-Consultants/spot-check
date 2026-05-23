@@ -39,12 +39,30 @@ def _disc_point_add_mesh_kwargs(*, point_size: float) -> dict[str, Any]:
         "point_size": float(point_size),
     }
 
+def _attach_spot_index(mesh: Any, spot_indices: np.ndarray) -> None:
+    """Per-point plan/measured spot index for VTK cell picking."""
+    idx = np.asarray(spot_indices, dtype=np.int32).reshape(-1)
+    n_pts = int(mesh.n_points)
+    if int(idx.shape[0]) == n_pts:
+        mesh["spot_index"] = idx
+        return
+    tpl = _unit_sphere_glyph_template(14, 14)
+    n_g = int(tpl.n_points)
+    if n_pts == int(idx.shape[0]) * n_g:
+        mesh["spot_index"] = np.repeat(idx, n_g)
+        return
+    raise ValueError(
+        f"spot_indices length {idx.shape[0]} incompatible with mesh point count {n_pts}"
+    )
+
+
 def _instanced_axis_aligned_ellipsoids(
     centers: np.ndarray,
     semiaxes_xyz: np.ndarray,
     *,
     phi_resolution: int = 14,
     theta_resolution: int = 14,
+    spot_indices: np.ndarray | None = None,
 ) -> Any:
     """Axis-aligned ellipsoids in scene units (mm): per-row X/Y/Z semiaxes.
 
@@ -79,7 +97,11 @@ def _instanced_axis_aligned_ellipsoids(
     face_arr = np.empty((inst_tris.shape[0], 4), dtype=np.int64)
     face_arr[:, 0] = 3
     face_arr[:, 1:4] = inst_tris
-    return pv.PolyData(pts, face_arr.ravel())
+    poly = pv.PolyData(pts, face_arr.ravel())
+    if spot_indices is None:
+        spot_indices = np.arange(n, dtype=np.int32)
+    _attach_spot_index(poly, spot_indices)
+    return poly
 
 def _plan_spot_visibility_rgba(visible_mask: np.ndarray) -> np.ndarray:
     """RGBA for plan spots; alpha=0 keeps geometry in bounds while hiding out-of-band spots."""
@@ -108,6 +130,7 @@ def _plan_spot_point_mesh(plan_pts: np.ndarray, *, visible_mask: np.ndarray | No
         if int(vis.shape[0]) != n:
             raise ValueError("visible_mask length must match plan_pts row count")
     m["rgba"] = _plan_spot_visibility_rgba(vis)
+    _attach_spot_index(m, np.arange(n, dtype=np.int32))
     return m
 
 def _plan_spot_cross_mesh(
@@ -159,6 +182,9 @@ def _plan_spot_cross_mesh(
         for j, v in enumerate(spot_vis):
             rgba_pts[j * 4 : (j + 1) * 4, 3] = np.uint8(a_vis if v else 0)
     poly["rgba"] = rgba_pts
+    cross_spot_idx = idx.astype(np.int32)
+    cross_point_idx = np.repeat(cross_spot_idx, 4)
+    _attach_spot_index(poly, cross_point_idx)
     return poly
 
 def _plan_spot_fwhm_glyph_mesh(
@@ -205,6 +231,7 @@ def _measured_spot_sigma_glyph_mesh(
     *,
     sigma_scale: float = MEASURED_SIGMA_GLYPH_SCALE_DEFAULT,
     rgba: np.ndarray | None = None,
+    spot_indices: np.ndarray | None = None,
 ) -> Any:
     """Per measured point, an axis-aligned ellipsoid: X/Y semiaxis = σ×scale (mm), diameter =
     2×scale×σ; thin Z."""
@@ -238,7 +265,9 @@ def _measured_spot_sigma_glyph_mesh(
     tpl = _unit_sphere_glyph_template(14, 14)
     n_g = int(tpl.n_points)
     centers = np.asarray(meas_pts, dtype=np.float64, order="C")
-    g = _instanced_axis_aligned_ellipsoids(centers, scal)
+    if spot_indices is None:
+        spot_indices = np.arange(n, dtype=np.int32)
+    g = _instanced_axis_aligned_ellipsoids(centers, scal, spot_indices=spot_indices)
     if rgba is not None:
         rgba_u8 = np.asarray(rgba, dtype=np.uint8).reshape(-1, 4)
         if int(rgba_u8.shape[0]) == n:

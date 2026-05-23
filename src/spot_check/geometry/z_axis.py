@@ -2,9 +2,9 @@
 
 Scene Z for the PyVista comparison view uses a **positive** affine map (see
 :func:`nominal_energy_to_scene_z`): deep layers / high nominal MeV sit at low
-scene ``z`` (cube ``zmin``), shallow at high ``z``. Z tick *labels* use the same
+scene ``z`` (scene ``zmin``), shallow at high ``z``. Z tick *labels* use the same
 numeric scale as scene Z but run **high-to-low** along the axis so larger values
-sit near the global origin (:func:`spot_check.geometry.cube_axes.heal_plan_cube_axes`).
+sit near the global origin (:func:`label_at_scene_z`).
 """
 
 from __future__ import annotations
@@ -28,21 +28,18 @@ from spot_check.geometry.proton_csda_water import (
 from spot_check.models import CubeZAxisSpec, ZAxisDisplayConfig
 
 
-def label_at_scene_z(actor: object, z_scene: float) -> float | None:
+def label_at_scene_z(z_scene: float, z_spec: CubeZAxisSpec) -> float | None:
     """Interpolate the displayed Z tick value at a scene-Z position.
 
-    Tick index 0 sits at scene ``zmin``; with inverted Z labels from
-    :mod:`spot_check.geometry.cube_axes`, ``z_labels[0]`` is the **larger** scene-scale number.
+    Tick index 0 sits at scene ``zmin``; inverted Z labels put the **larger**
+    display number at scene ``zmin``.
     """
-    try:
-        zl = [float(actor.z_labels[i]) for i in range(len(actor.z_labels))]  # type: ignore[attr-defined]
-        bb = actor.bounds  # type: ignore[attr-defined]
-        zmin, zmax = float(bb[4]), float(bb[5])
-    except Exception:
+    zmin = float(z_spec.zmin_scene)
+    zmax = float(z_spec.zmax_scene)
+    if zmin == zmax:
         return None
-    if len(zl) < 2 or zmin == zmax:
-        return None
-    lbl_at_zmin, lbl_at_zmax = float(zl[0]), float(zl[-1])
+    lbl_at_zmin = float(z_spec.z_label_at_min)
+    lbl_at_zmax = float(z_spec.z_label_at_max)
     frac = (float(z_scene) - zmin) / (zmax - zmin)
     frac = float(np.clip(frac, 0.0, 1.0))
     return float(lbl_at_zmin + (lbl_at_zmax - lbl_at_zmin) * frac)

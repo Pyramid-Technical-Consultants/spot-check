@@ -1,35 +1,17 @@
-"""Scene geometry helpers (Z axis, cube-axes ticks)."""
+"""Scene geometry helpers (Z axis, scene bounds)."""
 
 from __future__ import annotations
 
-from .cube_axes import (
-    CUBE_AXES_LABEL_FORMAT,
-    PYVISTA_CUBE_AXES_GRID,
-    PYVISTA_CUBE_AXES_LOCATION,
-    PYVISTA_CUBE_AXES_PADDING,
-    PYVISTA_CUBE_AXES_TICKS,
-    PYVISTA_CUBE_Z_LABEL_FORMAT,
-    PlanCubeAxesController,
-    apply_plan_cube_axis_labels,
-    apply_pyvista_cube_axes_style,
-    cube_axes_ranges,
-    disable_pyvista_cube_axes_label_lod,
-    heal_plan_cube_axes,
-    invert_z_cube_axis_tick_labels,
-    normalize_cube_axes_label_counts,
-    plan_cube_scene_bounds_and_axes_ranges,
-    pin_pyvista_cube_bounds,
-    pin_xy_cube_axis_tick_endpoints,
-    pyvista_show_bounds_kwargs,
-    refresh_pyvista_cube_axes,
-    z_labels_inverted,
-)
-from .proton_csda_water import (
+from spot_check.geometry.proton_csda_water import (
     normalize_z_depth_metric,
     proton_csda_water_range_mm,
     proton_water_depth_mm,
 )
-from .z_axis import (
+from spot_check.geometry.scene_bounds import (
+    cube_axes_ranges,
+    plan_cube_scene_bounds_and_axes_ranges,
+)
+from spot_check.geometry.z_axis import (
     apply_z_display_to_comparison_clouds,
     cube_z_axis_label_endpoints,
     cube_z_axis_spec,
@@ -46,20 +28,8 @@ from .z_axis import (
 )
 
 __all__ = [
-    "CUBE_AXES_LABEL_FORMAT",
-    "PYVISTA_CUBE_AXES_GRID",
-    "PYVISTA_CUBE_AXES_LOCATION",
-    "PYVISTA_CUBE_AXES_PADDING",
-    "PYVISTA_CUBE_AXES_TICKS",
-    "PYVISTA_CUBE_Z_LABEL_FORMAT",
-    "PlanCubeAxesController",
-    "apply_plan_cube_axis_labels",
-    "apply_pyvista_cube_axes_style",
     "apply_z_display_to_comparison_clouds",
     "cube_axes_ranges",
-    "disable_pyvista_cube_axes_label_lod",
-    "heal_plan_cube_axes",
-    "invert_z_cube_axis_tick_labels",
     "cube_z_axis_label_endpoints",
     "cube_z_axis_spec",
     "cube_z_axis_spec_for_display",
@@ -69,17 +39,11 @@ __all__ = [
     "nominal_depth_to_scene_z_cube",
     "nominal_mev_column_to_scene_z",
     "nominal_mev_to_scene_z_mev_cube",
-    "normalize_cube_axes_label_counts",
+    "normalize_z_depth_metric",
     "plan_cube_scene_bounds_and_axes_ranges",
     "plan_depth_bounds_mm",
     "plan_depth_bounds_mm_config",
-    "z_display_config_for_plotter",
-    "normalize_z_depth_metric",
     "proton_csda_water_range_mm",
     "proton_water_depth_mm",
-    "pyvista_show_bounds_kwargs",
-    "pin_pyvista_cube_bounds",
-    "pin_xy_cube_axis_tick_endpoints",
-    "refresh_pyvista_cube_axes",
-    "z_labels_inverted",
+    "z_display_config_for_plotter",
 ]

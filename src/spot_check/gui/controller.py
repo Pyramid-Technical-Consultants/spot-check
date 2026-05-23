@@ -74,6 +74,7 @@ from spot_check.gui.pipeline import (
     is_acquisition_csv_file,
     pipeline_load_job,
 )
+from spot_check.gui.spot_info_popup import SpotInfoPopup, install_spot_popup_dismiss_filter
 from spot_check.gui.state import (
     apply_saved_window_layout,
     finish_saved_window_layout,
@@ -123,10 +124,10 @@ class SpotCheckController:
 
         central = QWidget()
         win.setCentralWidget(central)
-        outer = QHBoxLayout(central)
+        outer = QVBoxLayout(central)
         outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        outer.addWidget(splitter)
 
         vtk_host = QFrame()
         vtk_host.setMinimumWidth(320)
@@ -148,8 +149,10 @@ class SpotCheckController:
         vtk_view_layout.addWidget(vtk_placeholder)
         vtk_layout.addWidget(vtk_view_pane, 1)
 
-        timeline_bar = TimelinePlaybackBar(vtk_host)
-        vtk_layout.addWidget(timeline_bar)
+        spot_info_popup = SpotInfoPopup(vtk_view_pane)
+        install_spot_popup_dismiss_filter(vtk_view_pane, spot_info_popup)
+
+        timeline_bar = TimelinePlaybackBar(central)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -422,6 +425,15 @@ class SpotCheckController:
                 _time_speed0 = 1.0
         except (TypeError, ValueError):
             _time_speed0 = 1.0
+        try:
+            _time_window0 = float(
+                saved.get("time_slice_window_s", sc_const.TIME_SLICE_WINDOW_S_DEFAULT)
+            )
+            if not math.isfinite(_time_window0):
+                _time_window0 = float(sc_const.TIME_SLICE_WINDOW_S_DEFAULT)
+        except (TypeError, ValueError):
+            _time_window0 = float(sc_const.TIME_SLICE_WINDOW_S_DEFAULT)
+        _time_on0 = _bool_saved("time_slice_on", False)
 
         time_slice_qt_bindings: dict[str, object] = timeline_bar.bindings_dict()
         analysis.idle_time_slice_controls_qt(time_slice_qt_bindings)
@@ -509,6 +521,14 @@ class SpotCheckController:
                 _ts_speed_persist = float(timeline_bar.speed_multiplier())
             except (AttributeError, TypeError, ValueError):
                 _ts_speed_persist = _time_speed0
+            try:
+                _ts_window_persist = float(timeline_bar.window_seconds())
+            except (AttributeError, TypeError, ValueError):
+                _ts_window_persist = _time_window0
+            try:
+                _ts_on_persist = bool(timeline_bar.slice_enabled())
+            except (AttributeError, TypeError, ValueError):
+                _ts_on_persist = _time_on0
             save_gui_state(
                 dcm_path=e_dcm.text().strip(),
                 csv_path=e_csv.text().strip(),
@@ -541,9 +561,10 @@ class SpotCheckController:
                 view_projection_perspective=cb_view_proj.isChecked(),
                 slice_band_on=bool(slice_chk.isChecked()),
                 slice_band_center_i=_sb_ci_persist,
-                time_slice_on=True,
+                time_slice_on=_ts_on_persist,
                 time_slice_start_ms=_ts_start_persist,
                 time_slice_speed=_ts_speed_persist,
+                time_slice_window_s=_ts_window_persist,
             )
 
         def browse_dcm() -> None:
@@ -865,6 +886,8 @@ class SpotCheckController:
         splitter.setCollapsible(0, True)
         splitter.setCollapsible(1, False)
         splitter.setSizes([1000, 480])
+        outer.addWidget(splitter, 1)
+        outer.addWidget(timeline_bar)
 
         _sync_wet_shifter_ui()
         _sync_qa_lines()
@@ -905,6 +928,8 @@ class SpotCheckController:
             "slice_center_i": int(slice_sli.value()),
             "time_slice_start_ms": _time_start0,
             "time_slice_speed": _time_speed0,
+            "time_slice_window_s": _time_window0,
+            "time_slice_on": _time_on0,
         }
 
         def _apply_quick_view(view: str) -> None:
@@ -1055,11 +1080,9 @@ class SpotCheckController:
 
         def _hide_vtk_host_content() -> None:
             vtk_view_pane.hide()
-            timeline_bar.hide()
 
         def _show_vtk_host_content() -> None:
             vtk_view_pane.show()
-            timeline_bar.show()
 
         def _pin_load_overlay_on_top() -> None:
             _hide_vtk_host_content()
@@ -1182,13 +1205,21 @@ class SpotCheckController:
 
             _ts_start = int(_plot_cache.get("time_slice_start_ms", _time_start0))
             _ts_speed = float(_plot_cache.get("time_slice_speed", _time_speed0))
+            _ts_window = float(_plot_cache.get("time_slice_window_s", _time_window0))
+            _ts_on = bool(_plot_cache.get("time_slice_on", _time_on0))
             try:
                 if timeline_bar._slider.isEnabled():
                     _ts_start = int(timeline_bar.start_ms())
                     _ts_speed = float(timeline_bar.speed_multiplier())
+                    _ts_window = float(timeline_bar.window_seconds())
+                    _ts_on = bool(timeline_bar.slice_enabled())
             except (AttributeError, TypeError, ValueError):
                 pass
-            time_slice_init = {"slice_on": True, "start_ms": _ts_start}
+            time_slice_init = {
+                "slice_on": _ts_on,
+                "start_ms": _ts_start,
+                "window_s": _ts_window,
+            }
 
             layer_mode_req, _, _ = resolve_layer_assign_mode(ctx.layer_assign_mode)
             layer_mode_plot = str(_plot_cache.get("layer_mode_run") or layer_mode_req)
@@ -1246,6 +1277,42 @@ class SpotCheckController:
                 view_title = csv_display_name
             else:
                 view_title = "SpotCheck"
+
+            def _on_spot_picked(ev: object) -> None:
+                from spot_check.analysis.viz.spot_info import format_spot_info
+                from spot_check.analysis.viz.spot_pick import SpotPickEvent
+
+                if not isinstance(ev, SpotPickEvent):
+                    return
+                plotter = _plot_cache.get("plotter")
+                disp = getattr(plotter, "_spot_check_display_state", None) if plotter else None
+                rows = format_spot_info(
+                    ev.kind,
+                    ev.spot_index,
+                    planned_xyz=planned,
+                    measured_rows=measured,
+                    xlab="Fit B (mm)",
+                    ylab="Fit A (mm)",
+                    a_is_x=False,
+                    plan_mu=_plot_cache.get("plan_mu"),
+                    plan_fwhm_xy_mm=plan_fwhm_xy,
+                    plan_time_s=_plot_cache.get("plan_spot_time_s"),
+                    plan_spots_no_data=_plot_cache.get("plan_spots_no_data"),
+                    qa_mode=ctx.qa_mode,
+                    display_state=disp,
+                )
+                title = (
+                    f"Plan spot {ev.spot_index + 1}"
+                    if ev.kind == "plan"
+                    else f"Measured spot {ev.spot_index + 1}"
+                )
+                spot_info_popup.show_spot(
+                    title=title,
+                    rows=rows,
+                    local_x=ev.display_x,
+                    local_y=ev.display_y,
+                )
+
             pl = p.show_comparison_3d_pyvista(
                 planned,
                 measured,
@@ -1294,6 +1361,7 @@ class SpotCheckController:
                 time_slice_speed=_ts_speed,
                 plan_spots_no_data=_plot_cache.get("plan_spots_no_data"),
                 plan_spot_time_s=_plot_cache.get("plan_spot_time_s"),
+                on_spot_picked=_on_spot_picked,
             )
             if _loading_gen is not None:
                 _pin_load_overlay_on_top()
@@ -1315,9 +1383,13 @@ class SpotCheckController:
                 if timeline_bar._slider.isEnabled():
                     _plot_cache["time_slice_start_ms"] = int(timeline_bar.start_ms())
                     _plot_cache["time_slice_speed"] = float(timeline_bar.speed_multiplier())
+                    _plot_cache["time_slice_window_s"] = float(timeline_bar.window_seconds())
+                    _plot_cache["time_slice_on"] = bool(timeline_bar.slice_enabled())
             except (AttributeError, TypeError, ValueError):
                 _plot_cache["time_slice_start_ms"] = int(time_slice_init["start_ms"])
                 _plot_cache["time_slice_speed"] = float(_ts_speed)
+                _plot_cache["time_slice_window_s"] = float(_ts_window)
+                _plot_cache["time_slice_on"] = bool(time_slice_init["slice_on"])
             cache_note = (
                 ""
                 if need_data
@@ -1819,6 +1891,8 @@ class SpotCheckController:
         slice_sli.sliderReleased.connect(persist)
         timeline_bar._slider.sliderReleased.connect(persist)
         timeline_bar._combo_speed.currentIndexChanged.connect(lambda _i: persist())
+        timeline_bar._combo_window.currentIndexChanged.connect(lambda _i: persist())
+        timeline_bar._chk_slice.toggled.connect(lambda _c: persist())
 
         app.aboutToQuit.connect(persist)
 

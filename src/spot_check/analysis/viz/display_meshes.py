@@ -23,6 +23,7 @@ from spot_check.analysis.plan_qa import (
 from spot_check.analysis.pyvista_backend import pv, require_pyvista
 from spot_check.analysis.spatial import layer_nn_plan_xy_distances_and_expected_xyz
 from spot_check.analysis.viz.glyphs import (
+    _attach_spot_index,
     _measured_spot_sigma_glyph_mesh,
     _plan_spot_cross_mesh,
     _plan_spot_fwhm_glyph_mesh,
@@ -217,6 +218,7 @@ def build_spot_display_meshes(
     meas_sigma_final = (
         meas_sigma_all[meas_idx] if n_sig_src > 0 else np.zeros((0, 2), dtype=np.float64)
     )
+    meas_src_idx = meas_idx.copy()
     display_perf_note = ""
     n_m_pre_display = int(n_m)
     if plan_qa_coloring and n_m_pre_display > 80_000 and _cKDTree is None:
@@ -244,6 +246,7 @@ def build_spot_display_meshes(
         if meas_rgba_final is not None:
             meas_rgba_final = meas_rgba_final[sub]
         meas_sigma_final = meas_sigma_final[sub]
+        meas_src_idx = meas_src_idx[sub]
         n_m = int(sub.size)
     elif not want_sigma_glyphs and n_m_pre_display > DISPLAY_POINT_MESH_TARGET:
         step = int(math.ceil(n_m_pre_display / DISPLAY_POINT_MESH_TARGET))
@@ -261,14 +264,17 @@ def build_spot_display_meshes(
         if meas_rgba_final is not None:
             meas_rgba_final = meas_rgba_final[sub]
         meas_sigma_final = meas_sigma_final[sub]
+        meas_src_idx = meas_src_idx[sub]
         n_m = int(sub.size)
 
     meas_sigma_glyphs = want_sigma_glyphs and n_m > 0
+    meas_spot_idx = meas_src_idx.astype(np.int32)
 
     def _make_measured_view_mesh(
         pts: np.ndarray,
         sig_xy: np.ndarray,
         rgba: np.ndarray | None,
+        spot_idx: np.ndarray,
     ) -> Any:
         if pts.shape[0] == 0:
             return pv.PolyData(np.zeros((0, 3), dtype=np.float64))
@@ -278,16 +284,22 @@ def build_spot_display_meshes(
                 sig_xy,
                 sigma_scale=sig_scale_eff,
                 rgba=rgba,
+                spot_indices=spot_idx,
             )
         m = pv.PolyData(pts)
         if rgba is not None:
             m["rgba"] = rgba
+        _attach_spot_index(m, spot_idx)
         return m
 
-    meas_view0 = _make_measured_view_mesh(meas_pts_final, meas_sigma_final, meas_rgba_final)
+    meas_view0 = _make_measured_view_mesh(
+        meas_pts_final, meas_sigma_final, meas_rgba_final, meas_spot_idx
+    )
 
     plan_cloud = pv.PolyData(plan_pts)
     n_plan = int(plan_pts.shape[0])
+    if n_plan:
+        _attach_spot_index(plan_cloud, np.arange(n_plan, dtype=np.int32))
     if plan_spots_no_data is not None:
         no_data = np.asarray(plan_spots_no_data, dtype=bool).reshape(-1)
         if int(no_data.shape[0]) != n_plan:
@@ -343,6 +355,7 @@ def build_spot_display_meshes(
         "meas_time_final": meas_time_final,
         "plan_time_final": plan_time_final,
         "meas_sigma_final": meas_sigma_final,
+        "meas_src_idx": meas_src_idx,
         "meas_rgba_final": meas_rgba_final,
         "dist_qa_draw": dist_qa_draw,
         "exp_xyz_qa_draw": exp_xyz_qa_draw,

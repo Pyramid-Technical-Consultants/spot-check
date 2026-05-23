@@ -39,5 +39,6 @@ DEFAULT_GUI_STATE: dict[str, object] = {
     "time_slice_on": False,
     "time_slice_start_ms": 0,
     "time_slice_speed": 1.0,
+    "time_slice_window_s": sc_const.TIME_SLICE_WINDOW_S_DEFAULT,
     "gui_state_schema_version": 1,
 }

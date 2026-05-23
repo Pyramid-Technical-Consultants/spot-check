@@ -14,6 +14,7 @@ from spot_check.analysis.viz.data import (
     _nominal_layer_index_band_mev,
     _time_slice_mask,
     _timeline_range_ms,
+    is_full_time_slice_window,
     prepare_comparison_3d_data,
 )
 from spot_check.analysis.viz.display_meshes import build_spot_display_meshes
@@ -37,11 +38,19 @@ from spot_check.analysis.viz.embed import (
     idle_time_slice_controls_qt,
 )
 from spot_check.analysis.viz.glyphs import (
+    _attach_spot_index,
     _disc_point_add_mesh_kwargs,
     _measured_spot_sigma_glyph_mesh,
     _plan_spot_cross_mesh,
     _plan_spot_fwhm_glyph_mesh,
     _plan_spot_point_mesh,
+)
+from spot_check.analysis.viz.scene_grid import PlanSceneGridController
+from spot_check.analysis.viz.spot_pick import (
+    SpotPickCallback,
+    disconnect_spot_pick,
+    update_spot_pick_plan_visibility,
+    wire_spot_double_click_pick,
 )
 from spot_check.constants import TIME_SLICE_WINDOW_S_DEFAULT
 
@@ -120,6 +129,7 @@ def show_comparison_3d_pyvista(
     plan_spots_no_data: np.ndarray | None = None,
     plan_spot_time_s: np.ndarray | None = None,
     time_slice_speed: float = 1.0,
+    on_spot_picked: SpotPickCallback | None = None,
 ) -> Any:
     require_pyvista()
 
@@ -235,19 +245,28 @@ def show_comparison_3d_pyvista(
         pts: np.ndarray,
         sig_xy: np.ndarray,
         rgba: np.ndarray | None,
+        spot_idx: np.ndarray | None = None,
     ) -> Any:
         if pts.shape[0] == 0:
             return pv.PolyData(np.zeros((0, 3), dtype=np.float64))
+        if spot_idx is None:
+            src = _display_state.get("meas_src_idx")
+            if src is not None and int(np.asarray(src).shape[0]) == int(pts.shape[0]):
+                spot_idx = np.asarray(src, dtype=np.int32).reshape(-1)
+            else:
+                spot_idx = np.arange(int(pts.shape[0]), dtype=np.int32)
         if _display_state["meas_sigma_glyphs"]:
             return _measured_spot_sigma_glyph_mesh(
                 pts,
                 sig_xy,
                 sigma_scale=float(_display_state["sig_scale_eff"]),
                 rgba=rgba,
+                spot_indices=spot_idx,
             )
         m = pv.PolyData(pts)
         if rgba is not None:
             m["rgba"] = rgba
+        _attach_spot_index(m, spot_idx)
         return m
 
     plan_e_mev = np.asarray(prep.plan_xyz[:, 2], dtype=np.float64).reshape(-1)
@@ -263,7 +282,7 @@ def show_comparison_3d_pyvista(
     x_min, x_max = float(np.min(x_all)), float(np.max(x_all))
     y_min, y_max = float(np.min(y_all)), float(np.max(y_all))
 
-    cube_axes = PlanCubeAxesController(
+    scene_grid = PlanSceneGridController(
         xlab=prep.xlab,
         ylab=prep.ylab,
         x_min=x_min,
@@ -284,23 +303,14 @@ def show_comparison_3d_pyvista(
     pl = reuse_plotter
     saved_camera_position: Any = None
     if pl is not None:
-        PlanCubeAxesController.detach_guard_on_plotter(pl)
+        disconnect_spot_pick(pl)
+        PlanSceneGridController.clear_on_plotter(pl)
         if reuse_camera:
             try:
                 saved_camera_position = pl.camera_position
             except Exception:
                 saved_camera_position = None
-        # pl.clear() does not remove vtkCubeAxesActor; stale axes keep wrong Z ticks.
-        try:
-            pl.remove_bounds_axes()
-        except Exception:
-            pass
         pl.clear()
-        try:
-            if pl.renderer.cube_axes_actor is not None:
-                pl.remove_bounds_axes()
-        except Exception:
-            pass
     if pl is None:
         pl = pv.Plotter(window_size=(1440, 960), title="Plan vs measured (PyVista)")
     pl.set_background("#0d1117")
@@ -319,6 +329,24 @@ def show_comparison_3d_pyvista(
         _display_state.get("plan_has_data_mask", np.ones(plan_pts.shape[0], dtype=bool)),
         dtype=bool,
     )
+    _plan_vis_ref: dict[str, np.ndarray | None] = {
+        "mask": (
+            np.ones(int(plan_pts.shape[0]), dtype=bool)
+            if int(plan_pts.shape[0]) > 0
+            else None
+        )
+    }
+
+    def _rewire_spot_pick() -> None:
+        wire_spot_double_click_pick(
+            pl,
+            plan_actor=plan_actor,
+            meas_actor=meas_actor,
+            plan_missing_actor=plan_missing_actor,
+            plan_visible_mask=_plan_vis_ref.get("mask"),
+            plan_has_data_mask=plan_has_data_mask if int(plan_pts.shape[0]) else None,
+            on_picked=on_spot_picked,
+        )
     if plan_pts.shape[0] > 0:
         circle_vis0 = plan_has_data_mask
         if plan_rendered_fwhm_glyphs and plan_glyphs is not None:
@@ -417,7 +445,6 @@ def show_comparison_3d_pyvista(
                 pickable=False,
             )
 
-    meas_view0 = _make_measured_view_mesh(meas_pts_final, meas_sigma_final, meas_rgba_final)
     meas_actor: Any | None = None
     if n_m > 0:
         if meas_sigma_glyphs:
@@ -478,16 +505,10 @@ def show_comparison_3d_pyvista(
         if "center_i" in slice_band_init:
             ci0 = int(slice_band_init["center_i"])
             slice_cfg["center_i"] = int(np.clip(ci0, 0, max(0, n_plan_layers - 1)))
-    _time_window_s = float(TIME_SLICE_WINDOW_S_DEFAULT)
     _plan_time_for_rng = np.asarray(
         _display_state.get("plan_time_final", np.zeros(0, dtype=np.float64)),
         dtype=np.float64,
     ).reshape(-1)
-    _time_rng = _timeline_range_ms(
-        meas_time_final,
-        _plan_time_for_rng if _plan_time_for_rng.size else None,
-        window_s=_time_window_s,
-    )
     _timeline_parts: list[np.ndarray] = []
     if meas_time_final.size:
         _timeline_parts.append(meas_time_final.reshape(-1))
@@ -496,19 +517,39 @@ def show_comparison_3d_pyvista(
     _timeline_time_s = (
         np.concatenate(_timeline_parts) if _timeline_parts else np.zeros(0, dtype=np.float64)
     )
-    _time_start_default_ms = int(_time_rng[0]) if _time_rng is not None else 0
+    _time_start_default_ms = 0
     time_slice_cfg: dict[str, bool | int | float] = {
         "slice_on": False,
         "start_ms": _time_start_default_ms,
+        "window_s": float(TIME_SLICE_WINDOW_S_DEFAULT),
     }
     if time_slice_init:
         if "slice_on" in time_slice_init:
             time_slice_cfg["slice_on"] = bool(time_slice_init["slice_on"])
         if "start_ms" in time_slice_init:
-            sm0 = int(time_slice_init["start_ms"])
-            if _time_rng is not None:
-                sm0 = int(np.clip(sm0, _time_rng[0], _time_rng[1]))
-            time_slice_cfg["start_ms"] = sm0
+            time_slice_cfg["start_ms"] = int(time_slice_init["start_ms"])
+        if "window_s" in time_slice_init:
+            time_slice_cfg["window_s"] = float(time_slice_init["window_s"])
+
+    def _cfg_window_s() -> float:
+        return float(time_slice_cfg.get("window_s", TIME_SLICE_WINDOW_S_DEFAULT))
+
+    _time_rng = _timeline_range_ms(
+        meas_time_final,
+        _plan_time_for_rng if _plan_time_for_rng.size else None,
+        window_s=_cfg_window_s(),
+    )
+    if _time_rng is not None:
+        _time_start_default_ms = int(_time_rng[0])
+        sm0 = int(time_slice_cfg["start_ms"])
+        time_slice_cfg["start_ms"] = int(np.clip(sm0, _time_rng[0], _time_rng[1]))
+    else:
+        time_slice_cfg["start_ms"] = int(time_slice_cfg.get("start_ms", 0))
+
+    def _timeline_bounds_s() -> tuple[float, float]:
+        if _time_rng is None:
+            return 0.0, 0.0
+        return float(_time_rng[2]), float(_time_rng[3])
     # Filled when embedding in Qt so slice callback can repaint the QVTK widget after updates.
     _qt_vtk_embed: dict[str, Any] = {"widget": None}
 
@@ -520,10 +561,8 @@ def show_comparison_3d_pyvista(
             return np.asarray(plan_pts[:, 2], dtype=np.float64).reshape(-1)
         return np.zeros(0, dtype=np.float64)
 
-    cube_axes.install_guard(pl)
-
     def _reset_camera_full_plan_bounds() -> None:
-        sb = cube_axes.camera_bounds()
+        sb = scene_grid.camera_bounds()
         try:
             if sb is not None:
                 pl.reset_camera(bounds=sb)
@@ -618,11 +657,12 @@ def show_comparison_3d_pyvista(
             ).reshape(-1)
             if plan_t.size == n_plan:
                 start_s = float(int(time_slice_cfg["start_ms"])) / 1000.0
-                pm_full = (
-                    pm_full & _time_slice_mask(plan_t, start_s, window_s=_time_window_s)
-                    if pm_full.size
-                    else _time_slice_mask(plan_t, start_s, window_s=_time_window_s)
+                t_lo, t_hi = _timeline_bounds_s()
+                win = _cfg_window_s()
+                t_mask = _time_slice_mask(
+                    plan_t, start_s, window_s=win, t_min=t_lo, t_max=t_hi
                 )
+                pm_full = pm_full & t_mask if pm_full.size else t_mask
         _refresh_plan_actor(pm_full)
 
         n_meas_draw = int(_display_state["meas_pts_final"].shape[0])
@@ -645,10 +685,14 @@ def show_comparison_3d_pyvista(
                 )
             if time_slice_active:
                 start_s = float(int(time_slice_cfg["start_ms"])) / 1000.0
+                t_lo, t_hi = _timeline_bounds_s()
+                win = _cfg_window_s()
                 mm_full &= _time_slice_mask(
                     _display_state["meas_time_final"],
                     start_s,
-                    window_s=_time_window_s,
+                    window_s=win,
+                    t_min=t_lo,
+                    t_max=t_hi,
                 )
 
             if meas_actor is not None:
@@ -662,16 +706,22 @@ def show_comparison_3d_pyvista(
                         if _display_state["meas_rgba_final"] is not None
                         else None
                     )
+                    sub_idx = np.asarray(
+                        _display_state.get("meas_src_idx", np.arange(n_meas_draw, dtype=np.int64)),
+                        dtype=np.int32,
+                    ).reshape(-1)[mm_full]
                     _set_actor_polydata(
                         meas_actor,
-                        _make_measured_view_mesh(sub_pts, sub_sig, sub_rgba),
+                        _make_measured_view_mesh(sub_pts, sub_sig, sub_rgba, sub_idx),
                     )
 
+        update_spot_pick_plan_visibility(pl, pm_full)
+        _plan_vis_ref["mask"] = pm_full.copy() if pm_full.size else pm_full
         return mm_full
 
     def _apply_nominal_energy_slice() -> None:
         nonlocal line_warn_actor, line_fail_actor
-        if not cube_axes.ready:
+        if not scene_grid.ready:
             return
         mm_full = _update_slice_meshes()
         if line_warn_actor is not None:
@@ -713,7 +763,6 @@ def show_comparison_3d_pyvista(
                     opacity=0.7,
                     pickable=False,
                 )
-        cube_axes.refresh(pl, apply_style=False)
         pl.render()
 
     def _refresh_slice_view() -> None:
@@ -968,14 +1017,22 @@ def show_comparison_3d_pyvista(
     if _time_rng is not None:
         if bool(time_slice_cfg["slice_on"]):
             _t0 = float(int(time_slice_cfg["start_ms"])) / 1000.0
-            _t1 = _t0 + _time_window_s
-            caption += (
-                f" Time window: [{_t0:.3f}, {_t1:.3f}] s on plan and measured spots"
-                " (combines with layer band when both are on)."
-            )
+            _win = _cfg_window_s()
+            if is_full_time_slice_window(_win):
+                _t_lo, _ = _timeline_bounds_s()
+                caption += (
+                    f" Time window: all since start [{_t_lo:.3f}, {_t0:.3f}] s"
+                    " on plan and measured spots."
+                )
+            else:
+                _t1 = _t0 + _win
+                caption += (
+                    f" Time window: [{_t0:.3f}, {_t1:.3f}] s on plan and measured spots"
+                    " (combines with layer band when both are on)."
+                )
         if embed_qt is not None:
             caption += (
-                " Timeline playback bar (bottom of 3D view): 1 s acquisition window."
+                " Timeline bar (bottom): toggle Time, pick window width, play/scrub."
             )
         elif embed_parent is None and embed_qt is None:
             caption += (
@@ -994,19 +1051,19 @@ def show_comparison_3d_pyvista(
     pl.add_text(title, position="upper_left", font_size=11, color="#f0f6fc", shadow=True)
     pl.add_text(caption, position="lower_left", font_size=9, color="#8b949e")
 
-    # Cube axes last: same as ``scripts/cube_axes_10_cube_test.py`` — ``bounds`` and
-    # ``axes_ranges`` are identical, ``mesh=None``, ``location='outer'``, ``padding=0``.
+    # Scene grid last so it sits above spot meshes; camera uses the same scene bounds.
     _sanity_env = os.environ.get("SPOT_CHECK_CUBE_AXES_SANITY", "").strip().lower()
     use_cube_sanity = (
         bool(cube_axes_sanity)
         if cube_axes_sanity is not None
         else _sanity_env in ("1", "true", "yes", "on")
     )
-    cube_axes.sanity = use_cube_sanity
-    cube_axes.ready = True
+    scene_grid.sanity = use_cube_sanity
+    scene_grid.ready = True
     _apply_nominal_energy_slice()
-    cube_axes.show(pl, _plan_scene_z_for_cube_axis(), _plan_energies_mev_for_cube_axis())
-    sb = cube_axes.camera_bounds()
+    scene_grid.show(pl, _plan_scene_z_for_cube_axis(), _plan_energies_mev_for_cube_axis())
+    pl._spot_check_scene_grid = scene_grid  # noqa: SLF001
+    sb = scene_grid.camera_bounds()
     if sb is not None:
         try:
             pl.reset_camera(bounds=sb)
@@ -1072,7 +1129,7 @@ def show_comparison_3d_pyvista(
                     time_slice_qt,
                     time_slice_cfg,
                     _timeline_time_s,
-                    window_s=_time_window_s,
+                    window_s=_cfg_window_s(),
                     apply_slice=_refresh_slice_view,
                     saved_speed=float(time_slice_speed),
                 )
@@ -1117,7 +1174,7 @@ def show_comparison_3d_pyvista(
                         time_slice_tk,
                         time_slice_cfg,
                         _timeline_time_s,
-                        window_s=_time_window_s,
+                        window_s=_cfg_window_s(),
                         apply_slice=_refresh_slice_view,
                     )
                 else:
@@ -1374,8 +1431,13 @@ def show_comparison_3d_pyvista(
         _sync_plan_actor_for_display()
         _sync_meas_actor_for_display()
         _apply_nominal_energy_slice()
+        _rewire_spot_pick()
 
     pl._spot_check_apply_display = _spot_check_apply_display
+    pl._spot_check_display_state = _display_state
+
+    _rewire_spot_pick()
+
     return pl
 
 

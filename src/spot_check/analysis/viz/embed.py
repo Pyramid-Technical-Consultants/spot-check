@@ -444,9 +444,12 @@ def _wire_time_slice_controls_qt(
 ) -> None:
     bar = time_slice_qt.get("bar")
     if bar is not None:
-        bar.wire(time_slice_cfg, meas_time_s, window_s=window_s, apply_slice=apply_slice,
-                 saved_speed=saved_speed)
-        time_slice_cfg["slice_on"] = True
+        bar.wire(
+            time_slice_cfg,
+            meas_time_s,
+            apply_slice=apply_slice,
+            saved_speed=saved_speed,
+        )
         return
 
     chk: Any = time_slice_qt["check"]

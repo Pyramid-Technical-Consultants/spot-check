@@ -124,14 +124,28 @@ def _energy_slice_mask(energy_mev: np.ndarray, lo_mev: float, hi_mev: float) -> 
     return (e >= a) & (e <= b)
 
 
+def is_full_time_slice_window(window_s: float) -> bool:
+    """True for cumulative ``All`` mode (start → current playhead)."""
+    from spot_check.constants import TIME_SLICE_WINDOW_FULL
+
+    return float(window_s) == float(TIME_SLICE_WINDOW_FULL)
+
+
 def _time_slice_mask(
     time_s: np.ndarray,
     start_s: float,
     *,
     window_s: float,
+    t_min: float | None = None,
+    t_max: float | None = None,
 ) -> np.ndarray:
     """Inclusive acquisition-time window ``[start_s, start_s + window_s]``."""
     t = np.asarray(time_s, dtype=np.float64).reshape(-1)
+    if is_full_time_slice_window(window_s):
+        ok = np.isfinite(t)
+        hi = float(start_s)
+        lo = float(t_min) if t_min is not None else hi
+        return ok & (t >= lo) & (t <= hi)
     lo = float(start_s)
     hi = lo + float(window_s)
     return np.isfinite(t) & (t >= lo) & (t <= hi)
@@ -149,8 +163,11 @@ def _time_slice_range_ms(
         return None
     t_min = float(np.min(t[ok]))
     t_max = float(np.max(t[ok]))
-    win = max(float(window_s), 1e-9)
     start_min_ms = int(math.floor(t_min * 1000.0))
+    if is_full_time_slice_window(window_s):
+        start_max_ms = int(math.floor(t_max * 1000.0))
+        return start_min_ms, start_max_ms, t_min, t_max
+    win = max(float(window_s), 1e-9)
     start_max_ms = int(math.floor(max(t_min, t_max - win) * 1000.0))
     if start_max_ms < start_min_ms:
         start_max_ms = start_min_ms

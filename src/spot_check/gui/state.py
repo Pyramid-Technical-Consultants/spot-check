@@ -83,6 +83,7 @@ def save_gui_state(
     time_slice_on: bool,
     time_slice_start_ms: int,
     time_slice_speed: float = 1.0,
+    time_slice_window_s: float = 1.0,
 ) -> None:
     path = gui_state_file()
     try:
@@ -123,6 +124,7 @@ def save_gui_state(
                     "time_slice_on": time_slice_on,
                     "time_slice_start_ms": time_slice_start_ms,
                     "time_slice_speed": float(time_slice_speed),
+                    "time_slice_window_s": float(time_slice_window_s),
                     "gui_state_schema_version": int(DEFAULT_GUI_STATE["gui_state_schema_version"]),
                 },
                 indent=2,

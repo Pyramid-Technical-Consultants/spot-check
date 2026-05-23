@@ -432,12 +432,21 @@ def test_slice_band_hides_plan_spots_invisibly(monkeypatch: pytest.MonkeyPatch) 
 
 def test_time_slice_mask_window() -> None:
     from spot_check.analysis.viz.data import _time_slice_mask
+    from spot_check.constants import TIME_SLICE_WINDOW_FULL
 
     t = np.array([0.0, 0.4, 1.1, 1.9, 2.0], dtype=np.float64)
     m = _time_slice_mask(t, 0.0, window_s=1.0)
     assert list(m) == [True, True, False, False, False]
     m1 = _time_slice_mask(t, 1.0, window_s=1.0)
     assert list(m1) == [False, False, True, True, True]
+    m_all = _time_slice_mask(
+        t, 1.0, window_s=TIME_SLICE_WINDOW_FULL, t_min=0.0, t_max=2.0
+    )
+    assert list(m_all) == [True, True, False, False, False]
+    m_all_end = _time_slice_mask(
+        t, 2.0, window_s=TIME_SLICE_WINDOW_FULL, t_min=0.0, t_max=2.0
+    )
+    assert list(m_all_end) == [True, True, True, True, True]
 
 
 def test_time_slice_hides_out_of_window_measured(
@@ -644,5 +653,85 @@ def test_show_comparison_3d_pyvista_position_qa_and_error_lines(
             reuse_plotter=pl,
             reembed_qt=False,
         )
+    finally:
+        pl.close()
+
+
+def test_spot_index_on_plan_point_and_glyph_meshes() -> None:
+    from spot_check.analysis.viz.glyphs import (
+        _instanced_axis_aligned_ellipsoids,
+        _plan_spot_point_mesh,
+    )
+
+    plan_pts = np.array([[0.0, 0.0, 100.0], [1.0, 2.0, 100.0]], dtype=np.float64)
+    pts = _plan_spot_point_mesh(plan_pts)
+    assert np.array_equal(pts["spot_index"], np.array([0, 1], dtype=np.int32))
+
+    semi = np.array([[1.0, 1.0, 0.1], [2.0, 2.0, 0.1]], dtype=np.float64)
+    glyphs = _instanced_axis_aligned_ellipsoids(plan_pts, semi)
+    gidx = np.asarray(glyphs["spot_index"], dtype=np.int32)
+    assert gidx.shape[0] == int(glyphs.n_points)
+    assert set(np.unique(gidx).tolist()) == {0, 1}
+
+
+def test_format_spot_info_plan_and_measured() -> None:
+    from spot_check.analysis.viz.spot_info import format_spot_info
+
+    planned = [(0.0, 0.0, 100.0), (1.0, 0.0, 100.0)]
+    measured = [(0.1, 0.2, 0.0, 1.5, 0, 0.3, 0.4)]
+    plan_rows = format_spot_info(
+        "plan",
+        0,
+        planned_xyz=planned,
+        measured_rows=measured,
+        xlab="Fit B (mm)",
+        ylab="Fit A (mm)",
+        a_is_x=False,
+    )
+    labels = [r.label for r in plan_rows]
+    assert "Plan spot" in [r.value for r in plan_rows]
+    assert "Index" in labels
+    assert "Nominal energy" in labels
+
+    meas_rows = format_spot_info(
+        "measured",
+        0,
+        planned_xyz=planned,
+        measured_rows=measured,
+        xlab="Fit B (mm)",
+        ylab="Fit A (mm)",
+        a_is_x=False,
+    )
+    meas_labels = [r.label for r in meas_rows]
+    assert "Measured spot" in [r.value for r in meas_rows]
+    assert "Fit A" in meas_labels
+    assert "Plan XY distance" in meas_labels
+
+
+def test_wire_spot_double_click_pick_registers_observer(monkeypatch: pytest.MonkeyPatch) -> None:
+    import pyvista as pv
+
+    pl = pv.Plotter(off_screen=True)
+    monkeypatch.setattr(pl, "show", lambda *args, **kwargs: None)
+    picked: list[object] = []
+
+    def _cb(ev: object) -> None:
+        picked.append(ev)
+
+    try:
+        measured = [(0.0, 0.0, 0.0, 1.0, 0), (5.0, 0.0, 0.0, 1.0, 0)]
+        analysis.show_comparison_3d_pyvista(
+            list(MINIMAL_PLANNED_XYZ),
+            measured,
+            title="pick wire smoke",
+            a_is_x=False,
+            scale_plan_spots_by_dicom_fwhm=False,
+            reuse_plotter=pl,
+            reembed_qt=False,
+            on_spot_picked=_cb,
+        )
+        ctx = getattr(pl, "_spot_check_pick", None)
+        assert ctx is not None
+        assert ctx.get("observer_id") is not None
     finally:
         pl.close()

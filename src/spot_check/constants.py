@@ -18,6 +18,8 @@ from typing import Final
 TIME_LAYER_GAP_S_DEFAULT: Final[float] = 0.2
 # 3D time slicer: measured spots visible when acquisition time is in [start, start + window].
 TIME_SLICE_WINDOW_S_DEFAULT: Final[float] = 1.0
+# Sentinel in ``time_slice_cfg["window_s"]``: cumulative from acquisition start through playhead.
+TIME_SLICE_WINDOW_FULL: Final[float] = -1.0
 
 # After a long Δt: same-spot synchrotron refill only if post-gap XY is this close (mm, plan frame).
 REFILL_SAME_SPOT_XY_TOLERANCE_MM: Final[float] = 3.0
@@ -104,6 +106,15 @@ BOUNDS_XY_LABELS_MAX: Final[int] = 11
 BOUNDS_Z_TICK_MM_DEFAULT: Final[float] = 5.0
 # Cube-axes Z when it shows nominal energy (MeV); linspace step target (~MeV, not mm).
 BOUNDS_Z_TICK_MEV_DEFAULT: Final[float] = 5.0
+# Custom scene grid: nudge endpoint labels past the line (mm, world XY).
+SCENE_GRID_LABEL_ENDPOINT_PAD_MM: Final[float] = 4.0
+# Drop XY labels slightly below the grid plane so side views avoid line overlap.
+SCENE_GRID_LABEL_BELOW_PLANE_MM: Final[float] = 1.0
+SCENE_GRID_LABEL_FORMAT: Final[str] = "%.0f"
+SCENE_GRID_LABEL_OPACITY: Final[float] = 0.92
+SCENE_GRID_LINE_TUBE_RADIUS_MM: Final[float] = 0.06
+SCENE_GRID_MINOR_OPACITY_SCALE: Final[float] = 0.3
+SCENE_GRID_MINOR_TICK_MM: Final[float] = 10.0
 
 # --- Large-scene 3D display (GPU / mesh build budget) -----------------------------
 # Each FWHM/σ glyph instance expands to a full sphere mesh; cap avoids GPU melt.
